@@ -367,6 +367,28 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('no form field is keyed `attachments`', clash.length === 0, clash.join(', '));
 }
 
+// ---- Global search ---------------------------------------------------------
+{
+  const G = await import('../src/lib/search.js');
+  const leads = [
+    { id: '1', customerName: 'Dana Miller', companyName: 'Miller Excavating', phone: '(317) 555-0104', contactEmail: 'dana@miller.com', zip: '46225', createdDate: '2026-09-01' },
+    { id: '2', customerName: 'Sam Danaher', companyName: '', phone: '317-555-0199', contactEmail: 'sam@ex.com', zip: '47401', createdDate: '2026-09-20' },
+    { id: '3', customerName: 'José Ortega', companyName: 'Ortega Lawn', phone: '', contactEmail: '', zip: '46075', createdDate: '2026-08-01' },
+  ];
+  const ids = (xs) => xs.map(x => x.id).join(',');
+  check('search: name prefix ranks first', ids(G.searchLeads(leads, 'dana')) === '1,2', ids(G.searchLeads(leads, 'dana')));
+  check('search: phone digits ignore formatting', ids(G.searchLeads(leads, '3175550104')) === '1');
+  check('search: partial phone', ids(G.searchLeads(leads, '555-0199')) === '2');
+  check('search: every word must match', ids(G.searchLeads(leads, 'miller excav')) === '1' && G.searchLeads(leads, 'miller ortega').length === 0);
+  check('search: accents ignored', ids(G.searchLeads(leads, 'jose')) === '3');
+  check('search: zip', ids(G.searchLeads(leads, '47401')) === '2');
+  check('search: empty query finds nothing', G.searchLeads(leads, '   ').length === 0);
+  check('search: trade-in by serial', G.searchTradeIns([{ id: 't', serial: 'B7E811386', make: 'Bobcat' }], 'b7e811').length === 1);
+  check('search: request by customer', G.searchRequests([{ id: 'r', customerName: 'Greenfield Street Dept', requestTypes: ['Delivery'] }], 'greenfield').length === 1);
+  check('search: finance by lender', G.searchFinance([{ id: 'f', customerName: 'X', admin: { lenderName: 'Wells Fargo' } }], 'wells').length === 1);
+  check('search: caps results', G.searchLeads(Array.from({ length: 20 }, (_, i) => ({ id: String(i), customerName: 'Pat ' + i })), 'pat').length === 8);
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

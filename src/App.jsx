@@ -53,6 +53,7 @@ import {
   submittalNeedsFinance, financeFromSubmittal, isOwnRecordVisible,
   ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_FILES, ATTACHMENT_ACCEPT, checkAttachment, formatBytes
 } from './lib/pipeline';
+import { searchAll } from './lib/search';
 import { uploadAttachments, attachmentUrl, deleteAttachmentFile } from './lib/attachments';
 
 const DEFAULT_CONFIG = {
@@ -1037,6 +1038,9 @@ export default function BobcatIndyCRM() {
   const [currentUserId, setCurrentUserId] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [selectedLead, setSelectedLead] = useState(null);
+  // A record to open on arrival — set by the top-bar search. `leadId` means it
+  // opens inside that lead's panel; otherwise in its Back Office list.
+  const [focusRecord, setFocusRecord] = useState(null);
   const [toast, setToast] = useState(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   // One-shot signal sent when a stat chip is clicked. LeadsView consumes it and clears.
@@ -1303,6 +1307,35 @@ export default function BobcatIndyCRM() {
   const visibleArchivedLeads = useMemo(() => !currentUser ? [] : archivedLeads.filter(l =>
     isLeadVisibleInStage(l, STAGE_COMPLETED, currentUser) || isCreatedByUser(l, currentUser.id)),
   [archivedLeads, currentUser]);
+
+  // What the top-bar search looks through: exactly what this user can open.
+  // Admins: every lead, junk and archived included. Reps: the leads on their
+  // dashboards plus their archived ones, and their own records.
+  const searchScope = useMemo(() => {
+    if (!currentUser) return { leads: [], requests: [], tradeIns: [], finance: [] };
+    const leadsForSearch = currentUser.role === 'admin'
+      ? leads
+      : [...Object.values(stageLeads).flat(), ...visibleArchivedLeads];
+    return { leads: leadsForSearch, ...visibleRecords };
+  }, [currentUser, leads, stageLeads, visibleArchivedLeads, visibleRecords]);
+  const searchLeadIds = useMemo(() => new Set(searchScope.leads.map(l => l.id)), [searchScope]);
+
+  const stepLabelOf = (lead) => {
+    if (isLeadArchived(lead, new Date(), config)) return 'Archived';
+    if (lead.status === JUNK_STATUS) return 'Junk';
+    const st = stageOfLead(lead, getClosedStatuses(config));
+    return PIPELINE_STAGES.find(s => s.id === st)?.label || '';
+  };
+
+  // A record picked in search opens inside its customer's lead panel when the
+  // user can see that lead; otherwise in its Back Office list.
+  const openRecordFromSearch = (kind, rec) => {
+    const lead = rec.leadId && searchLeadIds.has(rec.leadId) ? leads.find(l => l.id === rec.leadId) : null;
+    setFocusRecord({ kind, id: rec.id, leadId: lead ? lead.id : null });
+    if (lead) { setSelectedLead(lead); return; }
+    setSelectedLead(null);
+    goTo(kind === 'tradeIns' ? 'trade-ins' : kind);
+  };
 
   // Where a given lead lives, for "take me to it" navigation after adding one.
   const stageViewOf = (lead) => {
@@ -2247,6 +2280,16 @@ export default function BobcatIndyCRM() {
             currentUser={currentUser} onSignOut={signOut}
             onMobileMenuOpen={() => setMobileNavOpen(true)}
             onChipFilter={applyChipFilter}
+            search={
+              <GlobalSearch
+                scope={searchScope}
+                users={configWithUsers.users || []}
+                stepLabelOf={stepLabelOf}
+                onOpenLead={(l) => { setFocusRecord(null); setSelectedLead(l); }}
+                onOpenRecord={openRecordFromSearch}
+                onActivate={() => { setSelectedLead(null); setFocusRecord(null); }}
+              />
+            }
           />
 
           <div className="px-4 md:px-8 py-4 md:py-6">
@@ -2326,6 +2369,7 @@ export default function BobcatIndyCRM() {
             {view === 'requests' && (
               <RequestsView
                 requests={visibleRequests} leads={leads} config={configWithUsers} currentUser={currentUser}
+                focusId={focusRecord && !focusRecord.leadId && focusRecord.kind === 'requests' ? focusRecord.id : null}
                 onUpdate={updateRequest}
                 onOpenLead={setSelectedLead}
                 onNew={() => setRecordPrompt({ kind: 'requests', leadId: null })}
@@ -2336,6 +2380,7 @@ export default function BobcatIndyCRM() {
             {view === 'finance' && (
               <FinanceView
                 deals={visibleRecords.finance} leads={leads} config={configWithUsers} currentUser={currentUser}
+                focusId={focusRecord && !focusRecord.leadId && focusRecord.kind === 'finance' ? focusRecord.id : null}
                 onUpdate={(id, patch, note) => updateRecord('finance', id, patch, note)}
                 onOpenLead={setSelectedLead}
                 onNew={() => setRecordPrompt({ kind: 'finance', leadId: null })}
@@ -2344,6 +2389,7 @@ export default function BobcatIndyCRM() {
             {view === 'trade-ins' && (
               <TradeInsView
                 tradeIns={visibleRecords.tradeIns} leads={leads} config={configWithUsers} currentUser={currentUser}
+                focusId={focusRecord && !focusRecord.leadId && focusRecord.kind === 'tradeIns' ? focusRecord.id : null}
                 onUpdate={(id, patch, note) => updateRecord('tradeIns', id, patch, note)}
                 onOpenLead={setSelectedLead}
                 onNew={() => setRecordPrompt({ kind: 'tradeIns', leadId: null })}
@@ -2398,7 +2444,7 @@ export default function BobcatIndyCRM() {
              while it is open. Falls back to the snapshot for a lead that has
              just been created and hasn't arrived from Firestore yet. */
           lead={leads.find(l => l.id === selectedLead.id) || selectedLead} config={configWithUsers} currentUser={currentUser}
-          onClose={() => setSelectedLead(null)}
+          onClose={() => { setSelectedLead(null); setFocusRecord(null); }}
           onUpdate={updateLead}
           onDelete={(id) => { deleteLead(id); showToast('Lead deleted'); }}
           onArchive={archiveLead}
@@ -2417,6 +2463,9 @@ export default function BobcatIndyCRM() {
           onNewRecord={(kind, leadId) => setRecordPrompt({ kind, leadId })}
           onAddLeadFiles={(id, files) => attachFiles('leads', id, files)}
           onRemoveLeadFile={(id, att) => detachFile('leads', id, att)}
+          onAddRecordFiles={attachFiles}
+          onRemoveRecordFile={detachFile}
+          focusRecord={focusRecord && focusRecord.leadId === selectedLead.id ? focusRecord : null}
         />
       )}
 
@@ -2907,7 +2956,7 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userR
 }
 
 /* ===================== TOP BAR ===================== */
-function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter }) {
+function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter, search = null }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const stage = stageForView(view);
   const titles = {
@@ -2978,6 +3027,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
         </div>
 
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
+          {search}
           {/* Stat chips — desktop only; mobile keeps the top bar uncluttered */}
           {stage && stage.id !== STAGE_COMPLETED && (
             <div className="hidden lg:flex gap-2">
@@ -7877,7 +7927,7 @@ function ClosedStatusesEditor({ config, onSave }) {
 }
 
 /* ===================== LEAD DETAIL PANEL ===================== */
-function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelete, onArchive, onUnarchive, onMarkJunk, onRestoreJunk, onStatusChange, onExtendWorking, leadRecords = { requests: [], tradeIns: [], finance: [] }, onUpdateRequest, onUpdateRecord, onNewRecord, onAddLeadFiles, onRemoveLeadFile }) {
+function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelete, onArchive, onUnarchive, onMarkJunk, onRestoreJunk, onStatusChange, onExtendWorking, leadRecords = { requests: [], tradeIns: [], finance: [] }, onUpdateRequest, onUpdateRecord, onNewRecord, onAddLeadFiles, onRemoveLeadFile, onAddRecordFiles, onRemoveRecordFile, focusRecord = null }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(lead);
   const [newComment, setNewComment] = useState('');
@@ -8151,14 +8201,24 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
 
               {leadStage !== 'junk' && (
                 <LeadRequestsSection lead={lead} requests={leadRecords.requests} currentUser={currentUser}
+                  users={config.users || []} focusId={focusRecord?.kind === 'requests' ? focusRecord.id : null}
+                  onAddFiles={(id, files) => onAddRecordFiles('requests', id, files)}
+                  onRemoveFile={(id, att) => onRemoveRecordFile('requests', id, att)}
                   onUpdate={onUpdateRequest} onNew={() => onNewRecord('requests', lead.id)}/>
               )}
               {leadStage !== 'junk' && (
-                <LeadTradeInsSection tradeIns={leadRecords.tradeIns}
+                <LeadTradeInsSection tradeIns={leadRecords.tradeIns} currentUser={currentUser}
+                  userMap={Object.fromEntries((config.users || []).map(u => [u.id, u]))}
+                  focusId={focusRecord?.kind === 'tradeIns' ? focusRecord.id : null}
+                  onUpdate={(id, patch, note) => onUpdateRecord('tradeIns', id, patch, note)}
+                  onAddFiles={(id, files) => onAddRecordFiles('tradeIns', id, files)}
+                  onRemoveFile={(id, att) => onRemoveRecordFile('tradeIns', id, att)}
                   onNew={() => onNewRecord('tradeIns', lead.id)}/>
               )}
               {(leadRecords.finance.length > 0 || leadStage === STAGE_SALES_REQUEST || leadStage === STAGE_COMPLETED) && (
-                <LeadFinanceSection deals={leadRecords.finance}
+                <LeadFinanceSection deals={leadRecords.finance} currentUser={currentUser}
+                  focusId={focusRecord?.kind === 'finance' ? focusRecord.id : null}
+                  onUpdate={(id, patch, note) => onUpdateRecord('finance', id, patch, note)}
                   onNew={() => onNewRecord('finance', lead.id)}/>
               )}
 
@@ -9384,6 +9444,141 @@ function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChan
 }
 
 // Underline tabs above a view (Incoming | Junk, Completed | Archived, Settings).
+/* ===================== GLOBAL SEARCH ===================== */
+// Top-bar search across leads and the three record types. `scope` is already
+// limited to what the user can open. Ctrl/Cmd+K or "/" focuses it.
+function GlobalSearch({ scope, users = [], stepLabelOf, onOpenLead, onOpenRecord, onActivate }) {
+  const [q, setQ] = useState('');
+  const [open, setOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const inputRef = useRef(null);
+  const boxRef = useRef(null);
+  const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
+
+  const results = useMemo(() => searchAll(scope, q), [scope, q]);
+  // One flat list for arrow-key navigation, in display order.
+  const flat = useMemo(() => [
+    ...results.leads.map(item => ({ kind: 'lead', item })),
+    ...results.requests.map(item => ({ kind: 'requests', item })),
+    ...results.tradeIns.map(item => ({ kind: 'tradeIns', item })),
+    ...results.finance.map(item => ({ kind: 'finance', item })),
+  ], [results]);
+  useEffect(() => { setActive(0); }, [q]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable;
+      if ((e.key === 'k' && (e.ctrlKey || e.metaKey)) || (e.key === '/' && !typing)) {
+        e.preventDefault();
+        // An open lead panel covers the search box; searching means going
+        // somewhere else, so close it first.
+        if (onActivate) onActivate();
+        if (window.matchMedia && !window.matchMedia('(min-width: 768px)').matches) setMobileOpen(true);
+        setOpen(true);
+        setTimeout(() => inputRef.current && inputRef.current.focus(), 0);
+      }
+    };
+    const onClick = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) { setOpen(false); setMobileOpen(false); } };
+    window.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onClick);
+    return () => { window.removeEventListener('keydown', onKey); document.removeEventListener('mousedown', onClick); };
+  }, []);
+
+  const choose = (r) => {
+    if (!r) return;
+    if (r.kind === 'lead') onOpenLead(r.item); else onOpenRecord(r.kind, r.item);
+    setOpen(false); setMobileOpen(false); setQ('');
+    inputRef.current && inputRef.current.blur();
+  };
+  const onKeyDown = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(a => Math.min(a + 1, flat.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(a => Math.max(a - 1, 0)); }
+    else if (e.key === 'Enter') { e.preventDefault(); choose(flat[active]); }
+    else if (e.key === 'Escape') { setOpen(false); setMobileOpen(false); inputRef.current && inputRef.current.blur(); }
+  };
+
+  const hasQuery = q.trim().length > 0;
+  const off = { lead: 0, requests: results.leads.length, tradeIns: results.leads.length + results.requests.length,
+    finance: results.leads.length + results.requests.length + results.tradeIns.length };
+  const row = (r, i, title, sub, tag) => {
+    const k = off[r.kind] + i;
+    return (
+      <button key={r.item.id} type="button" role="option" aria-selected={k === active}
+        onMouseEnter={() => setActive(k)} onMouseDown={e => e.preventDefault()} onClick={() => choose(r)}
+        className={`w-full text-left px-3 py-2 flex items-start justify-between gap-3 ${k === active ? 'bg-brand-50' : 'hover:bg-stone-50'}`}>
+        <span className="min-w-0">
+          <span className="block text-sm font-medium text-stone-900 truncate">{title}</span>
+          {sub && <span className="block text-xs text-stone-500 truncate">{sub}</span>}
+        </span>
+        {tag && <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">{tag}</span>}
+      </button>
+    );
+  };
+  const Group = ({ label, children }) => (
+    <div className="py-1">
+      <div className="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-widest text-stone-400 font-semibold">{label}</div>
+      {children}
+    </div>
+  );
+
+  const panel = open && hasQuery && (
+    <div role="listbox" className="absolute right-0 left-0 md:left-auto top-full mt-1 md:w-[26rem] max-h-[70vh] overflow-y-auto bg-white border border-stone-200 rounded-lg shadow-lg z-50">
+      {flat.length === 0 && <div className="px-3 py-4 text-sm text-stone-500">No matches for &ldquo;{q.trim()}&rdquo;.</div>}
+      {results.leads.length > 0 && (
+        <Group label="Leads">
+          {results.leads.map((l, i) => row({ kind: 'lead', item: l }, i,
+            <>{l.customerName || 'No name'}{l.companyName ? <span className="font-normal text-stone-500"> · {l.companyName}</span> : null}</>,
+            [l.phone, l.contactEmail, userMap[l.assignedTo] && !userMap[l.assignedTo].isSystem ? userMap[l.assignedTo].name : 'Unassigned'].filter(Boolean).join(' · '),
+            `${stepLabelOf(l)}${l.status && stepLabelOf(l) !== l.status ? ` · ${l.status}` : ''}`))}
+        </Group>
+      )}
+      {results.requests.length > 0 && (
+        <Group label="Sales Requests">
+          {results.requests.map((r, i) => row({ kind: 'requests', item: r }, i, (r.requestTypes || []).join(', ') || 'Request',
+            [r.customerName, r.dateNeeded && `needed ${fmtYmd(r.dateNeeded)}`].filter(Boolean).join(' · '), r.status))}
+        </Group>
+      )}
+      {results.tradeIns.length > 0 && (
+        <Group label="Trade-Ins">
+          {results.tradeIns.map((t, i) => row({ kind: 'tradeIns', item: t }, i, [t.year, t.make, t.model].filter(Boolean).join(' ') || 'Trade-in',
+            [t.customerName, t.serial && `S/N ${t.serial}`].filter(Boolean).join(' · '), tradeInStatus(t)))}
+        </Group>
+      )}
+      {results.finance.length > 0 && (
+        <Group label="Finance">
+          {results.finance.map((d, i) => row({ kind: 'finance', item: d }, i, d.customerName || d.assetToFinance || 'Finance deal',
+            [d.assetToFinance, d.amount].filter(Boolean).join(' · '), d.admin?.dealStatus || 'Submitted'))}
+        </Group>
+      )}
+    </div>
+  );
+
+  return (
+    <div ref={boxRef} className={mobileOpen ? 'fixed inset-x-0 top-0 z-50 bg-white border-b border-stone-200 p-3 md:static md:p-0 md:border-0 md:bg-transparent' : 'relative'}>
+      {!mobileOpen && (
+        <button type="button" aria-label="Search" onClick={() => { setMobileOpen(true); setOpen(true); setTimeout(() => inputRef.current && inputRef.current.focus(), 0); }}
+          className="md:hidden p-2 text-stone-700 hover:bg-stone-100 rounded">
+          <Search size={20}/>
+        </button>
+      )}
+      <div className={`${mobileOpen ? 'flex' : 'hidden md:flex'} relative items-center`}>
+        <Search size={15} className="absolute left-3 text-stone-400 pointer-events-none"/>
+        <input ref={inputRef} type="search" value={q} role="combobox" aria-expanded={!!panel} aria-label="Search leads, requests, trade-ins and finance"
+          onChange={e => { setQ(e.target.value); setOpen(true); }}
+          onFocus={() => setOpen(true)} onKeyDown={onKeyDown}
+          placeholder="Search customers, phone, serial…"
+          className="w-full md:w-64 xl:w-80 pl-9 pr-12 py-2 border border-stone-200 rounded-md text-sm bg-white focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"/>
+        {!q && <kbd className="hidden md:block absolute right-2 text-[10px] font-mono text-stone-400 border border-stone-200 rounded px-1 pointer-events-none">Ctrl K</kbd>}
+        {mobileOpen && (
+          <button type="button" onClick={() => { setMobileOpen(false); setOpen(false); setQ(''); }} className="md:hidden ml-2 text-sm text-stone-600 shrink-0">Cancel</button>
+        )}
+        {panel}
+      </div>
+    </div>
+  );
+}
+
 function SubTabs({ value, onChange, tabs }) {
   return (
     <div className="flex gap-1 border-b border-stone-200 mb-4 overflow-x-auto" role="tablist">
@@ -9801,10 +9996,17 @@ function DepartmentCheckoffs({ req, canEdit, onUpdate }) {
   );
 }
 
-function RequestsView({ requests, leads, config, currentUser, onUpdate, onOpenLead, onNew, onAddFiles, onRemoveFile }) {
+function RequestsView({ requests, leads, config, currentUser, onUpdate, onOpenLead, onNew, onAddFiles, onRemoveFile, focusId = null }) {
   const isAdmin = currentUser?.role === 'admin';
   const [show, setShow] = useState('open');
   const [openId, setOpenId] = useState(null);
+  // Opened from the top-bar search: show every row and open that one.
+  useEffect(() => {
+    if (!focusId) return;
+    setShow('all'); setOpenId(focusId);
+    const t = setTimeout(() => document.getElementById(`rec-${focusId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 50);
+    return () => clearTimeout(t);
+  }, [focusId]);
   const users = config.users || [];
   const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
   const leadMap = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
@@ -9848,7 +10050,7 @@ function RequestsView({ requests, leads, config, currentUser, onUpdate, onOpenLe
                 const expanded = openId === r.id;
                 return (
                   <Fragment key={r.id}>
-                    <tr onClick={() => setOpenId(expanded ? null : r.id)}
+                    <tr id={`rec-${r.id}`} onClick={() => setOpenId(expanded ? null : r.id)}
                       className={`border-b border-stone-100 align-top cursor-pointer hover:bg-stone-50 ${expanded ? 'bg-stone-50' : ''}`}>
                       <td className={`px-3 py-3 whitespace-nowrap font-mono text-xs ${overdue ? 'text-rose-700 font-semibold' : 'text-stone-700'}`}>
                         {fmtYmd(r.dateNeeded)}
@@ -9877,20 +10079,8 @@ function RequestsView({ requests, leads, config, currentUser, onUpdate, onOpenLe
                     {expanded && (
                       <tr className="border-b border-stone-200 bg-stone-50">
                         <td colSpan={7} className="px-5 py-4">
-                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <FieldRows fields={REQUEST_FIELDS} values={r} users={users}/>
-                            <div className="space-y-5">
-                              <AdminFieldsEditor title="Back Office" canEdit={isAdmin} idPrefix={`rqbo-${r.id}`}
-                                fields={[{ key: 'serviceOrderNumber', label: 'Service Order Number', type: 'text' }]}
-                                values={{ serviceOrderNumber: r.serviceOrderNumber || '' }}
-                                onSave={(v) => onUpdate(r.id, { serviceOrderNumber: v.serviceOrderNumber || '' })}/>
-                              <div>
-                                <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-2">Files</div>
-                                <AttachmentList attachments={r.attachments} currentUser={currentUser}
-                                  onAdd={(files) => onAddFiles(r.id, files)} onRemove={(att) => onRemoveFile(r.id, att)}/>
-                              </div>
-                            </div>
-                          </div>
+                          <RequestDetails r={r} isAdmin={isAdmin} users={users} currentUser={currentUser}
+                            onUpdate={onUpdate} onAddFiles={onAddFiles} onRemoveFile={onRemoveFile}/>
                         </td>
                       </tr>
                     )}
@@ -9905,7 +10095,93 @@ function RequestsView({ requests, leads, config, currentUser, onUpdate, onOpenLe
   );
 }
 
-function LeadRequestsSection({ requests, currentUser, onUpdate, onNew }) {
+const SUBHEAD = 'text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-2';
+
+// One record's full details. Shared by the Back Office lists (two columns) and
+// the lead panel (`stacked`, one column), so both always show the same thing.
+function RequestDetails({ r, isAdmin, users, currentUser, onUpdate, onAddFiles, onRemoveFile, stacked = false, showCheckoffs = false }) {
+  return (
+    <div className={stacked ? 'space-y-4' : 'grid grid-cols-1 lg:grid-cols-2 gap-6'}>
+      <FieldRows fields={REQUEST_FIELDS} values={r} users={users}/>
+      <div className="space-y-5">
+        {showCheckoffs && (
+          <div>
+            <div className={SUBHEAD}>Departments</div>
+            <DepartmentCheckoffs req={r} canEdit={isAdmin && r.status !== 'Cancelled'} onUpdate={onUpdate}/>
+          </div>
+        )}
+        <AdminFieldsEditor title="Back Office" canEdit={isAdmin} idPrefix={`rqbo-${r.id}`}
+          fields={[{ key: 'serviceOrderNumber', label: 'Service Order Number', type: 'text' }]}
+          values={{ serviceOrderNumber: r.serviceOrderNumber || '' }}
+          onSave={(v) => onUpdate(r.id, { serviceOrderNumber: v.serviceOrderNumber || '' })}/>
+        <div>
+          <div className={SUBHEAD}>Files</div>
+          <AttachmentList attachments={Array.isArray(r.attachments) ? r.attachments : []} currentUser={currentUser}
+            onAdd={(files) => onAddFiles(r.id, files)} onRemove={(att) => onRemoveFile(r.id, att)}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TradeInDetails({ t, isAdmin, userMap, currentUser, onUpdate, onAddFiles, onRemoveFile, stacked = false }) {
+  return (
+    <div className={stacked ? 'flex flex-col gap-5' : 'grid grid-cols-1 lg:grid-cols-2 gap-6'}>
+      <div className={stacked ? 'order-2' : 'order-2 lg:order-1'}>
+        <FieldRows fields={TRADE_IN_FIELDS} values={tradeInDisplayValues(t)}/>
+      </div>
+      <div className={`space-y-5 ${stacked ? 'order-1' : 'order-1 lg:order-2'}`}>
+        <TradeInDecisionCard tradeIn={t} isAdmin={isAdmin} userMap={userMap}
+          onDecide={(manager, note) => onUpdate(t.id, { manager: { ...manager, decidedBy: currentUser?.id || null } }, note)}/>
+        <div>
+          <div className={SUBHEAD}>Photos &amp; Files</div>
+          <AttachmentList attachments={Array.isArray(t.attachments) ? t.attachments : []} currentUser={currentUser} emptyText="No photos yet."
+            onAdd={(files) => onAddFiles(t.id, files)} onRemove={(att) => onRemoveFile(t.id, att)}/>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FinanceDetails({ d, isAdmin, onUpdate, stacked = false }) {
+  return (
+    <div className={stacked ? 'space-y-5' : 'grid grid-cols-1 lg:grid-cols-2 gap-6'}>
+      <div>
+        <div className={SUBHEAD}>From the rep</div>
+        <FieldRows fields={FINANCE_REP_FIELDS} values={d}/>
+      </div>
+      <AdminFieldsEditor title="Finance" canEdit={isAdmin} idPrefix={`fa-${d.id}`}
+        fields={FINANCE_ADMIN_FIELDS} values={d.admin || {}}
+        onSave={(v) => onUpdate(d.id, { admin: v }, 'Finance update')}/>
+    </div>
+  );
+}
+
+// A row in one of the lead panel's record sections. Click to open its details
+// in place; the customer profile shouldn't need a trip to Back Office.
+function LeadRecordRow({ open, onToggle, title, subtitle, status, children }) {
+  return (
+    <div className="border-b border-stone-100 last:border-0">
+      <div className="flex items-start justify-between gap-2 py-1.5">
+        <button type="button" onClick={onToggle} aria-expanded={open}
+          className="min-w-0 flex-1 text-left group flex items-start gap-1.5">
+          <ChevronRight size={14} className={`mt-0.5 shrink-0 text-stone-400 group-hover:text-brand-700 transition-transform ${open ? 'rotate-90' : ''}`}/>
+          <span className="min-w-0">
+            <span className="block text-sm font-medium text-stone-900 group-hover:text-brand-700">{title}</span>
+            <span className="block text-xs text-stone-500">{subtitle}</span>
+            {!open && <span className="block text-[11px] text-brand-700 font-medium mt-0.5">View details</span>}
+          </span>
+        </button>
+        <div className="shrink-0">{status}</div>
+      </div>
+      {open && <div className="pb-4 pt-1 pl-5">{children}</div>}
+    </div>
+  );
+}
+
+function LeadRequestsSection({ requests, currentUser, onUpdate, onNew, users = [], onAddFiles, onRemoveFile, focusId }) {
+  const [openId, setOpenId] = useState(focusId || null);
+  useEffect(() => { if (focusId) setOpenId(focusId); }, [focusId]);
   const isAdmin = currentUser?.role === 'admin';
   const list = [...requests].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
   return (
@@ -9919,13 +10195,13 @@ function LeadRequestsSection({ requests, currentUser, onUpdate, onNew }) {
     }>
       {list.length === 0 && <div className="text-xs text-stone-400">Delivery, demo, get ready, parts, pick up or service for this customer.</div>}
       {list.map(r => (
-        <div key={r.id} className="flex items-start justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-stone-900">{(r.requestTypes || []).join(', ')}</div>
-            <div className="text-xs text-stone-500">Needed {fmtYmd(r.dateNeeded)} · {r.fromLocation}{r.toLocation ? ` → ${r.toLocation}` : ''}</div>
-          </div>
-          <RequestStatusControl req={r} isAdmin={isAdmin} onUpdate={onUpdate}/>
-        </div>
+        <LeadRecordRow key={r.id} open={openId === r.id} onToggle={() => setOpenId(openId === r.id ? null : r.id)}
+          title={(r.requestTypes || []).join(', ')}
+          subtitle={`Needed ${fmtYmd(r.dateNeeded)} · ${r.fromLocation || ''}${r.toLocation ? ` → ${r.toLocation}` : ''}`}
+          status={<RequestStatusControl req={r} isAdmin={isAdmin} onUpdate={onUpdate}/>}>
+          <RequestDetails r={r} isAdmin={isAdmin} users={users} currentUser={currentUser} stacked showCheckoffs
+            onUpdate={onUpdate} onAddFiles={onAddFiles} onRemoveFile={onRemoveFile}/>
+        </LeadRecordRow>
       ))}
     </Section>
   );
@@ -9991,10 +10267,17 @@ function TradeInModal({ lead, busy, onSubmit, onCancel }) {
   );
 }
 
-function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLead, onNew, onAddFiles, onRemoveFile }) {
+function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLead, onNew, onAddFiles, onRemoveFile, focusId = null }) {
   const isAdmin = currentUser?.role === 'admin';
   const [show, setShow] = useState('Awaiting Approval');
   const [openId, setOpenId] = useState(null);
+  // Opened from the top-bar search: show every row and open that one.
+  useEffect(() => {
+    if (!focusId) return;
+    setShow('all'); setOpenId(focusId);
+    const t = setTimeout(() => document.getElementById(`rec-${focusId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 50);
+    return () => clearTimeout(t);
+  }, [focusId]);
   const users = config.users || [];
   const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
   const leadMap = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
@@ -10027,7 +10310,7 @@ function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLe
                 const status = tradeInStatus(t);
                 return (
                   <Fragment key={t.id}>
-                    <tr onClick={() => setOpenId(expanded ? null : t.id)}
+                    <tr id={`rec-${t.id}`} onClick={() => setOpenId(expanded ? null : t.id)}
                       className={`border-b border-stone-100 align-top cursor-pointer hover:bg-stone-50 ${expanded ? 'bg-stone-50' : ''}`}>
                       <td className="px-3 py-3 text-xs font-mono text-stone-700 whitespace-nowrap">{fmtYmd(t.createdAt)}</td>
                       <td className="px-3 py-3">
@@ -10050,20 +10333,8 @@ function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLe
                     {expanded && (
                       <tr className="border-b border-stone-200 bg-stone-50">
                         <td colSpan={7} className="px-5 py-4">
-                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <div className="order-2 lg:order-1">
-                              <FieldRows fields={TRADE_IN_FIELDS} values={tradeInDisplayValues(t)}/>
-                            </div>
-                            <div className="space-y-5 order-1 lg:order-2">
-                              <TradeInDecisionCard tradeIn={t} isAdmin={isAdmin} userMap={userMap}
-                                onDecide={(manager, note) => onUpdate(t.id, { manager: { ...manager, decidedBy: currentUser?.id || null } }, note)}/>
-                              <div>
-                                <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-2">Photos &amp; Files</div>
-                                <AttachmentList attachments={Array.isArray(t.attachments) ? t.attachments : []} currentUser={currentUser} emptyText="No photos yet."
-                                  onAdd={(files) => onAddFiles(t.id, files)} onRemove={(att) => onRemoveFile(t.id, att)}/>
-                              </div>
-                            </div>
-                          </div>
+                          <TradeInDetails t={t} isAdmin={isAdmin} userMap={userMap} currentUser={currentUser}
+                            onUpdate={onUpdate} onAddFiles={onAddFiles} onRemoveFile={onRemoveFile}/>
                         </td>
                       </tr>
                     )}
@@ -10188,7 +10459,10 @@ function TradeInDecisionCard({ tradeIn, isAdmin, userMap, onDecide }) {
   );
 }
 
-function LeadTradeInsSection({ tradeIns, onNew }) {
+function LeadTradeInsSection({ tradeIns, onNew, currentUser, userMap = {}, onUpdate, onAddFiles, onRemoveFile, focusId }) {
+  const isAdmin = currentUser?.role === 'admin';
+  const [openId, setOpenId] = useState(focusId || null);
+  useEffect(() => { if (focusId) setOpenId(focusId); }, [focusId]);
   return (
     <Section title={
       <span className="flex items-center justify-between w-full">
@@ -10202,13 +10476,13 @@ function LeadTradeInsSection({ tradeIns, onNew }) {
       {tradeIns.map(t => {
         const status = tradeInStatus(t);
         return (
-          <div key={t.id} className="flex items-start justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-stone-900">{[t.year, t.make, t.model].filter(Boolean).join(' ')}</div>
-              <div className="text-xs text-stone-500">{t.hours} hrs · S/N {t.serial}{t.manager?.tradeInValue ? ` · Value ${t.manager.tradeInValue}` : ''}</div>
-            </div>
-            <span className={`text-xs font-medium px-2 py-1 rounded shrink-0 ${TRADE_STATUS_STYLES[status]}`}>{status}</span>
-          </div>
+          <LeadRecordRow key={t.id} open={openId === t.id} onToggle={() => setOpenId(openId === t.id ? null : t.id)}
+            title={[t.year, t.make, t.model].filter(Boolean).join(' ')}
+            subtitle={`${t.hours} hrs · S/N ${t.serial}${t.manager?.tradeInValue ? ` · Value ${t.manager.tradeInValue}` : ''}`}
+            status={<span className={`text-xs font-medium px-2 py-1 rounded ${TRADE_STATUS_STYLES[status]}`}>{status}</span>}>
+            <TradeInDetails t={t} isAdmin={isAdmin} userMap={userMap} currentUser={currentUser} stacked
+              onUpdate={onUpdate} onAddFiles={onAddFiles} onRemoveFile={onRemoveFile}/>
+          </LeadRecordRow>
         );
       })}
     </Section>
@@ -10265,10 +10539,17 @@ function FinanceModal({ lead, busy, onSubmit, onCancel }) {
   );
 }
 
-function FinanceView({ deals, leads, config, currentUser, onUpdate, onOpenLead, onNew }) {
+function FinanceView({ deals, leads, config, currentUser, onUpdate, onOpenLead, onNew, focusId = null }) {
   const isAdmin = currentUser?.role === 'admin';
   const [show, setShow] = useState('open');
   const [openId, setOpenId] = useState(null);
+  // Opened from the top-bar search: show every row and open that one.
+  useEffect(() => {
+    if (!focusId) return;
+    setShow('all'); setOpenId(focusId);
+    const t = setTimeout(() => document.getElementById(`rec-${focusId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 50);
+    return () => clearTimeout(t);
+  }, [focusId]);
   const users = config.users || [];
   const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
   const leadMap = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
@@ -10310,7 +10591,7 @@ function FinanceView({ deals, leads, config, currentUser, onUpdate, onOpenLead, 
                 const audit = isOpen(d) ? financeAudit(d, today) : [];
                 return (
                   <Fragment key={d.id}>
-                    <tr onClick={() => setOpenId(expanded ? null : d.id)}
+                    <tr id={`rec-${d.id}`} onClick={() => setOpenId(expanded ? null : d.id)}
                       className={`border-b border-stone-100 align-top cursor-pointer hover:bg-stone-50 ${expanded ? 'bg-stone-50' : ''}`}>
                       <td className="px-3 py-3 text-xs font-mono text-stone-700 whitespace-nowrap">
                         {fmtYmd(d.createdAt)}
@@ -10330,15 +10611,7 @@ function FinanceView({ deals, leads, config, currentUser, onUpdate, onOpenLead, 
                     {expanded && (
                       <tr className="border-b border-stone-200 bg-stone-50">
                         <td colSpan={8} className="px-5 py-4">
-                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <div>
-                              <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-2">From the rep</div>
-                              <FieldRows fields={FINANCE_REP_FIELDS} values={d}/>
-                            </div>
-                            <AdminFieldsEditor title="Finance" canEdit={isAdmin} idPrefix={`fa-${d.id}`}
-                              fields={FINANCE_ADMIN_FIELDS} values={d.admin || {}}
-                              onSave={(v) => onUpdate(d.id, { admin: v }, 'Finance update')}/>
-                          </div>
+                          <FinanceDetails d={d} isAdmin={isAdmin} onUpdate={onUpdate}/>
                         </td>
                       </tr>
                     )}
@@ -10358,7 +10631,10 @@ function daysSince(iso) {
   return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86400000));
 }
 
-function LeadFinanceSection({ deals, onNew }) {
+function LeadFinanceSection({ deals, onNew, currentUser, onUpdate, focusId }) {
+  const isAdmin = currentUser?.role === 'admin';
+  const [openId, setOpenId] = useState(focusId || null);
+  useEffect(() => { if (focusId) setOpenId(focusId); }, [focusId]);
   return (
     <Section title={
       <span className="flex items-center justify-between w-full">
@@ -10374,13 +10650,12 @@ function LeadFinanceSection({ deals, onNew }) {
       {deals.map(d => {
         const st = d.admin?.dealStatus || 'Submitted';
         return (
-          <div key={d.id} className="flex items-start justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
-            <div className="min-w-0">
-              <div className="text-sm font-medium text-stone-900">{d.assetToFinance}</div>
-              <div className="text-xs text-stone-500">{d.dealType} · {d.amount}{d.admin?.lenderName ? ` · ${d.admin.lenderName}` : ''}</div>
-            </div>
-            <span className={`text-xs font-medium px-2 py-1 rounded shrink-0 ${FINANCE_STATUS_STYLES[st] || ''}`}>{st}</span>
-          </div>
+          <LeadRecordRow key={d.id} open={openId === d.id} onToggle={() => setOpenId(openId === d.id ? null : d.id)}
+            title={d.assetToFinance}
+            subtitle={`${d.dealType || ''} · ${d.amount || ''}${d.admin?.lenderName ? ` · ${d.admin.lenderName}` : ''}`}
+            status={<span className={`text-xs font-medium px-2 py-1 rounded ${FINANCE_STATUS_STYLES[st] || ''}`}>{st}</span>}>
+            <FinanceDetails d={d} isAdmin={isAdmin} onUpdate={onUpdate} stacked/>
+          </LeadRecordRow>
         );
       })}
     </Section>

@@ -191,6 +191,19 @@ walk-in sales submittal, finance deal → `handleNew`), then **Pipeline**
 (Dashboards + the four steps), **Back Office** (Sales Requests, Finance,
 Trade-Ins — badges are open counts), Reports, **Admin** (Users, Settings).
 
+**Search** (`GlobalSearch` in the top bar, Ctrl/Cmd+K or `/`): matching lives
+in `src/lib/search.js` (pure, tested) — every word must match; phone digits
+match however they're formatted; accents ignored; name-prefix hits rank first.
+`searchScope` is exactly what the user may open (admins: every lead incl. junk
+and archived; reps: their dashboard leads + archived, and their own records).
+A record picked in search opens inside its lead's panel (`focusRecord`) when
+that lead is visible, otherwise in its Back Office list (`focusId`). The
+shortcut closes an open lead panel first — the panel covers the box.
+
+**Record details** (`RequestDetails`, `TradeInDetails`, `FinanceDetails`) are
+shared by the Back Office lists and the lead panel (`stacked`), so a trade-in
+can be approved, or a request checked off, from the customer's profile.
+
 Old views moved rather than removed — `MOVED_VIEWS` maps them, and `goTo` /
 the `?view=` redirect follow the map: Junk → a tab on Incoming, Archived → a
 tab on Completed, Import / Scoring / Lead Routing → tabs in Settings
