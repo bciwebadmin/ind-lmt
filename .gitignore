@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+functions/node_modules/
+
+# Build output
+dist/
+build/
+
+# Firebase local state
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+firestore-debug.log
+ui-debug.log
+*.local
+
+# Environment files.
+# functions/.env.ind-lmt holds only non-secret values (EMAIL_FROM, CRM_URL) and IS
+# committed on purpose — Firebase auto-loads it by project id at deploy time, so CI
+# needs it present. Real secrets (INTAKE_SECRET, RESEND_API_KEY) live in Google
+# Secret Manager and never touch this repo.
+.env
+.env.local
+.env.*.local
+
+# Service account keys — these must NEVER be committed. CI reads the deploy
+# credential from the FIREBASE_SERVICE_ACCOUNT GitHub secret instead.
+*serviceAccount*.json
+*service-account*.json
+*-firebase-adminsdk-*.json
+gcp-key.json
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

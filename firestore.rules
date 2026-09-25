@@ -1,0 +1,111 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ===================== HELPERS ===================== */
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && userDoc().role == 'admin';
+    }
+
+    function isSelf(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Fields a document is allowed to change in this write.
+    function changed() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    function isString(v, maxLen) {
+      return v is string && v.size() > 0 && v.size() <= maxLen;
+    }
+
+    /* ===================== USERS ===================== */
+    // Everyone signed in reads profiles — the assignment dropdowns, the routing
+    // tab and the reports all need names.
+    //
+    // Self-update is limited to `name`. Nothing in the app uses it today, but an
+    // unrestricted self-update let a rep set their own `role`-adjacent state:
+    // `onLeaveOfAbsence` (quietly removing themselves from lead routing) or
+    // `isSystem` (hiding from the delete and role flows). Whitelisting one field
+    // keeps a future "edit my profile" possible without those side effects.
+    match /users/{userId} {
+      allow read:   if isSignedIn();
+      allow create: if isAdmin();
+      allow update: if isAdmin()
+                    || (isSelf(userId) && changed().hasOnly(['name']));
+      // u_1 is the "Unassigned" system user. Every lead without an owner points
+      // at it, so deleting it would strand them.
+      allow delete: if isAdmin() && userId != 'u_1';
+    }
+
+    /* ===================== LEADS ===================== */
+    // Any signed-in user may create and edit leads. Deliberately left open: the
+    // UI only ever shows a rep their own leads, staff are trusted, and narrowing
+    // this risks blocking legitimate lead work for a threat that requires an
+    // authenticated insider with developer tools.
+    // Deletion stays admin-only.
+    match /leads/{leadId} {
+      allow read:           if isSignedIn();
+      allow create, update: if isSignedIn();
+      allow delete:         if isAdmin();
+    }
+
+    /* ===================== CONFIG ===================== */
+    // Statuses, branches, scoring, lead routing and notification recipients all
+    // live here. Readable by everyone signed in (the app cannot render without
+    // it); writable only by admins. This is what stops a rep re-pointing lead
+    // routing or the notification list at themselves.
+    match /config/{docId} {
+      allow read:  if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    /* ===================== ACCESS REQUESTS ===================== */
+    // The only rule reachable by anonymous visitors, because the "Request access"
+    // form on the sign-in screen has to work before an account exists.
+    //
+    // Creating one emails the admins, so an unconstrained rule is an email
+    // amplifier for anyone who finds the endpoint. Rules cannot rate-limit, but
+    // they can insist the document is a genuine request: exactly the expected
+    // fields, sane lengths, and something email-shaped. That turns a trivial
+    // script into a deliberate one and caps the size of anything stored.
+    match /accessRequests/{requestId} {
+      allow read: if isAdmin();
+
+      allow create: if request.resource.data.keys().hasOnly(['name', 'email', 'reason', 'requestedAt'])
+                    && request.resource.data.keys().hasAll(['name', 'email', 'requestedAt'])
+                    && isString(request.resource.data.name, 120)
+                    && isString(request.resource.data.email, 254)
+                    // Same expression as validEmail() in App.jsx — keep them in step.
+                    && request.resource.data.email.matches('^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$')
+                    && (!('reason' in request.resource.data)
+                        || (request.resource.data.reason is string
+                            && request.resource.data.reason.size() <= 2000))
+                    && request.resource.data.requestedAt is string
+                    && request.resource.data.requestedAt.size() <= 40;
+
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    /* ===================== EVERYTHING ELSE ===================== */
+    // Firestore denies unmatched paths by default; this states it outright so a
+    // future collection is a deliberate decision rather than an oversight.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

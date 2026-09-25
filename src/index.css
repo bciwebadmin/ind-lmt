@@ -1,0 +1,34 @@
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Saira+Condensed:wght@600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom font helpers (mirror the prototype's inline style block) */
+.font-display { font-family: 'Saira Condensed', sans-serif; letter-spacing: 0.02em; }
+
+/* Thin scrollbars in scrollable panels */
+.scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: #d6d3d1; border-radius: 4px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+
+/* Animations from the prototype */
+@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+.slide-in { animation: slideIn 0.2s ease-out; }
+
+@keyframes fadeUp { from { opacity:0; transform:translateY(8px);} to { opacity:1; transform:translateY(0);} }
+.fade-up { animation: fadeUp 0.18s ease-out; }
+
+/* Print styles */
+.print-only { display: none; }
+
+@media print {
+  @page { margin: 0.5in; }
+  body { background: white !important; }
+  aside, .no-print { display: none !important; }
+  main { flex: 1 !important; width: 100% !important; }
+  .print-only { display: block !important; }
+  .print-break-avoid { break-inside: avoid; }
+  header.sticky { position: static !important; }
+  .bg-white.border { break-inside: avoid; }
+}
