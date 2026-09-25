@@ -546,7 +546,8 @@ export const TRADE_IN_FIELDS = [
   { section: 'Machine', key: 'machineOptions', label: 'Machine Options', type: 'multi', options: TRADE_MACHINE_OPTIONS },
   { section: 'Machine', key: 'miscOptions',    label: 'Miscellaneous Options (Please explain)', type: 'text', showIf: { machineOptions: ['Miscellaneous'] } },
   { section: 'Machine', key: 'attachmentsIncluded', label: 'Attachments Included?', type: 'select', required: true, options: ['Yes', 'No'] },
-  { section: 'Machine', key: 'attachments',    label: 'Attachments (Please explain)', type: 'text', showIf: { attachmentsIncluded: ['Yes'] } },
+  // Not `attachments` — that name holds the uploaded files on every record.
+  { section: 'Machine', key: 'attachmentsDetail', label: 'Attachments (Please explain)', type: 'text', showIf: { attachmentsIncluded: ['Yes'] } },
   ...TRADE_CONDITIONS.map(c => ({ section: 'Condition', key: c.key, label: `${c.label} Condition`, type: 'rating', required: true, options: RATING_OPTIONS })),
   { section: 'Notes', key: 'operationalNotes', label: 'Operational Notes', type: 'text', placeholder: 'e.g. Y, Y, Y, N, N' },
   { section: 'Notes', key: 'finalComments',    label: 'Final Comments',    type: 'textarea' }

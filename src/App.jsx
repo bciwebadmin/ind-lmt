@@ -10038,20 +10038,28 @@ function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLe
                       <td className="px-3 py-3"><RecordCustomerCell rec={t} lead={t.leadId ? leadMap[t.leadId] : null} onOpenLead={onOpenLead}/></td>
                       <td className="px-3 py-3 text-xs text-stone-700">{userMap[t.salesPerson]?.name || '—'}</td>
                       <td className="px-3 py-3 text-sm font-semibold text-stone-900">{t.manager?.tradeInValue || '—'}</td>
-                      <td className="px-3 py-3"><span className={`text-xs font-medium px-2 py-1 rounded ${TRADE_STATUS_STYLES[status]}`}>{status}</span></td>
+                      <td className="px-3 py-3">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`text-xs font-medium px-2 py-1 rounded ${TRADE_STATUS_STYLES[status]}`}>{status}</span>
+                          {isAdmin && status === 'Awaiting Approval' && !expanded && (
+                            <span className="text-xs font-semibold text-brand-700 inline-flex items-center gap-0.5">Review <ChevronRight size={12}/></span>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                     {expanded && (
                       <tr className="border-b border-stone-200 bg-stone-50">
                         <td colSpan={7} className="px-5 py-4">
                           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <FieldRows fields={TRADE_IN_FIELDS} values={t}/>
-                            <div className="space-y-5">
-                              <AdminFieldsEditor title="Sales Manager" canEdit={isAdmin} idPrefix={`tim-${t.id}`}
-                                fields={TRADE_IN_MANAGER_FIELDS} values={t.manager || {}}
-                                onSave={(v) => onUpdate(t.id, { manager: v }, 'Manager review')}/>
+                            <div className="order-2 lg:order-1">
+                              <FieldRows fields={TRADE_IN_FIELDS} values={tradeInDisplayValues(t)}/>
+                            </div>
+                            <div className="space-y-5 order-1 lg:order-2">
+                              <TradeInDecisionCard tradeIn={t} isAdmin={isAdmin} userMap={userMap}
+                                onDecide={(manager, note) => onUpdate(t.id, { manager: { ...manager, decidedBy: currentUser?.id || null } }, note)}/>
                               <div>
                                 <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-2">Photos &amp; Files</div>
-                                <AttachmentList attachments={t.attachments} currentUser={currentUser} emptyText="No photos yet."
+                                <AttachmentList attachments={Array.isArray(t.attachments) ? t.attachments : []} currentUser={currentUser} emptyText="No photos yet."
                                   onAdd={(files) => onAddFiles(t.id, files)} onRemove={(att) => onRemoveFile(t.id, att)}/>
                               </div>
                             </div>
@@ -10066,6 +10074,116 @@ function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLe
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+// Old trade-ins stored the typed "Attachments (Please explain)" answer under
+// `attachments`, which now holds uploaded files.
+function tradeInDisplayValues(t) {
+  if (t.attachmentsDetail !== undefined || typeof t.attachments !== 'string') return t;
+  return { ...t, attachmentsDetail: t.attachments };
+}
+
+// The sales manager's decision. Replaces a generic "Edit" link: an admin sees
+// the value, comments and Approve / Decline right where the row opens.
+function TradeInDecisionCard({ tradeIn, isAdmin, userMap, onDecide }) {
+  const m = tradeIn.manager || {};
+  const status = tradeInStatus(tradeIn);
+  const decided = status !== 'Awaiting Approval';
+  const [editing, setEditing] = useState(!decided);
+  const [value, setValue] = useState(m.tradeInValue || '');
+  const [comments, setComments] = useState(m.managerComments || '');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setEditing(tradeInStatus(tradeIn) === 'Awaiting Approval');
+    setValue((tradeIn.manager || {}).tradeInValue || '');
+    setComments((tradeIn.manager || {}).managerComments || '');
+    setError('');
+  }, [tradeIn.id, tradeIn.manager]);
+
+  const decide = async (approved) => {
+    if (approved === 'Yes' && !String(value).trim()) { setError('Enter the trade-in value before approving.'); return; }
+    setError(''); setBusy(true);
+    const manager = { tradeInValue: String(value).trim(), approved, managerComments: comments.trim(),
+      decidedAt: new Date().toISOString(), decidedBy: null };
+    try {
+      const ok = await onDecide(manager, approved === 'Yes' ? 'Approved by sales manager' : 'Declined by sales manager');
+      if (ok !== false) setEditing(false);
+    } finally { setBusy(false); }
+  };
+
+  const heading = <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-2">Sales Manager Decision</div>;
+
+  if (!isAdmin && !decided) {
+    return (
+      <div>
+        {heading}
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          Waiting for a sales manager to set a value and approve or decline.
+        </div>
+      </div>
+    );
+  }
+
+  if (!editing) {
+    const who = m.decidedBy && userMap[m.decidedBy]?.name;
+    return (
+      <div>
+        {heading}
+        <div className={`rounded-lg border px-4 py-3 ${status === 'Approved' ? 'border-emerald-200 bg-emerald-50' : 'border-rose-200 bg-rose-50'}`}>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className={`text-sm font-semibold ${status === 'Approved' ? 'text-emerald-800' : 'text-rose-800'}`}>
+                {status}{m.tradeInValue ? ` at ${m.tradeInValue}` : ''}
+              </div>
+              {(who || m.decidedAt) && (
+                <div className="text-xs text-stone-600 mt-0.5">{[who, m.decidedAt && fmtDateTime(m.decidedAt)].filter(Boolean).join(' · ')}</div>
+              )}
+            </div>
+            {isAdmin && (
+              <button type="button" onClick={() => setEditing(true)} className="text-xs font-medium text-brand-700 hover:underline shrink-0">
+                Change decision
+              </button>
+            )}
+          </div>
+          {m.managerComments && <div className="text-sm text-stone-700 mt-2 whitespace-pre-wrap">{m.managerComments}</div>}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {heading}
+      <div className="rounded-lg border-2 border-brand-500 bg-white p-4 space-y-3">
+        <div className="text-sm text-stone-700">Review the evaluation, set a value, then approve or decline.</div>
+        <div>
+          <label htmlFor={`tiv-${tradeIn.id}`} className="block text-xs font-semibold text-stone-700 mb-1">Trade-In Value</label>
+          <input id={`tiv-${tradeIn.id}`} value={value} onChange={e => { setValue(e.target.value); setError(''); }} placeholder="$"
+            className="w-full md:w-60 px-3 py-2 border border-stone-300 rounded-md text-sm focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"/>
+        </div>
+        <div>
+          <label htmlFor={`tic-${tradeIn.id}`} className="block text-xs font-semibold text-stone-700 mb-1">Comments <span className="font-normal text-stone-500">(optional)</span></label>
+          <textarea id={`tic-${tradeIn.id}`} rows={2} value={comments} onChange={e => setComments(e.target.value)}
+            className="w-full px-3 py-2 border border-stone-300 rounded-md text-sm focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"/>
+        </div>
+        {error && <div className="text-xs text-rose-700">{error}</div>}
+        <div className="flex items-center gap-2 flex-wrap">
+          <button type="button" disabled={busy} onClick={() => decide('Yes')}
+            className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white text-sm font-semibold rounded-md inline-flex items-center gap-1.5">
+            <Check size={14}/> Approve
+          </button>
+          <button type="button" disabled={busy} onClick={() => decide('No')}
+            className="px-4 py-2 border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-60 text-sm font-semibold rounded-md inline-flex items-center gap-1.5">
+            <X size={14}/> Decline
+          </button>
+          {decided && (
+            <button type="button" onClick={() => setEditing(false)} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900">Cancel</button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

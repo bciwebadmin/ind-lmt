@@ -358,6 +358,13 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('storage.rules size cap matches client', rules.includes(String(P.ATTACHMENT_MAX_BYTES)) || rules.includes('25 * 1024 * 1024'));
   const fb = JSON.parse(readFileSync(join(root, 'firebase.json'), 'utf8'));
   check('firebase.json points at storage.rules', fb.storage?.rules === 'storage.rules');
+  // `attachments` holds uploaded files on every record; a form field with that
+  // key gets overwritten by the first upload (it happened on trade-ins).
+  const lists = { SALES_REQUEST_FIELDS: P.SALES_REQUEST_FIELDS, BACK_OFFICE_FIELDS: P.BACK_OFFICE_FIELDS, DEAL_FIELDS: P.DEAL_FIELDS,
+    REQUEST_FIELDS: P.REQUEST_FIELDS, TRADE_IN_FIELDS: P.TRADE_IN_FIELDS, TRADE_IN_MANAGER_FIELDS: P.TRADE_IN_MANAGER_FIELDS,
+    FINANCE_REP_FIELDS: P.FINANCE_REP_FIELDS, FINANCE_ADMIN_FIELDS: P.FINANCE_ADMIN_FIELDS };
+  const clash = Object.entries(lists).filter(([, l]) => (l || []).some(f => f.key === 'attachments')).map(([n]) => n);
+  check('no form field is keyed `attachments`', clash.length === 0, clash.join(', '));
 }
 
 console.log('');

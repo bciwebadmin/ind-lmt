@@ -1772,7 +1772,7 @@ const RECORD_FIELDS = {
     { key: 'machineOptions', label: 'Machine Options' },
     { key: 'miscOptions', label: 'Miscellaneous Options (Please explain)' },
     { key: 'attachmentsIncluded', label: 'Attachments Included?' },
-    { key: 'attachments', label: 'Attachments (Please explain)' },
+    { key: 'attachmentsDetail', label: 'Attachments (Please explain)' },
     { key: 'paint', label: 'Paint Condition' },
     { key: 'decal', label: 'Decal Condition' },
     { key: 'pinBushing', label: 'Pin/Bushing Condition' },

@@ -215,8 +215,12 @@ a test fails if they drift.
   office checks off Rental / Service / Parts (`departmentsFor`); status follows
   from the check-offs (`requestStatusFromDone`). Admins only.
 - **Trade-Ins**: Indy's Trade-In Evaluation form; nine 1–5/N/A condition
-  ratings. A sales manager (admin) sets value + approval (`manager`).
-  Sidebar → Back Office → Trade-Ins.
+  ratings. A sales manager (admin) decides in `TradeInDecisionCard`: value,
+  comments, Approve / Decline (`manager` = tradeInValue, approved Yes/No,
+  managerComments, decidedBy, decidedAt). Approving needs a value.
+  Sidebar → Back Office → Trade-Ins. The typed "Attachments (Please explain)"
+  answer is `attachmentsDetail`, never `attachments` (that is the uploaded
+  files); `tradeInDisplayValues` reads old records that used the old key.
 - **Finance**: Indy's Sales Tracker. A financed Sales Submittal creates one
   automatically (`financeFromSubmittal`); finance (admins) works `admin.*`
   (Deal Status, lender, dates). `financeAudit` reproduces the sheet's 3-day
