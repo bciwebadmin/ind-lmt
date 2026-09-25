@@ -127,3 +127,31 @@ export async function addAccessRequestDoc(shape) {
 export async function deleteAccessRequestDoc(requestId) {
   await deleteDoc(doc(db, 'accessRequests', requestId));
 }
+
+/* ===================== INDY RECORDS: requests, trade-ins, finance ===================== */
+// Three collections that hang off leads but can also stand alone, so they are
+// not fields on the lead:
+//   requests — delivery / get-ready / demo / parts / pick-up / service requests
+//   tradeIns — trade-in evaluations awaiting a sales manager's value
+//   finance  — the finance team's funding tracker (Indy's Sales Tracker)
+// All share one shape convention: leadId (or null), salesPerson, status fields,
+// createdAt, createdBy, history[]. Field lists live in ./pipeline.js.
+export const RECORD_COLLECTIONS = ['requests', 'tradeIns', 'finance'];
+
+export function subscribeToRecords(collectionName, callback) {
+  const q = query(collection(db, collectionName), orderBy('createdAt', 'desc'));
+  return onSnapshot(q, (snap) => {
+    callback(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  }, (err) => {
+    console.error(`subscribe ${collectionName} error:`, err);
+  });
+}
+
+export async function addRecordDoc(collectionName, shape) {
+  const ref = await addDoc(collection(db, collectionName), shape);
+  return ref.id;
+}
+
+export async function updateRecordDoc(collectionName, id, patch) {
+  await updateDoc(doc(db, collectionName, id), patch);
+}

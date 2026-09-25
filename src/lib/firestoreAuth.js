@@ -126,6 +126,23 @@ export async function sendSalesRequestEmailViaFunction({ leadId }) {
   }
 }
 
+/**
+ * Email a new request / trade-in evaluation / finance deal to whoever handles
+ * it. kind is the collection: 'requests' | 'tradeIns' | 'finance'. Only the id
+ * is sent; the server reads the record itself. Never throws — the record is
+ * already saved when this runs.
+ */
+export async function sendRecordEmailViaFunction({ kind, id }) {
+  try {
+    const fn = httpsCallable(fns, 'sendRecordEmail');
+    const res = await fn({ kind, id });
+    return res?.data || { sent: false, reason: 'no-response' };
+  } catch (e) {
+    console.error(`[${kind}] callable failed:`, e);
+    return { sent: false, reason: 'error' };
+  }
+}
+
 export async function sendWelcomeEmailToUser({ email, name, password }) {
   const fn = httpsCallable(fns, 'sendWelcomeEmail');
   return fn({ email, name, password });

@@ -209,6 +209,10 @@ divergences from Bobcat of Atlanta, which this repo was taken from:
 | Statuses | New · Working, Prospect, Pending, Want · Sales Request · Completed, Lost, Unqualified, Cancelled · Junk | New, Contacted, Working, Quoted, Won, Lost, Unqualified, No Decision, Junk |
 | Sales Submittal | Rep form on the lead + back-office fields (admins) + `sendSalesRequestEmail` to Settings → Sales Submittals | — |
 | Deal details | `lead.deal` — machine, model, new/used, temperature, quoted date, location, competitor, lost reason | — |
+| Sales Requests | `requests` collection — delivery / get ready / demo / parts / pick up / service, per-department check-offs | — |
+| Trade-In Evaluations | `tradeIns` collection — condition ratings, manager value + approval | — |
+| Finance tracker | `finance` collection — funding pipeline, auto-created from financed submittals | — |
+| Firestore rules | Extra rules for `requests`, `tradeIns`, `finance` — **deploy by hand**: `firebase deploy --only firestore:rules` | — |
 
 Brand-agnostic fixes made here that Atlanta still needs:
 `buildResubmissionEmailHtml` was called but never defined in `functions/index.js`,

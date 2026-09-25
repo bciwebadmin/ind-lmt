@@ -63,6 +63,38 @@ service cloud.firestore {
       allow delete:         if isAdmin();
     }
 
+    /* ===================== INDY RECORDS ===================== */
+    // requests (delivery / get ready / demo / parts / pick up / service),
+    // tradeIns (trade-in evaluations) and finance (the funding tracker).
+    // Same trust model as leads: any signed-in user may create and work them —
+    // the UI shows reps only their own, and restricts the back-office, manager
+    // and finance halves to admins. Deletion is admin-only. A new record must
+    // name its real creator, and createdBy can never change afterwards.
+    function recordCreateOk() {
+      return isSignedIn() && request.resource.data.createdBy == request.auth.uid;
+    }
+    function recordUpdateOk() {
+      return isSignedIn() && request.resource.data.createdBy == resource.data.createdBy;
+    }
+    match /requests/{id} {
+      allow read: if isSignedIn();
+      allow create: if recordCreateOk();
+      allow update: if recordUpdateOk();
+      allow delete: if isAdmin();
+    }
+    match /tradeIns/{id} {
+      allow read: if isSignedIn();
+      allow create: if recordCreateOk();
+      allow update: if recordUpdateOk();
+      allow delete: if isAdmin();
+    }
+    match /finance/{id} {
+      allow read: if isSignedIn();
+      allow create: if recordCreateOk();
+      allow update: if recordUpdateOk();
+      allow delete: if isAdmin();
+    }
+
     /* ===================== CONFIG ===================== */
     // Statuses, branches, scoring, lead routing and notification recipients all
     // live here. Readable by everyone signed in (the app cannot render without

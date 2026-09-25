@@ -168,8 +168,8 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   const inc = opts('New'), wrk = opts('Prospect'), sr = opts('Sales Request'), done = opts('Completed');
   check('Incoming cannot jump to Sales Request or Completed', !inc.includes('Sales Request') && !inc.includes('Completed'), inc.join(','));
   check('Incoming can reach Working and fall through', ['Working', 'Prospect', 'Pending', 'Want', 'Lost', 'Unqualified'].every(s => inc.includes(s)), inc.join(','));
-  check('Working offers exactly Erin\'s list (+ Working, Junk)',
-    JSON.stringify(wrk) === JSON.stringify(['Working', 'Prospect', 'Pending', 'Want', 'Completed', 'Lost', 'Unqualified', 'Junk']), wrk.join(','));
+  check('Working offers exactly Erin\'s list (+ Working, Dead, Junk)',
+    JSON.stringify(wrk) === JSON.stringify(['Working', 'Prospect', 'Pending', 'Want', 'Completed', 'Lost', 'Unqualified', 'Dead', 'Junk']), wrk.join(','));
   check('Working does not go back to New', !wrk.includes('New'), wrk.join(','));
   check('Completed from Working goes via the Sales Submittal', P.completesViaSalesRequest('Pending', 'Completed'));
   check('Completed from Sales Request is the back office closing it', !P.completesViaSalesRequest('Sales Request', 'Completed'));
@@ -252,6 +252,72 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   const clientKeys = P.SALES_REQUEST_FIELDS.map(f => f.key);
   check('email and form list the same sales request fields',
     JSON.stringify(serverKeys) === JSON.stringify(clientKeys), `server=[${serverKeys}] client=[${clientKeys}]`);
+
+  // Operations requests (the Smartsheet "Sales Request" form, fields rebuilt
+  // from the 3,496-row "Sales Request Completed" export).
+  const blankReq = P.validateRequest({});
+  check('request requires date, sales person, type, from, date needed',
+    ['requestDate', 'salesPerson', 'requestTypes', 'fromLocation', 'dateNeeded'].every(k => k in blankReq), Object.keys(blankReq).join(','));
+  const internal = { requestDate: '2026-09-25', salesPerson: 'r1', requestTypes: ['Delivery'], fromLocation: 'M1 (Indy)', toLocation: 'M3 (Indy North)', dateNeeded: '2026-09-30' };
+  check('a store-to-store move needs no customer', Object.keys(P.validateRequest(internal)).length === 0);
+  const toCust = P.validateRequest({ ...internal, toLocation: 'External Customer' });
+  check('a delivery to a customer needs name and address', 'customerName' in toCust && 'customerAddress' in toCust);
+  const fromCust = P.validateRequest({ ...internal, fromLocation: 'External Customer', toLocation: 'M1 (Indy)' });
+  check('a pick-up from a customer needs a name but not an address', 'customerName' in fromCust && !('customerAddress' in fromCust));
+  check('needed-by cannot be before the request date', 'dateNeeded' in P.validateRequest({ ...internal, dateNeeded: '2026-09-01' }));
+  const rf = Object.fromEntries(P.REQUEST_FIELDS.map(f => [f.key, f]));
+  check('service box shows for Service and Get Ready', P.isRequestFieldShown(rf.serviceRequest, { requestTypes: ['"Get Ready"'] }) && !P.isRequestFieldShown(rf.serviceRequest, { requestTypes: ['Delivery'] }));
+  check('parts box shows only for Parts', P.isRequestFieldShown(rf.partsRequest, { requestTypes: ['Parts'] }) && !P.isRequestFieldShown(rf.partsRequest, { requestTypes: ['Delivery'] }));
+  check('pruning drops a customer address on an internal move', P.pruneRequest({ ...internal, customerAddress: '1 Main St' }).customerAddress === '');
+  check('every branch has a location code', ['Indy', 'Anderson', 'Indy North', 'Ellettsville', 'Columbus'].every(b => P.fromLocationForBranch(b)));
+  check('location codes match the form', P.fromLocationForBranch('Columbus') === 'M6 (Columbus)' && P.fromLocationForBranch('Indy North') === 'M3 (Indy North)');
+  // Department check-offs.
+  check('delivery + service needs rental and service', JSON.stringify(P.departmentsFor(['Delivery', 'Service'])) === JSON.stringify(['rental', 'service']));
+  check('get ready is a service job', JSON.stringify(P.departmentsFor(['"Get Ready"'])) === JSON.stringify(['service']));
+  check('no check-offs = Open', P.requestStatusFromDone(['Delivery'], {}, 'Open') === 'Open');
+  check('some check-offs = In Progress', P.requestStatusFromDone(['Delivery', 'Parts'], { rental: true }, 'Open') === 'In Progress');
+  check('all needed check-offs = Completed', P.requestStatusFromDone(['Delivery', 'Parts'], { rental: true, parts: true }, 'In Progress') === 'Completed');
+  check('an unneeded department alone does not complete it', P.requestStatusFromDone(['Parts'], { rental: true }, 'Open') === 'In Progress');
+  check('unticking reopens a completed request', P.requestStatusFromDone(['Delivery'], { rental: false }, 'Completed') === 'Open');
+  check('cancelled stays cancelled', P.requestStatusFromDone(['Delivery'], { rental: true }, 'Cancelled') === 'Cancelled');
+  check('rep sees own request', P.isOwnRecordVisible({ salesPerson: 'r1' }, rep) && P.isOwnRecordVisible({ createdBy: 'r1', salesPerson: 'r2' }, rep));
+  check('rep does not see others\' records', !P.isOwnRecordVisible({ salesPerson: 'r2', createdBy: 'a1' }, rep));
+  check('admin sees all records', P.isOwnRecordVisible({ salesPerson: 'r2' }, admin));
+  check('a rep can only cancel an open request', JSON.stringify(P.requestStatusOptionsFor('Open', false)) === JSON.stringify(['Open', 'Cancelled']));
+  check('a rep cannot reopen a completed request', JSON.stringify(P.requestStatusOptionsFor('Completed', false)) === JSON.stringify(['Completed']));
+
+  // Dead (Indy's Prospect sheet).
+  check('Dead is a Completed-step status', st('Dead') === 'completed');
+  check('Working can mark a lead Dead', opts('Prospect').includes('Dead'));
+
+  // Trade-in evaluation.
+  const tiBlank = P.validateFields(P.TRADE_IN_FIELDS, {});
+  check('trade-in needs make/model/year/serial/hours and all 9 ratings',
+    ['make', 'model', 'year', 'serial', 'hours', 'attachmentsIncluded'].every(k => k in tiBlank) && P.TRADE_CONDITIONS.every(c => c.key in tiBlank));
+  const tf = Object.fromEntries(P.TRADE_IN_FIELDS.map(f => [f.key, f]));
+  check('picking Miscellaneous (multi-select) shows its explain box',
+    P.isFieldShown(tf.miscOptions, { machineOptions: ['Cab', 'Miscellaneous'] }) && !P.isFieldShown(tf.miscOptions, { machineOptions: ['Cab'] }));
+  check('trade-in hours must be a number', 'hours' in P.validateFields(P.TRADE_IN_FIELDS, { hours: 'lots' }));
+  check('ratings are 1-5 or N/A', JSON.stringify(P.RATING_OPTIONS) === JSON.stringify(['1', '2', '3', '4', '5', 'N/A']));
+  check('trade-in awaits approval until a manager decides', P.tradeInStatus({}) === 'Awaiting Approval'
+    && P.tradeInStatus({ manager: { approved: 'Yes' } }) === 'Approved' && P.tradeInStatus({ manager: { approved: 'No' } }) === 'Declined');
+
+  // Finance (Sales Tracker).
+  check('a financed submittal needs a finance deal', P.submittalNeedsFinance({ payment: 'Loan' }) && !P.submittalNeedsFinance({ payment: 'Cash' }));
+  const fin = P.financeFromSubmittal({ payment: 'RP', model: 'T66', estimatedValue: '63000', customerName: 'Doub', otherFinancing: 'X' }, null);
+  check('finance pre-fills from the submittal', fin.assetToFinance === 'T66' && fin.amount === '63000' && fin.dealType === 'RP Conversion Request');
+  check('pre-filled finance deal passes validation', Object.keys(P.validateFields(P.FINANCE_REP_FIELDS, fin)).length === 0);
+  check('3-day audit flags Ready to Invoice', P.financeAudit({ admin: { dealStatus: 'Ready to Invoice' }, dealStatusChangedAt: '2026-09-20T10:00:00Z' }, '2026-09-25').length === 1);
+  check('3-day audit passes a fresh Ready to Invoice', P.financeAudit({ admin: { dealStatus: 'Ready to Invoice' }, dealStatusChangedAt: '2026-09-24T10:00:00Z' }, '2026-09-25').length === 0);
+  check('audit flags docs not sent to lender', P.financeAudit({ admin: { invoicingDate: '2026-09-18' } }, '2026-09-25').length === 1);
+  check('funded and declined are closed', ['Invoice-Funded', 'Declined'].every(s => P.FINANCE_CLOSED_STATUSES.includes(s)));
+
+  // The server's copies of the field lists (no shared build) must match.
+  for (const [kind, list] of [['requests', P.REQUEST_FIELDS], ['tradeIns', P.TRADE_IN_FIELDS], ['finance', P.FINANCE_REP_FIELDS]]) {
+    const m = fnSrc.match(new RegExp(`  ${kind}: \\[([\\s\\S]*?)\\n  \\]`));
+    const serverKeys = m ? [...m[1].matchAll(/key: '([^']+)'/g)].map(x => x[1]) : [];
+    check(`${kind} email and form list the same fields`, JSON.stringify(serverKeys) === JSON.stringify(list.map(f => f.key)), `server=[${serverKeys}]`);
+  }
 
   // Every email builder functions/index.js calls must exist. One didn't
   // (buildResubmissionEmailHtml) and the try/catch around it hid the error.

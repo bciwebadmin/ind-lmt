@@ -33,6 +33,9 @@ export const SALES_REQUEST_STATUS = 'Sales Request';
 // code reads the same across forks; Indy's value is 'Completed'.
 export const WON_STATUS           = 'Completed';
 export const LOST_STATUS          = 'Lost';
+// Indy's Prospect sheet marks prospects that went nowhere as "Dead" — kept as
+// its own closed status at Erin's request, separate from Lost and Unqualified.
+export const DEAD_STATUS          = 'Dead';
 export const CANCELLED_STATUS     = 'Cancelled';
 export const JUNK_STATUS          = 'Junk';
 
@@ -62,8 +65,8 @@ export const PIPELINE_STAGES = [
     id: STAGE_COMPLETED,
     label: 'Completed',
     view: 'stage-completed',
-    blurb: 'Finished: completed sales, lost, unqualified or cancelled.',
-    statuses: [WON_STATUS, LOST_STATUS, 'Unqualified', CANCELLED_STATUS]
+    blurb: 'Finished: completed sales, lost, unqualified, dead or cancelled.',
+    statuses: [WON_STATUS, LOST_STATUS, 'Unqualified', DEAD_STATUS, CANCELLED_STATUS]
   }
 ];
 
@@ -152,7 +155,7 @@ export function statusOptionsFor(current, allStatuses = PIPELINE_STATUSES, close
     return [SALES_REQUEST_STATUS, WORKING_STATUS, CANCELLED_STATUS];
   }
   const working   = STAGE_BY_ID[STAGE_WORKING].statuses;
-  const fellThrough = [LOST_STATUS, 'Unqualified'];
+  const fellThrough = [LOST_STATUS, 'Unqualified', DEAD_STATUS];
   const completed = STAGE_BY_ID[STAGE_COMPLETED].statuses;
 
   let base;
@@ -350,7 +353,11 @@ export const BACK_OFFICE_FIELDS = [
 /** Is a showIf-gated field currently visible, given the other answers? */
 export function isFieldShown(field, values) {
   if (!field.showIf) return true;
-  return Object.entries(field.showIf).every(([k, allowed]) => allowed.includes((values || {})[k]));
+  return Object.entries(field.showIf).every(([k, allowed]) => {
+    const v = (values || {})[k];
+    // A multi-select answer shows the field when any picked option matches.
+    return Array.isArray(v) ? v.some(x => allowed.includes(x)) : allowed.includes(v);
+  });
 }
 
 /**
@@ -384,4 +391,288 @@ export function validateSalesRequest(form) {
     if (!Number.isFinite(h) || h < 0) errors.tradeHours = 'A number of hours';
   }
   return errors;
+}
+
+/* ===================== SALES REQUESTS (operations) ===================== */
+// Indy's "Bobcat of Indy Sales Request" sheet: a request to the back office to
+// move or prep something. NOT the Sales Submittal (the deal paperwork above).
+// A lead can have several requests, and many have no lead at all (moving a
+// unit between stores). Stored in their own `requests` collection.
+//
+// Field list reconstructed from the form screenshots plus the 3,496-row
+// "Sales Request Completed" export (the screenshots cut off the middle).
+
+export const REQUEST_TYPES = ['Delivery', 'Demo Equipment', '"Get Ready"', 'Parts', 'Pick Up', 'Service'];
+
+// Indy's location codes, mapped to branch names so a request can default to
+// the lead's branch. M5 is not on the form.
+export const EXTERNAL_LOCATION = 'External Customer';
+export const FROM_LOCATIONS = [
+  { code: 'M1', label: 'M1 (Indy)',         branch: 'Indy' },
+  { code: 'M2', label: 'M2 (Anderson)',     branch: 'Anderson' },
+  { code: 'M3', label: 'M3 (Indy North)',   branch: 'Indy North' },
+  { code: 'M4', label: 'M4 (Ellettsville)', branch: 'Ellettsville' },
+  { code: 'M6', label: 'M6 (Columbus)',     branch: 'Columbus' },
+  { code: 'EXT', label: EXTERNAL_LOCATION,  branch: null }
+];
+const LOCATION_LABELS = FROM_LOCATIONS.map(l => l.label);
+
+export function fromLocationForBranch(branch) {
+  const hit = FROM_LOCATIONS.find(l => l.branch && l.branch === branch);
+  return hit ? hit.label : '';
+}
+
+const involvesExternal = (v) => v.fromLocation === EXTERNAL_LOCATION || v.toLocation === EXTERNAL_LOCATION;
+const hasType = (...types) => (v) => Array.isArray(v.requestTypes) && v.requestTypes.some(t => types.includes(t));
+
+// `showWhen` is a predicate over the answers so far (the Submittal's showIf is
+// value-matching; requests need "any of these types" and "either location").
+export const REQUEST_FIELDS = [
+  { key: 'requestDate',      label: 'Request Date',      type: 'date',  required: true },
+  { key: 'salesPerson',      label: 'Sales Person',      type: 'user',  required: true },
+  { key: 'requestTypes',     label: 'Request Type',      type: 'multi', required: true, options: REQUEST_TYPES },
+  { key: 'fromLocation',     label: 'From Location',     type: 'radio', required: true, options: LOCATION_LABELS },
+  { key: 'toLocation',       label: 'To Location',       type: 'radio', options: LOCATION_LABELS },
+  { key: 'customerName',     label: 'Customer Name',     type: 'text',  requiredWhen: involvesExternal, showWhen: involvesExternal },
+  { key: 'customerAddress',  label: 'Customer Address',  type: 'textarea', requiredWhen: v => v.toLocation === EXTERNAL_LOCATION, showWhen: involvesExternal, placeholder: 'Street, city, ZIP' },
+  { key: 'dateNeeded',       label: 'Date Needed By',    type: 'date',  required: true },
+  { key: 'equipmentRequest', label: 'Equipment Request', type: 'textarea', placeholder: 'Model – EIN – serial, one unit or attachment per line' },
+  { key: 'serviceRequest',   label: 'Service Request',   type: 'textarea', showWhen: hasType('Service', '"Get Ready"'), placeholder: 'PDI, install cutting edge, fix wiring…' },
+  { key: 'partsRequest',     label: 'Parts Request',     type: 'textarea', showWhen: hasType('Parts') },
+  { key: 'comments',         label: 'Additional Comments', type: 'textarea', placeholder: 'Please provide any additional information if necessary' }
+];
+
+export function isRequestFieldShown(field, values) {
+  return !field.showWhen || field.showWhen(values || {});
+}
+
+export function validateRequest(form) {
+  const v = form || {};
+  const errors = {};
+  for (const f of REQUEST_FIELDS) {
+    if (!isRequestFieldShown(f, v)) continue;
+    const required = f.required || (f.requiredWhen && f.requiredWhen(v));
+    const val = v[f.key];
+    const empty = Array.isArray(val) ? val.length === 0 : !String(val ?? '').trim();
+    if (required && empty) errors[f.key] = f.type === 'multi' ? 'Pick at least one' : 'Required';
+  }
+  if (v.requestDate && v.dateNeeded && v.dateNeeded < v.requestDate) {
+    errors.dateNeeded = 'Can’t be before the request date';
+  }
+  return errors;
+}
+
+/** Blank out answers to questions no longer shown (e.g. an address left after switching to an internal move). */
+export function pruneRequest(values) {
+  const out = { ...(values || {}) };
+  for (const f of REQUEST_FIELDS) if (!isRequestFieldShown(f, out)) out[f.key] = '';
+  return out;
+}
+
+// The back office completes a request department by department, as on the
+// Smartsheet: Rental (the yard: deliveries, pick-ups, demos), Service (get
+// ready, service) and Parts. Which departments a request needs follows from its
+// types; the request is Completed when every one of those has checked off.
+export const REQUEST_DEPARTMENTS = [
+  { key: 'rental',  label: 'Rental',  types: ['Delivery', 'Pick Up', 'Demo Equipment'] },
+  { key: 'service', label: 'Service', types: ['Service', '"Get Ready"'] },
+  { key: 'parts',   label: 'Parts',   types: ['Parts'] }
+];
+
+export function departmentsFor(requestTypes) {
+  const types = Array.isArray(requestTypes) ? requestTypes : [];
+  return REQUEST_DEPARTMENTS.filter(d => d.types.some(t => types.includes(t))).map(d => d.key);
+}
+
+export const REQUEST_STATUSES = ['Open', 'In Progress', 'Completed', 'Cancelled'];
+export const OPEN_REQUEST_STATUSES = ['Open', 'In Progress'];
+
+/**
+ * Status follows the check-offs: none -> Open, some -> In Progress, every
+ * involved department -> Completed. Cancelled is only ever set by hand and
+ * sticks until reopened.
+ */
+export function requestStatusFromDone(requestTypes, done, current) {
+  if (current === 'Cancelled') return 'Cancelled';
+  const needed = departmentsFor(requestTypes);
+  const d = done || {};
+  const count = needed.filter(k => d[k]).length;
+  if (needed.length > 0 && count === needed.length) return 'Completed';
+  return count > 0 || Object.values(d).some(Boolean) ? 'In Progress' : 'Open';
+}
+
+/**
+ * Who sees a request: admins (the back office) see all; a rep sees requests
+ * where they are the sales person or which they entered.
+ */
+export function isRequestVisible(req, viewer) {
+  if (!req || !viewer) return false;
+  if (viewer.role === 'admin') return true;
+  return req.salesPerson === viewer.id || req.createdBy === viewer.id;
+}
+
+/** A rep can only cancel their own open request; the back office does the rest. */
+export function requestStatusOptionsFor(current, isAdmin) {
+  if (isAdmin) return REQUEST_STATUSES;
+  return OPEN_REQUEST_STATUSES.includes(current) ? [current, 'Cancelled'] : [current];
+}
+
+/* ===================== TRADE-IN EVALUATION ===================== */
+// Indy's "Trade-In Evaluation" form: the rep inspects the customer's machine;
+// a sales manager (admin) sets the value and approves. Stored in `tradeIns`,
+// linked to a lead when there is one. Ratings are 1 (poor) to 5 (excellent).
+
+export const TRADE_MAKES = ['Bobcat', 'Kubota', 'John Deere', 'CAT', 'Case', 'New Holland', 'Takeuchi', 'Wacker Neuson', 'Can-Am', 'Other'];
+export const TRADE_MACHINE_OPTIONS = ['Cab', 'Heat', 'A/C', '2 Speed', 'Keyless', 'Radio', 'SJC', 'Hand/Foot Control', 'Clamp', 'Arm', 'Miscellaneous'];
+export const RATING_OPTIONS = ['1', '2', '3', '4', '5', 'N/A'];
+export const TRADE_CONDITIONS = [
+  { key: 'paint',      label: 'Paint' },
+  { key: 'decal',      label: 'Decal' },
+  { key: 'pinBushing', label: 'Pin/Bushing' },
+  { key: 'bobtach',    label: 'Bobtach/X-Change' },
+  { key: 'interior',   label: 'Interior' },
+  { key: 'tiresTracks', label: 'Rubber Tires/Tracks' },
+  { key: 'sprocket',   label: 'Sprocket' },
+  { key: 'idler',      label: 'Idler' },
+  { key: 'attachment', label: 'Attachment' }
+];
+
+export const TRADE_IN_FIELDS = [
+  { section: 'Machine', key: 'make',           label: 'Make',          type: 'select', required: true, options: TRADE_MAKES },
+  { section: 'Machine', key: 'model',          label: 'Model',         type: 'text',   required: true },
+  { section: 'Machine', key: 'year',           label: 'Year',          type: 'number', required: true },
+  { section: 'Machine', key: 'serial',         label: 'Serial Number', type: 'text',   required: true },
+  { section: 'Machine', key: 'hours',          label: 'Hour Meter',    type: 'number', required: true },
+  { section: 'Machine', key: 'machineOptions', label: 'Machine Options', type: 'multi', options: TRADE_MACHINE_OPTIONS },
+  { section: 'Machine', key: 'miscOptions',    label: 'Miscellaneous Options (Please explain)', type: 'text', showIf: { machineOptions: ['Miscellaneous'] } },
+  { section: 'Machine', key: 'attachmentsIncluded', label: 'Attachments Included?', type: 'select', required: true, options: ['Yes', 'No'] },
+  { section: 'Machine', key: 'attachments',    label: 'Attachments (Please explain)', type: 'text', showIf: { attachmentsIncluded: ['Yes'] } },
+  ...TRADE_CONDITIONS.map(c => ({ section: 'Condition', key: c.key, label: `${c.label} Condition`, type: 'rating', required: true, options: RATING_OPTIONS })),
+  { section: 'Notes', key: 'operationalNotes', label: 'Operational Notes', type: 'text', placeholder: 'e.g. Y, Y, Y, N, N' },
+  { section: 'Notes', key: 'finalComments',    label: 'Final Comments',    type: 'textarea' }
+];
+export const TRADE_IN_SECTIONS = ['Machine', 'Condition', 'Notes'];
+
+export const TRADE_IN_MANAGER_FIELDS = [
+  { key: 'tradeInValue',    label: 'Trade-In Value',          type: 'text', placeholder: '$' },
+  { key: 'approved',        label: 'Approved',                type: 'select', options: ['Yes', 'No'] },
+  { key: 'managerComments', label: 'Sales Manager Comments',  type: 'textarea' }
+];
+
+export function tradeInStatus(t) {
+  const a = t && t.manager && t.manager.approved;
+  if (a === 'Yes') return 'Approved';
+  if (a === 'No') return 'Declined';
+  return 'Awaiting Approval';
+}
+
+export function validateFields(fields, form) {
+  const errors = {};
+  for (const f of fields) {
+    if (!isFieldShown(f, form)) continue;
+    const v = form ? form[f.key] : undefined;
+    const empty = Array.isArray(v) ? v.length === 0 : !String(v ?? '').trim();
+    if (f.required && empty) errors[f.key] = f.type === 'multi' ? 'Pick at least one' : 'Required';
+    if (!empty && f.type === 'number' && !Number.isFinite(Number(v))) errors[f.key] = 'A number';
+  }
+  return errors;
+}
+
+/* ===================== FINANCE (Sales Tracker) ===================== */
+// Indy's "Bobcat of Indy Sales Tracker": the finance team's funding pipeline
+// for financed deals. The rep's half is what they submit; the finance half is
+// worked by the sales admin (admins in the app). Stored in `finance`, linked
+// to a lead. A Sales Submittal with financing creates one automatically,
+// pre-filled from the submittal (financeFromSubmittal).
+
+export const FINANCE_DEAL_STATUSES = [
+  'Submitted', 'Approved', 'Manual Review', 'Additional Info Needed', 'Declined',
+  'Declined, Sent to 2nd Source', 'Ready to Invoice', 'Invoiced-Pending Funding', 'Invoice-Funded'
+];
+export const FINANCE_CLOSED_STATUSES = ['Declined', 'Invoice-Funded'];
+export const READY_TO_INVOICE = 'Ready to Invoice';
+
+export const FINANCE_REP_FIELDS = [
+  { key: 'customerName',   label: 'Customer Name',       type: 'text', required: true },
+  { key: 'preludeNumber',  label: 'Prelude Customer #',  type: 'text' },
+  { key: 'salesRepNumber', label: 'SalesRep #',          type: 'text', placeholder: 'e.g. Alex Vasquez #819' },
+  { key: 'assetToFinance', label: 'Asset To Finance',    type: 'text', required: true, placeholder: 'e.g. T450 w/ Bucket' },
+  { key: 'unitStatus',     label: 'Unit Status',         type: 'select', required: true, options: ['In Stock', 'Order'] },
+  { key: 'orderNumber',    label: 'Order #',             type: 'text', showIf: { unitStatus: ['Order'] } },
+  { key: 'amount',         label: 'Amount',              type: 'text', required: true, placeholder: '$' },
+  { key: 'dealType',       label: 'Deal Type',           type: 'select', required: true, options: ['Loan', 'Lease', 'Cash', 'RP Conversion Request'] },
+  { key: 'creditApp',      label: 'Credit App?',         type: 'select', options: ['Yes', 'No'] },
+  { key: 'rebates',        label: 'Rebates',             type: 'select', options: ['NONE', 'Cash In Lieu Rebate', 'Mower Rebate', 'Other'] },
+  { key: 'salesRepComments', label: 'Sales Rep Comments', type: 'textarea' }
+];
+
+export const FINANCE_ADMIN_FIELDS = [
+  { key: 'dealStatus',      label: 'Deal Status',        type: 'select', options: FINANCE_DEAL_STATUSES },
+  { key: 'salesAdmin',      label: 'Sales Admin Name',   type: 'text' },
+  { key: 'lenderName',      label: 'Lender Name',        type: 'text', suggestions: ['Aux Capital', 'PNC', 'WF', 'Commercial Capital', 'Sheffield', 'CASH', 'WIRE'] },
+  { key: 'term',            label: 'Term # of months',   type: 'select', options: ['12', '24', '36', '48', '60', '72', '84', 'CASH'] },
+  { key: 'autoApproved',    label: 'Auto Approved',      type: 'select', options: ['Yes', 'No'] },
+  { key: 'approvedDate',    label: 'Approved Date',      type: 'date' },
+  { key: 'resubmitApproval', label: 'Resubmit Approval', type: 'text' },
+  { key: 'docsPreparedDate', label: 'Docs Prepared Date', type: 'date' },
+  { key: 'docsToRepDate',   label: 'Docs to Rep Date',   type: 'date' },
+  { key: 'docsReturnedDate', label: 'Docs Returned Date', type: 'date' },
+  { key: 'invoicingDate',   label: 'Date submitted for invoicing', type: 'date' },
+  { key: 'docsToLenderDate', label: 'Invoice Date and Docs to Lender Date', type: 'date' },
+  { key: 'fundedDate',      label: 'Funded Date',        type: 'date' },
+  { key: 'bcOrderNumber',   label: 'BC ORDER #',         type: 'text' },
+  { key: 'financeComments', label: 'Finance Comments',   type: 'textarea' }
+];
+
+/** Days between two YYYY-MM-DD dates (b defaults to today); null if a is missing. */
+export function daysBetween(a, b) {
+  if (!a) return null;
+  const toUtc = (s) => { const [y, m, d] = String(s).slice(0, 10).split('-').map(Number); return Date.UTC(y, m - 1, d); };
+  const end = b || new Date().toISOString().slice(0, 10);
+  return Math.round((toUtc(end) - toUtc(a)) / 86400000);
+}
+
+/**
+ * The tracker's two audit formulas:
+ *  - "Audit for 3 days on Ready to Invoice": sat in Ready to Invoice > 3 days.
+ *  - "Days Docs to Lender": invoiced but docs not at the lender > 3 days on.
+ */
+export function financeAudit(rec, today) {
+  const f = (rec && rec.admin) || {};
+  const issues = [];
+  if (f.dealStatus === READY_TO_INVOICE && rec.dealStatusChangedAt) {
+    const d = daysBetween(String(rec.dealStatusChangedAt).slice(0, 10), today);
+    if (d !== null && d > 3) issues.push(`Ready to Invoice for ${d} days`);
+  }
+  if (f.invoicingDate && !f.docsToLenderDate) {
+    const d = daysBetween(f.invoicingDate, today);
+    if (d !== null && d > 3) issues.push(`Docs not to lender ${d} days after invoicing`);
+  }
+  return issues;
+}
+
+/** A Sales Submittal financed with a loan, lease or RP needs a finance deal. */
+export function submittalNeedsFinance(sr) {
+  return !!sr && ['Loan', 'Lease', 'RP', 'Other Financing'].includes(sr.payment);
+}
+
+/** Pre-fill a finance deal from the submittal so the rep doesn't type it twice. */
+export function financeFromSubmittal(sr, lead) {
+  const lender = sr.loanLender || sr.lease || sr.otherFinancing || '';
+  return {
+    customerName: sr.customerName || (lead && (lead.companyName || lead.customerName)) || '',
+    assetToFinance: sr.model || '',
+    unitStatus: 'In Stock',
+    amount: sr.estimatedValue || '',
+    dealType: sr.payment === 'RP' ? 'RP Conversion Request' : (sr.payment === 'Other Financing' ? 'Loan' : sr.payment),
+    creditApp: '',
+    rebates: sr.rebate === 'Yes' ? (sr.rebateType === 'Cash in lieu of financing' ? 'Cash In Lieu Rebate' : 'Other') : 'NONE',
+    salesRepComments: lender ? `Lender on submittal: ${lender}` : ''
+  };
+}
+
+export function isOwnRecordVisible(rec, viewer) {
+  if (!rec || !viewer) return false;
+  if (viewer.role === 'admin') return true;
+  return rec.salesPerson === viewer.id || rec.createdBy === viewer.id;
 }

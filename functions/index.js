@@ -1744,6 +1744,236 @@ function buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl }) {
 </html>`;
 }
 
+/* ===================== INDY RECORD EMAILS ===================== */
+
+// Copies of the field lists in src/lib/pipeline.js (keys and labels only — no
+// shared build between client and functions). A test fails if they drift.
+const RECORD_FIELDS = {
+  requests: [
+    { key: 'requestDate', label: 'Request Date' },
+    { key: 'salesPerson', label: 'Sales Person' },
+    { key: 'requestTypes', label: 'Request Type' },
+    { key: 'fromLocation', label: 'From Location' },
+    { key: 'toLocation', label: 'To Location' },
+    { key: 'customerName', label: 'Customer Name' },
+    { key: 'customerAddress', label: 'Customer Address' },
+    { key: 'dateNeeded', label: 'Date Needed By' },
+    { key: 'equipmentRequest', label: 'Equipment Request' },
+    { key: 'serviceRequest', label: 'Service Request' },
+    { key: 'partsRequest', label: 'Parts Request' },
+    { key: 'comments', label: 'Additional Comments' }
+  ],
+  tradeIns: [
+    { key: 'make', label: 'Make' },
+    { key: 'model', label: 'Model' },
+    { key: 'year', label: 'Year' },
+    { key: 'serial', label: 'Serial Number' },
+    { key: 'hours', label: 'Hour Meter' },
+    { key: 'machineOptions', label: 'Machine Options' },
+    { key: 'miscOptions', label: 'Miscellaneous Options (Please explain)' },
+    { key: 'attachmentsIncluded', label: 'Attachments Included?' },
+    { key: 'attachments', label: 'Attachments (Please explain)' },
+    { key: 'paint', label: 'Paint Condition' },
+    { key: 'decal', label: 'Decal Condition' },
+    { key: 'pinBushing', label: 'Pin/Bushing Condition' },
+    { key: 'bobtach', label: 'Bobtach/X-Change Condition' },
+    { key: 'interior', label: 'Interior Condition' },
+    { key: 'tiresTracks', label: 'Rubber Tires/Tracks Condition' },
+    { key: 'sprocket', label: 'Sprocket Condition' },
+    { key: 'idler', label: 'Idler Condition' },
+    { key: 'attachment', label: 'Attachment Condition' },
+    { key: 'operationalNotes', label: 'Operational Notes' },
+    { key: 'finalComments', label: 'Final Comments' }
+  ],
+  finance: [
+    { key: 'customerName', label: 'Customer Name' },
+    { key: 'preludeNumber', label: 'Prelude Customer #' },
+    { key: 'salesRepNumber', label: 'SalesRep #' },
+    { key: 'assetToFinance', label: 'Asset To Finance' },
+    { key: 'unitStatus', label: 'Unit Status' },
+    { key: 'orderNumber', label: 'Order #' },
+    { key: 'amount', label: 'Amount' },
+    { key: 'dealType', label: 'Deal Type' },
+    { key: 'creditApp', label: 'Credit App?' },
+    { key: 'rebates', label: 'Rebates' },
+    { key: 'salesRepComments', label: 'Sales Rep Comments' }
+  ]
+};
+
+// Who each kind of record goes to (config/app.notifications.<key>) and how the
+// email reads. The rep (sales person) is always cc'd and set as reply-to.
+const RECORD_KINDS = {
+  requests: { list: 'salesRequestEmails', title: 'Sales Request', settings: 'Sales Submittals' },
+  tradeIns: { list: 'tradeInEmails',      title: 'Trade-In Evaluation', settings: 'Trade-In Evaluations' },
+  finance:  { list: 'financeEmails',      title: 'Finance Deal', settings: 'Finance' }
+};
+
+/**
+ * Emails a new request / trade-in evaluation / finance deal to whoever handles
+ * it. Only { kind, id } come from the browser — the record, its lead and the
+ * recipients are read here, so a caller cannot put words in the email or
+ * address it elsewhere. Allowed for admins, the record's sales person, and
+ * whoever entered it.
+ */
+exports.sendRecordEmail = onCall(
+  {
+    secrets: [RESEND_API_KEY],
+    region: 'us-south1'
+  },
+  async (request) => {
+    const callerId = request.auth?.uid;
+    if (!callerId) throw new HttpsError('unauthenticated', 'You must be signed in.');
+    const kind = String((request.data || {}).kind || '');
+    const id = String((request.data || {}).id || '');
+    const spec = RECORD_KINDS[kind];
+    if (!spec) throw new HttpsError('invalid-argument', 'Unknown record kind.');
+    if (!id || id.length > 200 || id.includes('/')) throw new HttpsError('invalid-argument', 'id is required.');
+
+    const snap = await db.collection(kind).doc(id).get();
+    if (!snap.exists) throw new HttpsError('not-found', 'Record not found.');
+    const rec = snap.data();
+
+    const callerDoc = await db.collection('users').doc(callerId).get();
+    const isAdmin = callerDoc.exists && callerDoc.data().role === 'admin';
+    if (!isAdmin && rec.salesPerson !== callerId && rec.createdBy !== callerId) {
+      throw new HttpsError('permission-denied', 'Only the sales person, whoever entered it, or an admin can send this.');
+    }
+
+    let rep = null;
+    if (rec.salesPerson) {
+      try {
+        const repDoc = await db.collection('users').doc(rec.salesPerson).get();
+        if (repDoc.exists) rep = repDoc.data();
+      } catch { /* proceed without */ }
+    }
+    let lead = null;
+    if (rec.leadId) {
+      try {
+        const leadDoc = await db.collection('leads').doc(rec.leadId).get();
+        if (leadDoc.exists) lead = leadDoc.data();
+      } catch { /* proceed without */ }
+    }
+
+    const repEmail = rep?.email && rep.email.includes('@') ? rep.email.trim() : '';
+    const desk = await getNotificationRecipients(spec.list);
+    const repInDesk = repEmail && desk.some(e => normalizeEmail(e) === normalizeEmail(repEmail));
+    const to = desk.length ? desk : (repEmail ? [repEmail] : []);
+    if (to.length === 0) {
+      console.log(`[${kind}] No recipients — skipping`);
+      return { sent: false, reason: 'no-recipients', deskRecipients: 0 };
+    }
+
+    const summary = recordSummary(kind, rec, lead);
+    const leadUrl = rec.leadId ? `${CRM_URL.value()}?lead=${encodeURIComponent(rec.leadId)}` : CRM_URL.value();
+    const html = buildRecordEmailHtml({ kind, spec, rec, lead, rep, leadUrl, summary });
+
+    try {
+      const resend = new Resend(RESEND_API_KEY.value());
+      const message = { from: EMAIL_FROM.value(), to, subject: `${spec.title}: ${summary}`.slice(0, 180), html };
+      if (desk.length && repEmail && !repInDesk) message.cc = [repEmail];
+      if (repEmail) message.reply_to = repEmail;
+      const result = await resend.emails.send(message);
+      if (result.error) {
+        console.error(`[${kind}] Resend error:`, result.error);
+        return { sent: false, reason: 'send-failed', deskRecipients: desk.length };
+      }
+      console.log(`[${kind}] Sent ${id} to ${to.length} recipient(s)${message.cc ? ' + rep cc' : ''}`);
+      return { sent: true, deskRecipients: desk.length };
+    } catch (err) {
+      console.error(`[${kind}] Failed to send:`, err);
+      return { sent: false, reason: 'send-failed', deskRecipients: desk.length };
+    }
+  }
+);
+
+function recordSummary(kind, rec, lead) {
+  const who = rec.customerName || lead?.companyName || lead?.customerName || '';
+  if (kind === 'requests') {
+    const types = Array.isArray(rec.requestTypes) ? rec.requestTypes.join(', ') : 'Request';
+    return `${types}${who ? ` — ${who}` : ''}${rec.dateNeeded ? ` (needed ${rec.dateNeeded})` : ''}`;
+  }
+  if (kind === 'tradeIns') {
+    return [rec.year, rec.make, rec.model].filter(Boolean).join(' ') + (rec.hours ? `, ${rec.hours} hrs` : '') + (who ? ` — ${who}` : '');
+  }
+  return `${who || 'Customer'} — ${rec.assetToFinance || ''}${rec.amount ? ` ($${rec.amount})` : ''}`;
+}
+
+function buildRecordEmailHtml({ kind, spec, rec, lead, rep, leadUrl, summary }) {
+  const row = (label, value) => {
+    const v = value === undefined || value === null ? '' : (Array.isArray(value) ? value.join(', ') : String(value)).trim();
+    if (!v) return '';
+    return `<tr>
+      <td width="170" style="width: 170px; padding: 5px 12px 5px 0; font-size: 13px; color: #78716c; vertical-align: top;">${escapeHtml(label)}</td>
+      <td style="padding: 5px 0; font-size: 14px; color: #1c1917; font-weight: 600; white-space: pre-wrap;">${escapeHtml(v.slice(0, 1500))}</td>
+    </tr>`;
+  };
+  const fieldRows = RECORD_FIELDS[kind]
+    .map(f => f.key === 'salesPerson' ? row(f.label, rep?.name) : row(f.label, rec[f.key]))
+    .join('');
+  const leadRows = lead ? [
+    row('Contact', lead.customerName),
+    row('Company', lead.companyName),
+    row('Phone', lead.phone),
+    row('Email', lead.contactEmail),
+    row('Branch', lead.branch)
+  ].join('') : '';
+  const block = (title, rowsHtml) => rowsHtml ? `<tr>
+    <td style="padding: 0 28px 16px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #fafaf9; border: 1px solid #e7e5e4; border-radius: 6px;">
+        <tr><td style="padding: 16px 20px;">
+          <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: #78716c; font-weight: 700; padding-bottom: 6px;">${title}</div>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">${rowsHtml}</table>
+        </td></tr>
+      </table>
+    </td>
+  </tr>` : '';
+
+  return `<!DOCTYPE html>
+<html>
+<body style="margin: 0; padding: 0; background-color: #f5f5f4; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #f5f5f4; padding: 24px 0;">
+    <tr><td align="center">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background-color: #1c1917; padding: 20px 28px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="padding-right: 12px;">
+                  <div style="width: 36px; height: 36px; background-color: #ff3300; display: inline-block; text-align: center; line-height: 36px; font-size: 22px; font-weight: 800; color: #ffffff; border-radius: 4px;">B</div>
+                </td>
+                <td>
+                  <div style="color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">BOBCAT OF INDY</div>
+                  <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">${escapeHtml(spec.title)}</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 28px 28px 16px;">
+            <div style="font-size: 20px; font-weight: 700; color: #1c1917;">${escapeHtml(summary)}</div>
+            <div style="font-size: 14px; color: #57534e; margin-top: 4px;">Submitted by ${escapeHtml(rep?.name || 'a sales person')}. Reply to this email to reach them.</div>
+          </td>
+        </tr>
+        ${block(spec.title, fieldRows)}
+        ${block('Customer (from the lead)', leadRows)}
+        <tr>
+          <td style="padding: 8px 28px 28px; text-align: center;">
+            <a href="${leadUrl}" style="display: inline-block; background-color: #d62b00; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-size: 14px; font-weight: 700; letter-spacing: 0.3px;">${lead ? 'View Lead' : 'Open the LMT'} &rarr;</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 0 28px 28px; text-align: center; color: #a8a29e; font-size: 11px;">
+            You received this email because you are on the ${escapeHtml(spec.settings)} list for the Bobcat of Indy LMT, or you are the sales person. To change recipients, sign in and visit Settings.
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 exports.sendWelcomeEmail = onCall(
   {
     secrets: [RESEND_API_KEY],

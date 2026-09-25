@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
@@ -23,7 +23,8 @@ import {
   subscribeToLeads, subscribeToConfig, subscribeToUsers, subscribeToAccessRequests,
   addLeadDoc, updateLeadDoc, deleteLeadDoc, bulkImportLeads, clearAllLeads, bulkDeleteLeads,
   saveConfigDoc, saveUserDoc, deleteUserDoc,
-  addAccessRequestDoc, deleteAccessRequestDoc
+  addAccessRequestDoc, deleteAccessRequestDoc,
+  subscribeToRecords, addRecordDoc, updateRecordDoc
 } from './lib/firestoreData';
 
 import {
@@ -32,7 +33,8 @@ import {
   reassignUserLeadsViaFunction, restoreLoaLeadsForUserViaFunction,
   adminResetUserPasswordViaFunction,
   sendImportSummaryEmailViaFunction,
-  sendSalesRequestEmailViaFunction
+  sendSalesRequestEmailViaFunction,
+  sendRecordEmailViaFunction
 } from './lib/firestoreAuth';
 import { nearestBranchForZip } from './lib/branchRouting';
 import {
@@ -42,7 +44,12 @@ import {
   getStage, stageForView, stageOfStatus, stageOfLead, statusOptionsFor, bulkStatusOptionsFor,
   ensurePipelineStatuses, isLeadVisibleInStage, isUnassigned, completesViaSalesRequest, canCloseSalesRequest,
   DEAL_FIELDS, LOST_FIELDS, SALES_REQUEST_FIELDS, SALES_REQUEST_SECTIONS, BACK_OFFICE_FIELDS,
-  isFieldShown, pruneHiddenAnswers, validateSalesRequest
+  isFieldShown, pruneHiddenAnswers, validateSalesRequest,
+  OPEN_REQUEST_STATUSES, REQUEST_FIELDS, REQUEST_DEPARTMENTS, validateRequest, isRequestFieldShown, pruneRequest,
+  departmentsFor, requestStatusFromDone, requestStatusOptionsFor, fromLocationForBranch, EXTERNAL_LOCATION,
+  TRADE_IN_FIELDS, TRADE_IN_SECTIONS, TRADE_IN_MANAGER_FIELDS, tradeInStatus, validateFields,
+  FINANCE_REP_FIELDS, FINANCE_ADMIN_FIELDS, FINANCE_CLOSED_STATUSES, financeAudit,
+  submittalNeedsFinance, financeFromSubmittal, isOwnRecordVisible
 } from './lib/pipeline';
 
 const DEFAULT_CONFIG = {
@@ -328,6 +335,7 @@ const STATUS_COLORS = {
   Completed:      { bg: 'bg-emerald-50',text: 'text-emerald-700',dot: 'bg-emerald-500'},
   'Sales Request':{ bg: 'bg-orange-50', text: 'text-orange-700', dot: 'bg-orange-500' },
   Cancelled:      { bg: 'bg-stone-100', text: 'text-stone-600',  dot: 'bg-stone-400'  },
+  Dead:           { bg: 'bg-stone-200', text: 'text-stone-700',  dot: 'bg-stone-600'  },
   Won:            { bg: 'bg-emerald-50',text: 'text-emerald-700',dot: 'bg-emerald-500'},
   Lost:           { bg: 'bg-rose-50',   text: 'text-rose-700',   dot: 'bg-rose-500'   },
   Unqualified:    { bg: 'bg-stone-100', text: 'text-stone-600',  dot: 'bg-stone-400'  },
@@ -837,12 +845,13 @@ const DEFAULT_STALENESS = {
     Completed: null,
     Lost: null,
     Unqualified: null,
+    Dead: null,
     Cancelled: null
   }
 };
 // Thresholds ensurePipelineStatuses adds to a stored config that predates them.
 const PIPELINE_STALENESS_DEFAULTS = {
-  Prospect: 336, Pending: 168, Want: 336, 'Sales Request': 72, Completed: null, Cancelled: null
+  Prospect: 336, Pending: 168, Want: 336, 'Sales Request': 72, Completed: null, Dead: null, Cancelled: null
 };
 
 function getLastActivityAt(lead) {
@@ -990,12 +999,15 @@ export default function BobcatIndyCRM() {
     // Allow ?view=users or ?view=leads etc. via URL — used by email notifications
     try {
       const requested = new URLSearchParams(window.location.search).get('view');
-      const valid = [HOME_VIEW, ...STAGE_VIEWS, 'my-created', 'archived', 'junk', 'add', 'import', 'reports', 'users', 'lead-routing', 'scoring', 'settings'];
+      const valid = [HOME_VIEW, ...STAGE_VIEWS, 'trade-ins', 'my-created', 'archived', 'junk', 'add', 'import', 'reports', 'users', 'lead-routing', 'scoring', 'settings'];
       if (requested && valid.includes(requested)) return requested;
     } catch { /* ignore */ }
     return HOME_VIEW;
   });
   const [leads, setLeads] = useState([]);
+  // Indy's records that hang off leads but can also stand alone (see
+  // pipeline.js): operations requests, trade-in evaluations, finance deals.
+  const [records, setRecords] = useState({ requests: [], tradeIns: [], finance: [] });
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [users, setUsers] = useState([SYSTEM_UNASSIGNED]);
   const [accessRequests, setAccessRequests] = useState([]);
@@ -1045,6 +1057,7 @@ export default function BobcatIndyCRM() {
     if (!currentUserId) {
       // Reset to defaults when signed out so a re-sign-in starts clean
       setLeads([]);
+      setRecords({ requests: [], tradeIns: [], finance: [] });
       setConfig(DEFAULT_CONFIG);
       setUsers([SYSTEM_UNASSIGNED]);
       setAccessRequests([]);
@@ -1057,6 +1070,9 @@ export default function BobcatIndyCRM() {
       // that lands, this keeps every filter, chart and dropdown coherent.
       setLeads(data.map(normalizeLeadStatus));
     });
+
+    const unsubRecords = ['requests', 'tradeIns', 'finance'].map(kind =>
+      subscribeToRecords(kind, (data) => setRecords(r => ({ ...r, [kind]: data }))));
 
     const unsubConfig = subscribeToConfig((data) => {
       const merged = {
@@ -1076,7 +1092,7 @@ export default function BobcatIndyCRM() {
     });
 
     return () => {
-      unsubLeads(); unsubConfig(); unsubUsers();
+      unsubLeads(); unsubRecords.forEach(u => u()); unsubConfig(); unsubUsers();
     };
   }, [currentUserId]);
 
@@ -1243,6 +1259,18 @@ export default function BobcatIndyCRM() {
     }
     return out;
   }, [pipelineLeads, config.closedStatuses, currentUser]);
+
+  // Records this user may see (admins all; reps their own), per kind.
+  const visibleRecords = useMemo(() => {
+    const out = { requests: [], tradeIns: [], finance: [] };
+    if (!currentUser) return out;
+    for (const k of Object.keys(out)) out[k] = records[k].filter(r => isOwnRecordVisible(r, currentUser));
+    return out;
+  }, [records, currentUser]);
+  const visibleRequests = visibleRecords.requests;
+  const openRequestCount = visibleRequests.filter(r => OPEN_REQUEST_STATUSES.includes(r.status)).length;
+  const openFinanceCount = visibleRecords.finance.filter(f => !FINANCE_CLOSED_STATUSES.includes(f.admin?.dealStatus)).length;
+  const pendingTradeInCount = visibleRecords.tradeIns.filter(t => tradeInStatus(t) === 'Awaiting Approval').length;
 
   // Where a given lead lives, for "take me to it" navigation after adding one.
   const stageViewOf = (lead) => {
@@ -1691,6 +1719,12 @@ export default function BobcatIndyCRM() {
     const saved = await updateLead(leadId, { ...extraPatch, status: SALES_REQUEST_STATUS, salesRequest });
     if (!saved) { setSalesRequestBusy(false); return; }   // updateLead already said why
     const res = await sendSalesRequestEmailViaFunction({ leadId });
+    // A financed deal goes to the finance team's tracker too — pre-filled, so
+    // the rep doesn't type it twice. Only once per lead.
+    if (submittalNeedsFinance(salesRequest) && !records.finance.some(f => f.leadId === leadId)) {
+      const salesPerson = !isUnassigned(lead) ? lead.assignedTo : currentUser.id;
+      await createRecord('finance', { ...financeFromSubmittal(salesRequest, lead), salesPerson }, leadId, { quiet: true });
+    }
     setSalesRequestBusy(false);
     setSalesRequestPrompt(null);
     if (res?.sent && res.deskRecipients > 0) {
@@ -1702,6 +1736,145 @@ export default function BobcatIndyCRM() {
     } else {
       showToast('Moved to Sales Request — but the email failed to send', 'error');
     }
+  };
+
+  // ------------- INDY RECORDS: requests, trade-ins, finance -------------
+  // One prompt state for all three forms: { kind, leadId (or null), prefill }.
+  const [recordPrompt, setRecordPrompt] = useState(null);
+  const [recordBusy, setRecordBusy] = useState(false);
+  const RECORD_NAMES = { requests: 'Sales request', tradeIns: 'Trade-in evaluation', finance: 'Finance deal' };
+
+  const emailOutcome = (res, what) => {
+    if (res?.sent && res.deskRecipients > 0) {
+      showToast(`${what} sent to ${res.deskRecipients} recipient${res.deskRecipients === 1 ? '' : 's'}`);
+    } else if (res?.sent) {
+      showToast(`${what} saved — no recipients set in Settings, so only the sales person was emailed`, 'error');
+    } else if (res?.reason === 'no-recipients') {
+      showToast(`${what} saved — but no one was emailed. Add recipients in Settings.`, 'error');
+    } else {
+      showToast(`${what} saved — but the email failed to send`, 'error');
+    }
+  };
+
+  // Saves a new record, then emails whoever handles that kind. Returns the id.
+  const createRecord = async (kind, fields, leadId = null, { email = true, quiet = false } = {}) => {
+    if (!currentUser) return null;
+    const now = new Date().toISOString();
+    const shape = {
+      ...fields,
+      leadId: leadId || null,
+      salesPerson: fields.salesPerson || currentUser.id,
+      createdAt: now,
+      createdBy: currentUser.id,
+      history: [{ id: uid('h'), type: 'created', timestamp: now, actor: currentUser.id }]
+    };
+    if (kind === 'requests') { shape.status = 'Open'; shape.statusChangedAt = now; shape.done = {}; }
+    if (kind === 'finance')  { shape.admin = { dealStatus: 'Submitted' }; shape.dealStatusChangedAt = now; }
+    let id;
+    try {
+      id = await addRecordDoc(kind, shape);
+    } catch (e) {
+      showToast(`Failed to save the ${RECORD_NAMES[kind].toLowerCase()}`, 'error');
+      return null;
+    }
+    if (email) {
+      const res = await sendRecordEmailViaFunction({ kind, id });
+      if (!quiet) emailOutcome(res, RECORD_NAMES[kind]);
+    }
+    return id;
+  };
+
+  const submitRecordPrompt = async (fields) => {
+    if (!recordPrompt) return;
+    setRecordBusy(true);
+    // A trade-in or finance deal made from a lead belongs to the lead's rep, not
+    // to whoever happened to type it (a request picks its Sales Person itself).
+    const lead = recordPrompt.leadId ? leads.find(l => l.id === recordPrompt.leadId) : null;
+    const withRep = (!fields.salesPerson && lead && !isUnassigned(lead)) ? { ...fields, salesPerson: lead.assignedTo } : fields;
+    const id = await createRecord(recordPrompt.kind, withRep, recordPrompt.leadId);
+    setRecordBusy(false);
+    if (id) setRecordPrompt(null);
+  };
+
+  // Every change to a record goes through here so its history stays complete.
+  // `changes` names what changed for the log (status moves are logged as such).
+  const updateRecord = async (kind, id, patch, note) => {
+    const rec = records[kind].find(r => r.id === id);
+    if (!rec) return false;
+    const now = new Date().toISOString();
+    const out = { ...patch };
+    const events = [];
+    if (patch.status !== undefined && patch.status !== rec.status) {
+      out.statusChangedAt = now;
+      events.push({ type: 'status_change', from: rec.status || null, to: patch.status });
+    }
+    const newDeal = patch.admin && patch.admin.dealStatus;
+    if (newDeal !== undefined && newDeal !== (rec.admin && rec.admin.dealStatus)) {
+      out.dealStatusChangedAt = now;
+      events.push({ type: 'status_change', from: (rec.admin && rec.admin.dealStatus) || null, to: newDeal });
+    }
+    if (note) events.push({ type: 'edited', note });
+    if (events.length) {
+      out.history = [...(rec.history || []), ...events.map(e => ({ id: uid('h'), timestamp: now, actor: currentUser?.id || null, ...e }))];
+    }
+    try {
+      await updateRecordDoc(kind, id, out);
+      return true;
+    } catch (e) {
+      showToast('Failed to save the change', 'error');
+      return false;
+    }
+  };
+
+  // Requests: a department checking off recomputes the status.
+  const updateRequest = async (id, patch) => {
+    const rec = records.requests.find(r => r.id === id);
+    if (!rec) return false;
+    if (patch.done) {
+      const status = requestStatusFromDone(rec.requestTypes, patch.done, rec.status);
+      return updateRecord('requests', id, { ...patch, status }, 'Department check-off');
+    }
+    return updateRecord('requests', id, patch);
+  };
+
+  // A sale that never went through the LMT (walk-in, counter sale): creates the
+  // lead and its Sales Submittal together, straight into the Sales Request step.
+  const [newSubmittalOpen, setNewSubmittalOpen] = useState(false);
+  // Which half of the Sales Request dashboard is showing.
+  const [srTab, setSrTab] = useState('submittals');
+  const submitNewSubmittal = async (form, extraPatch, newLead) => {
+    if (!currentUser) return;
+    setSalesRequestBusy(true);
+    const now = new Date().toISOString();
+    const lead = await addLead({
+      customerName: newLead.customerName,
+      companyName: newLead.companyName,
+      phone: newLead.phone,
+      contactEmail: newLead.contactEmail,
+      branch: extraPatch.branch || '',
+      department: 'Sales',
+      formTitle: 'Manual Sales Submittal',
+      submittedBy: currentUser.name || '',
+      assignedTo: newLead.assignedTo,
+      dateAssigned: now,
+      status: SALES_REQUEST_STATUS,
+      statusChangedAt: now,
+      statusChangedBy: currentUser.id,
+      salesRequest: { ...form, submittedAt: now, submittedBy: currentUser.id },
+      history: [
+        { id: uid('h'), type: 'created', timestamp: now, actor: currentUser.id, source: MANUAL_SOURCE },
+        { id: uid('h'), type: 'sales_request', timestamp: now, actor: currentUser.id, equipment: form.model || '' }
+      ]
+    }, MANUAL_SOURCE);
+    if (!lead) { setSalesRequestBusy(false); return; }
+    const res = await sendSalesRequestEmailViaFunction({ leadId: lead.id });
+    if (submittalNeedsFinance(form)) {
+      await createRecord('finance', { ...financeFromSubmittal(form, lead), salesPerson: newLead.assignedTo }, lead.id, { quiet: true });
+    }
+    setSalesRequestBusy(false);
+    setNewSubmittalOpen(false);
+    emailOutcome(res, 'Sales Submittal');
+    setSelectedLead(lead);
   };
 
   const deleteLead = async (id) => {
@@ -1966,6 +2139,7 @@ export default function BobcatIndyCRM() {
         <Sidebar
           view={view} setView={setView}
           stageCounts={Object.fromEntries(PIPELINE_STAGES.map(s => [s.id, stageLeads[s.id].length]))}
+          tradeInCount={pendingTradeInCount}
           myCreatedCount={pipelineLeads.filter(l => isCreatedByUser(l, currentUser.id)).length}
           archivedCount={archivedLeads.length}
           junkCount={junkLeads.length}
@@ -1988,12 +2162,64 @@ export default function BobcatIndyCRM() {
             {view === HOME_VIEW && (
               <StageHomeView
                 stageLeads={stageLeads}
+                openRequestCount={openRequestCount}
+                onOpenRequests={() => { setSrTab('requests'); setView(getStage(STAGE_SALES_REQUEST).view); }}
+                openFinanceCount={openFinanceCount}
+                onOpenFinance={() => { setSrTab('finance'); setView(getStage(STAGE_SALES_REQUEST).view); }}
                 config={configWithUsers}
                 currentUser={currentUser}
                 onOpen={setView}
               />
             )}
-            {PIPELINE_STAGES.map(stage => view === stage.view && (
+            {view === getStage(STAGE_SALES_REQUEST).view && (
+              /* The Sales Request step holds two kinds of back-office work:
+                 submittals (leads) and operations requests (their own records). */
+              <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
+                <div className="inline-flex rounded-md border border-stone-200 bg-white p-0.5" role="tablist">
+                  {[['submittals', 'Sales Submittals', stageLeads[STAGE_SALES_REQUEST].length],
+                    ['requests', 'Sales Requests', openRequestCount],
+                    ['finance', 'Finance', openFinanceCount]].map(([k, label, n]) => (
+                    <button key={k} role="tab" aria-selected={srTab === k} onClick={() => setSrTab(k)}
+                      className={`text-sm font-semibold px-4 py-2 rounded ${srTab === k ? 'bg-stone-900 text-white' : 'text-stone-600 hover:text-stone-900'}`}>
+                      {label} <span className="font-mono text-xs opacity-70 ml-1">{n}</span>
+                    </button>
+                  ))}
+                </div>
+                {srTab === 'submittals' && (
+                  <button onClick={() => setNewSubmittalOpen(true)}
+                    className="text-xs px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-md inline-flex items-center gap-1.5"
+                    title="Enter a sale that didn't come through the LMT">
+                    <Plus size={13}/> New Sales Submittal
+                  </button>
+                )}
+              </div>
+            )}
+            {view === getStage(STAGE_SALES_REQUEST).view && srTab === 'requests' && (
+              <RequestsView
+                requests={visibleRequests} leads={leads} config={configWithUsers} currentUser={currentUser}
+                onUpdate={updateRequest}
+                onOpenLead={setSelectedLead}
+                onNew={() => setRecordPrompt({ kind: 'requests', leadId: null })}
+              />
+            )}
+            {view === getStage(STAGE_SALES_REQUEST).view && srTab === 'finance' && (
+              <FinanceView
+                deals={visibleRecords.finance} leads={leads} config={configWithUsers} currentUser={currentUser}
+                onUpdate={(id, patch, note) => updateRecord('finance', id, patch, note)}
+                onOpenLead={setSelectedLead}
+                onNew={() => setRecordPrompt({ kind: 'finance', leadId: null })}
+              />
+            )}
+            {view === 'trade-ins' && (
+              <TradeInsView
+                tradeIns={visibleRecords.tradeIns} leads={leads} config={configWithUsers} currentUser={currentUser}
+                onUpdate={(id, patch, note) => updateRecord('tradeIns', id, patch, note)}
+                onOpenLead={setSelectedLead}
+                onNew={() => setRecordPrompt({ kind: 'tradeIns', leadId: null })}
+              />
+            )}
+            {PIPELINE_STAGES.map(stage => view === stage.view
+              && !(stage.id === STAGE_SALES_REQUEST && srTab !== 'submittals') && (
               /* One dashboard per step. `stageLeads` is already narrowed to the
                  step AND to what this user may see, so the table does no
                  scoping of its own (scope="all"). `stage` only drives the
@@ -2095,6 +2321,14 @@ export default function BobcatIndyCRM() {
           onRestoreJunk={restoreLeadFromJunk}
           onStatusChange={requestStatusChange}
           onExtendWorking={requestWorkingExtend}
+          leadRecords={{
+            requests: records.requests.filter(r => r.leadId === selectedLead.id),
+            tradeIns: records.tradeIns.filter(r => r.leadId === selectedLead.id),
+            finance:  records.finance.filter(r => r.leadId === selectedLead.id)
+          }}
+          onUpdateRequest={updateRequest}
+          onUpdateRecord={updateRecord}
+          onNewRecord={(kind, leadId) => setRecordPrompt({ kind, leadId })}
         />
       )}
 
@@ -2109,6 +2343,30 @@ export default function BobcatIndyCRM() {
           />
         );
       })()}
+
+      {recordPrompt && (() => {
+        const recLead = recordPrompt.leadId ? leads.find(l => l.id === recordPrompt.leadId) : null;
+        const common = {
+          lead: recLead, config: configWithUsers, currentUser, busy: recordBusy,
+          onSubmit: submitRecordPrompt,
+          onCancel: () => { if (!recordBusy) setRecordPrompt(null); }
+        };
+        if (recordPrompt.kind === 'requests') return <RequestModal {...common}/>;
+        if (recordPrompt.kind === 'tradeIns') return <TradeInModal {...common}/>;
+        return <FinanceModal {...common}/>;
+      })()}
+
+      {newSubmittalOpen && (
+        <SalesRequestModal
+          lead={{}}
+          newLead
+          config={configWithUsers}
+          currentUser={currentUser}
+          busy={salesRequestBusy}
+          onSubmit={submitNewSubmittal}
+          onCancel={() => { if (!salesRequestBusy) setNewSubmittalOpen(false); }}
+        />
+      )}
 
       {salesRequestPrompt && (() => {
         const srLead = leads.find(l => l.id === salesRequestPrompt.leadId);
@@ -2420,7 +2678,7 @@ function AuthField({ label, children }) {
 }
 
 /* ===================== SIDEBAR ===================== */
-function Sidebar({ view, setView, stageCounts = {}, myCreatedCount, archivedCount, junkCount, userRole, pendingCount, mobileOpen, onMobileClose }) {
+function Sidebar({ view, setView, stageCounts = {}, tradeInCount = 0, myCreatedCount, archivedCount, junkCount, userRole, pendingCount, mobileOpen, onMobileClose }) {
   // Filter using the canAccessView helper so the rule lives in one place.
   // Each item just declares its view id; access is computed centrally.
   // The pipeline group comes first: the picker, then the four steps in order.
@@ -2429,7 +2687,8 @@ function Sidebar({ view, setView, stageCounts = {}, myCreatedCount, archivedCoun
     ...PIPELINE_STAGES.map(s => ({
       id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id] || undefined, indent: true
     })),
-    { id: 'my-created', label: 'My Created Leads', icon: Edit3,   badge: myCreatedCount || undefined, groupStart: true },
+    { id: 'trade-ins',  label: 'Trade-Ins',   icon: RefreshCw,  badge: tradeInCount || undefined, groupStart: true },
+    { id: 'my-created', label: 'My Created Leads', icon: Edit3,   badge: myCreatedCount || undefined },
     { id: 'archived',   label: 'Archived',    icon: ArchiveX,   badge: archivedCount || undefined },
     { id: 'junk',       label: 'Junk',        icon: Trash2,     badge: junkCount || undefined },
     { id: 'add',        label: 'Add Lead',    icon: Plus },
@@ -2519,6 +2778,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
     [HOME_VIEW]: 'Dashboards',
     ...Object.fromEntries(PIPELINE_STAGES.map(s => [s.view, s.label])),
     'my-created': 'My Created Leads',
+    'trade-ins': 'Trade-In Evaluations',
     archived: 'Archived Leads',
     junk: 'Junk',
     add: 'Add Lead', import: 'Import Leads',
@@ -2568,6 +2828,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
               {view === HOME_VIEW && (mine ? 'Your leads at each step of the sale' : 'Every lead, at each step of the sale')}
               {stage && `${stats.total} lead${stats.total === 1 ? '' : 's'}${mine ? (stage.id === STAGE_INCOMING ? ' assigned to you or unassigned' : ' assigned to you') : ''} · ${stage.blurb}`}
               {view === 'my-created' && `${stats.total} lead${stats.total === 1 ? '' : 's'} you entered · ${stats.open} still open, ${stats.won} won, ${stats.lost} lost`}
+              {view === 'trade-ins' && (mine ? 'Your trade-in evaluations and their approval status' : 'Trade-in evaluations waiting for a value and approval')}
               {view === 'archived' && 'Leads closed for 30+ days — exported or cleared from here'}
               {view === 'junk' && 'Spam and non-leads, kept out of every dashboard and report'}
               {view === 'add' && 'Manually enter a new lead'}
@@ -6393,7 +6654,7 @@ function statusBarColor(status) {
   const map = {
     New: '#3b82f6', Contacted: '#f59e0b', Working: '#8b5cf6', Qualified: '#8b5cf6', Quoted: '#06b6d4',
     Won: '#10b981', Completed: '#10b981', Lost: '#f43f5e', Unqualified: '#a8a29e',
-    Prospect: '#0ea5e9', Pending: '#f59e0b', Want: '#06b6d4', 'Sales Request': '#f97316', Cancelled: '#a8a29e'
+    Prospect: '#0ea5e9', Pending: '#f59e0b', Want: '#06b6d4', 'Sales Request': '#f97316', Cancelled: '#a8a29e', Dead: '#57534e'
   };
   return map[status] || '#a8a29e';
 }
@@ -7145,8 +7406,8 @@ function NotificationsConfigCard({ config, onSave }) {
   const newLeadEmails = Array.isArray(config.notifications?.newLeadEmails)
     ? config.notifications.newLeadEmails : [];
   const newLeadEnabled = config.notifications?.newLeadAlertsEnabled !== false;
-  const salesRequestEmails = Array.isArray(config.notifications?.salesRequestEmails)
-    ? config.notifications.salesRequestEmails : [];
+  const listOf = (k) => (Array.isArray(config.notifications?.[k]) ? config.notifications[k] : []);
+  const salesRequestEmails = listOf('salesRequestEmails');
 
   const persistNotifications = (patch) => {
     onSave({ ...config, notifications: { ...(config.notifications || {}), ...patch } });
@@ -7231,7 +7492,27 @@ function NotificationsConfigCard({ config, onSave }) {
           onChange={(list) => persistNotifications({ salesRequestEmails: list })}
           emptyHint="No recipients yet — add the back office to start receiving Sales Submittals."
         />
+        <div className="text-[11px] text-stone-400 mt-3 leading-relaxed">
+          Sales Requests (delivery, get ready, demo, parts, pick up, service) go to this list too.
+        </div>
       </div>
+
+      {[['tradeInEmails', 'Trade-In Evaluations', 'Sales managers who value and approve trade-ins.'],
+        ['financeEmails', 'Finance', 'The finance team — new finance deals, including ones created automatically from financed Sales Submittals.']]
+        .map(([key, title, blurb]) => (
+          <div key={key} className="px-5 py-4 border-t border-stone-100">
+            <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">{title}</div>
+            <div className="text-xs text-stone-500 mb-3">
+              {blurb} The rep always gets a copy.
+              {listOf(key).length === 0 && <span className="block mt-1 text-amber-700">No recipients yet &mdash; only the rep is emailed.</span>}
+            </div>
+            <EmailRecipientList
+              recipients={listOf(key)}
+              onChange={(list) => persistNotifications({ [key]: list })}
+              emptyHint="No recipients yet."
+            />
+          </div>
+        ))}
     </div>
   );
 }
@@ -7444,7 +7725,7 @@ function ClosedStatusesEditor({ config, onSave }) {
 }
 
 /* ===================== LEAD DETAIL PANEL ===================== */
-function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelete, onArchive, onUnarchive, onMarkJunk, onRestoreJunk, onStatusChange, onExtendWorking }) {
+function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelete, onArchive, onUnarchive, onMarkJunk, onRestoreJunk, onStatusChange, onExtendWorking, leadRecords = { requests: [], tradeIns: [], finance: [] }, onUpdateRequest, onUpdateRecord, onNewRecord }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(lead);
   const [newComment, setNewComment] = useState('');
@@ -7715,6 +7996,19 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
                   the first thing anyone opening it wants. */}
               <SalesRequestSection lead={lead} config={config} currentUser={currentUser}
                 onUpdate={onUpdate} onStatusChange={onStatusChange}/>
+
+              {leadStage !== 'junk' && (
+                <LeadRequestsSection lead={lead} requests={leadRecords.requests} currentUser={currentUser}
+                  onUpdate={onUpdateRequest} onNew={() => onNewRecord('requests', lead.id)}/>
+              )}
+              {leadStage !== 'junk' && (
+                <LeadTradeInsSection tradeIns={leadRecords.tradeIns}
+                  onNew={() => onNewRecord('tradeIns', lead.id)}/>
+              )}
+              {(leadRecords.finance.length > 0 || leadStage === STAGE_SALES_REQUEST || leadStage === STAGE_COMPLETED) && (
+                <LeadFinanceSection deals={leadRecords.finance}
+                  onNew={() => onNewRecord('finance', lead.id)}/>
+              )}
 
               {leadStage !== 'junk' && <DealSection lead={lead} onUpdate={onUpdate}/>}
 
@@ -8429,7 +8723,7 @@ function WorkingWeeksModal({ leadName, current, onChoose, onCancel }) {
 // The first screen after sign-in. One card per step, in order, each opening that
 // step's dashboard. Counts come from the same buckets the dashboards render, so
 // "12 in Working" here is exactly the 12 rows on the other side of the click.
-function StageHomeView({ stageLeads, config, currentUser, onOpen }) {
+function StageHomeView({ stageLeads, config, currentUser, onOpen, openRequestCount = 0, onOpenRequests, openFinanceCount = 0, onOpenFinance }) {
   const mine = currentUser.role !== 'admin';
   return (
     <div className="max-w-6xl">
@@ -8475,6 +8769,22 @@ function StageHomeView({ stageLeads, config, currentUser, onOpen }) {
                       {urgent > 0 && <HomeChip className="bg-brand-50 text-brand-700">{urgent} urgent</HomeChip>}
                       {stage.id === STAGE_INCOMING && unassigned > 0 && (
                         <HomeChip className="bg-stone-100 text-stone-700">{unassigned} unassigned</HomeChip>
+                      )}
+                      {stage.id === STAGE_SALES_REQUEST && openRequestCount > 0 && (
+                        <span role="link" tabIndex={0}
+                          onClick={e => { e.stopPropagation(); onOpenRequests && onOpenRequests(); }}
+                          onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); onOpenRequests && onOpenRequests(); } }}
+                          className="text-[11px] font-semibold px-2 py-0.5 rounded bg-orange-50 text-orange-700 hover:underline">
+                          {openRequestCount} open request{openRequestCount === 1 ? '' : 's'}
+                        </span>
+                      )}
+                      {stage.id === STAGE_SALES_REQUEST && openFinanceCount > 0 && (
+                        <span role="link" tabIndex={0}
+                          onClick={e => { e.stopPropagation(); onOpenFinance && onOpenFinance(); }}
+                          onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); onOpenFinance && onOpenFinance(); } }}
+                          className="text-[11px] font-semibold px-2 py-0.5 rounded bg-violet-50 text-violet-700 hover:underline">
+                          {openFinanceCount} in finance
+                        </span>
                       )}
                     </>
                   )}
@@ -8593,8 +8903,20 @@ function ModalShell({ label, icon: Icon, accent, title, subtitle, onCancel, foot
 // act without it, and written back to the lead rather than stored twice. A lead
 // sent back to Working keeps its last submittal, so doing it again starts from
 // what was already filled in.
-function SalesRequestModal({ lead, config, busy, onSubmit, onCancel }) {
-  const [form, setForm] = useState(() => {
+// With `newLead`, it is also how a sale that never went through the LMT gets
+// entered: the form asks for the customer and the rep as well, and the lead is
+// created straight into Sales Request.
+function SalesRequestModal({ lead, config, busy, onSubmit, onCancel, newLead = false, currentUser = null }) {
+  const [customer, setCustomer] = useState({
+    customerName: '', companyName: '', phone: '', contactEmail: '',
+    // Reps enter their own sales; an admin picks whose it was.
+    assignedTo: currentUser && currentUser.role !== 'admin' ? currentUser.id : ''
+  });
+  const setCust = (k, v) => {
+    setCustomer(c => ({ ...c, [k]: v }));
+    if (errors[k]) setErrors(e => ({ ...e, [k]: undefined }));
+  };
+  const [formState, setForm] = useState(() => {
     const prior = lead.salesRequest || {};
     const init = {};
     for (const f of SALES_REQUEST_FIELDS) init[f.key] = prior[f.key] ?? '';
@@ -8614,22 +8936,39 @@ function SalesRequestModal({ lead, config, busy, onSubmit, onCancel }) {
   };
 
   const submit = () => {
+    // A walk-in's paperwork name defaults to the company (or contact) typed above.
+    const form = (newLead && !String(formState.customerName || '').trim())
+      ? { ...formState, customerName: (customer.companyName || customer.customerName).trim() }
+      : formState;
     const errs = validateSalesRequest(form);
     if (!branch) errs.branch = 'Required';
+    if (newLead) {
+      if (!customer.customerName.trim() && !customer.companyName.trim()) errs.customerName = 'Contact or company required';
+      if (!customer.phone.trim() && !customer.contactEmail.trim()) errs.phone = 'Phone or email required';
+      if (!customer.assignedTo) errs.assignedTo = 'Required';
+    }
     if (Object.keys(errs).length) { setErrors(errs); return; }
     const pruned = pruneHiddenAnswers(SALES_REQUEST_FIELDS, form);
     const clean = {};
     for (const f of SALES_REQUEST_FIELDS) clean[f.key] = String(pruned[f.key] ?? '').trim();
     // Back-office answers survive a resubmission.
     if (lead.salesRequest?.backOffice) clean.backOffice = lead.salesRequest.backOffice;
+    if (newLead) {
+      const c = Object.fromEntries(Object.entries(customer).map(([k, v]) => [k, String(v).trim()]));
+      if (!clean.customerName) clean.customerName = c.companyName || c.customerName;
+      onSubmit(clean, { branch }, c);
+      return;
+    }
     onSubmit(clean, branch !== lead.branch ? { branch } : {});
   };
 
   const accent = STAGE_ACCENTS[STAGE_SALES_REQUEST];
   return (
     <ModalShell label="Sales submittal" icon={ClipboardList} accent={accent} onCancel={() => { if (!busy) onCancel(); }}
-      title="Sales Submittal"
-      subtitle={<>Submitting moves <span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'this lead'}</span> to Sales Request and emails the back office.</>}
+      title={newLead ? 'New Sales Submittal' : 'Sales Submittal'}
+      subtitle={newLead
+        ? <>For a sale that didn&rsquo;t come through the LMT. Creates the lead in Sales Request and emails the back office.</>
+        : <>Submitting moves <span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'this lead'}</span> to Sales Request and emails the back office.</>}
       footer={<>
         <button onClick={onCancel} disabled={busy}
           className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium disabled:opacity-50">Cancel</button>
@@ -8638,15 +8977,38 @@ function SalesRequestModal({ lead, config, busy, onSubmit, onCancel }) {
           <Send size={14}/> {busy ? 'Sending…' : 'Submit to Back Office'}
         </button>
       </>}>
-      <div className="bg-stone-50 border border-stone-200 rounded-md px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
-        <div><span className="text-stone-500">Contact:</span> <span className="font-medium text-stone-900">{lead.customerName || '—'}</span></div>
-        <div><span className="text-stone-500">Company:</span> <span className="text-stone-900">{lead.companyName || '—'}</span></div>
-        <div><span className="text-stone-500">Phone:</span> <span className="font-mono text-stone-900">{lead.phone || '—'}</span></div>
-        <div className="truncate"><span className="text-stone-500">Email:</span> <span className="text-stone-900">{lead.contactEmail || '—'}</span></div>
-      </div>
+      {newLead ? (
+        <div>
+          <div className="text-[10px] uppercase tracking-widest font-semibold text-stone-500 mb-2 pb-1 border-b border-stone-100">Customer</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-3">
+            {[['customerName', 'Contact Name', 'text'], ['companyName', 'Company', 'text'],
+              ['phone', 'Phone', 'tel'], ['contactEmail', 'Email', 'email']].map(([k, label, type]) => (
+              <Field key={k} label={label} error={errors[k]}>
+                <input type={type} value={customer[k]} onChange={e => setCust(k, e.target.value)}
+                  className={`w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:border-brand-500 ${errors[k] ? 'border-rose-400' : 'border-stone-200'}`}/>
+              </Field>
+            ))}
+            <Field label="Sales Rep" required error={errors.assignedTo}>
+              <select value={customer.assignedTo} onChange={e => setCust('assignedTo', e.target.value)}
+                disabled={currentUser?.role !== 'admin'}
+                className={`w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:border-brand-500 bg-white disabled:bg-stone-50 ${errors.assignedTo ? 'border-rose-400' : 'border-stone-200'}`}>
+                <option value="">Choose a rep…</option>
+                {(config.users || []).filter(u => !u.isSystem).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+              </select>
+            </Field>
+          </div>
+        </div>
+      ) : (
+        <div className="bg-stone-50 border border-stone-200 rounded-md px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
+          <div><span className="text-stone-500">Contact:</span> <span className="font-medium text-stone-900">{lead.customerName || '—'}</span></div>
+          <div><span className="text-stone-500">Company:</span> <span className="text-stone-900">{lead.companyName || '—'}</span></div>
+          <div><span className="text-stone-500">Phone:</span> <span className="font-mono text-stone-900">{lead.phone || '—'}</span></div>
+          <div className="truncate"><span className="text-stone-500">Email:</span> <span className="text-stone-900">{lead.contactEmail || '—'}</span></div>
+        </div>
+      )}
 
       {SALES_REQUEST_SECTIONS.map(section => {
-        const fields = SALES_REQUEST_FIELDS.filter(f => f.section === section && isFieldShown(f, form));
+        const fields = SALES_REQUEST_FIELDS.filter(f => f.section === section && isFieldShown(f, formState));
         return (
           <div key={section}>
             <div className="text-[10px] uppercase tracking-widest font-semibold text-stone-500 mb-2 pb-1 border-b border-stone-100">{section}</div>
@@ -8663,7 +9025,7 @@ function SalesRequestModal({ lead, config, busy, onSubmit, onCancel }) {
               {fields.map(f => (
                 <div key={f.key} className={f.type === 'textarea' ? 'md:col-span-2' : ''}>
                   <Field label={f.label} required={f.required} error={errors[f.key]}>
-                    <PipelineFieldInput field={f} value={form[f.key]} onChange={v => set(f.key, v)} error={errors[f.key]} idPrefix="sr"/>
+                    <PipelineFieldInput field={f} value={formState[f.key]} onChange={v => set(f.key, v)} error={errors[f.key]} idPrefix="sr"/>
                   </Field>
                 </div>
               ))}
@@ -8855,6 +9217,729 @@ function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChan
           </button>
         )}
       </div>
+    </Section>
+  );
+}
+
+/* ===================== INDY RECORDS: shared pieces ===================== */
+// Requests, trade-in evaluations and finance deals share one pattern: a form
+// the rep submits (a modal), a list the back office / manager / finance team
+// works (rows expand to show everything plus the fields only they edit), and a
+// short section on the lead. The field lists live in src/lib/pipeline.js.
+
+const todayYmd = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+const fmtYmd = (v) => (v ? fmtDate(`${String(v).slice(0, 10)}T12:00:00`) : '—');
+
+// Renders a field list in a two-column grid. `shown` decides visibility (the
+// submittal-style showIf by default); ratings and long fields span both columns.
+function FieldGrid({ fields, values, onChange, errors = {}, idPrefix, shown = (f, v) => isFieldShown(f, v), users = [] }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-3">
+      {fields.filter(f => shown(f, values)).map(f => (
+        <div key={f.key} className={['textarea', 'multi', 'radio'].includes(f.type) ? 'md:col-span-2' : ''}>
+          <Field label={f.label} required={f.required} error={errors[f.key]}>
+            <RecordFieldInput field={f} value={values[f.key]} error={errors[f.key]} idPrefix={idPrefix} users={users}
+              onChange={v => onChange(f.key, v)}/>
+          </Field>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// PipelineFieldInput plus the extra types the Smartsheet forms use: radio
+// (one of a short list, shown as buttons), rating (1–5 or N/A) and user.
+function RecordFieldInput({ field, value, onChange, error, idPrefix, users = [] }) {
+  if (field.type === 'radio' || field.type === 'rating') {
+    const rating = field.type === 'rating';
+    return (
+      <div className={`flex flex-wrap gap-1.5 ${error ? 'ring-1 ring-rose-300 rounded-md p-1' : ''}`} role="radiogroup">
+        {field.options.map(o => {
+          const on = String(value ?? '') === o;
+          return (
+            <button key={o} type="button" role="radio" aria-checked={on} onClick={() => onChange(on && !field.required ? '' : o)}
+              className={`text-sm rounded-md border transition-colors ${rating ? 'w-11 py-1.5 font-semibold' : 'px-3 py-1.5'} ${
+                on ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-stone-200 text-stone-700 hover:border-stone-400'
+              }`}>
+              {o}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+  if (field.type === 'user') {
+    return (
+      <select value={value || ''} onChange={e => onChange(e.target.value)}
+        className={`w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:border-brand-500 bg-white ${error ? 'border-rose-400' : 'border-stone-200'}`}>
+        <option value="">Choose…</option>
+        {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+      </select>
+    );
+  }
+  return <PipelineFieldInput field={field} value={value} onChange={onChange} error={error} idPrefix={idPrefix}/>;
+}
+
+// Read-only rows for a field list, skipping blanks.
+function FieldRows({ fields, values, users = [] }) {
+  const rows = fields.map(f => {
+    let v = values ? values[f.key] : undefined;
+    if (f.type === 'user') v = users.find(u => u.id === v)?.name;
+    const shownV = f.type === 'date' ? (v ? fmtYmd(v) : null) : pipelineFieldDisplay(f, v);
+    return shownV ? [f, shownV] : null;
+  }).filter(Boolean);
+  if (!rows.length) return <div className="text-xs text-stone-400">Nothing recorded.</div>;
+  return (
+    <dl className="grid grid-cols-1 sm:grid-cols-[minmax(0,11rem)_1fr] gap-x-4 gap-y-1 text-sm">
+      {rows.map(([f, v]) => (
+        <Fragment key={f.key}>
+          <dt className="text-stone-500">{f.label}</dt>
+          <dd className="text-stone-900 whitespace-pre-wrap break-words">{v}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
+// The part of an expanded row only the handling team edits (admins).
+function AdminFieldsEditor({ title, fields, values, onSave, canEdit, idPrefix }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(values || {});
+  useEffect(() => { if (!editing) setDraft(values || {}); }, [values, editing]);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold">{title}</div>
+        {canEdit && !editing && (
+          <button onClick={() => setEditing(true)} className="text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+            <Edit3 size={11}/> Edit
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <>
+          <FieldGrid fields={fields} values={draft} idPrefix={idPrefix}
+            onChange={(k, v) => setDraft(d => ({ ...d, [k]: v }))}/>
+          <div className="flex gap-2 pt-3">
+            <button onClick={async () => { const ok = await onSave(pruneHiddenAnswers(fields, draft)); if (ok !== false) setEditing(false); }}
+              className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-md">Save</button>
+            <button onClick={() => { setDraft(values || {}); setEditing(false); }}
+              className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-xs">Cancel</button>
+          </div>
+        </>
+      ) : (
+        <FieldRows fields={fields} values={values || {}}/>
+      )}
+    </div>
+  );
+}
+
+function RecordListTabs({ tabs, value, onChange, onNew, newLabel }) {
+  return (
+    <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+      <div className="inline-flex rounded-md border border-stone-200 bg-white p-0.5">
+        {tabs.map(([k, label, n]) => (
+          <button key={k} onClick={() => onChange(k)}
+            className={`text-xs font-medium px-3 py-1.5 rounded ${value === k ? 'bg-stone-900 text-white' : 'text-stone-600 hover:text-stone-900'}`}>
+            {label} <span className="font-mono opacity-70">{n}</span>
+          </button>
+        ))}
+      </div>
+      <button onClick={onNew}
+        className="text-xs px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-md inline-flex items-center gap-1.5">
+        <Plus size={13}/> {newLabel}
+      </button>
+    </div>
+  );
+}
+
+function LeadSummaryBox({ lead }) {
+  if (!lead) return null;
+  return (
+    <div className="bg-stone-50 border border-stone-200 rounded-md px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
+      <div><span className="text-stone-500">Customer:</span> <span className="font-medium text-stone-900">{lead.companyName || lead.customerName || '—'}</span></div>
+      <div><span className="text-stone-500">Phone:</span> <span className="font-mono text-stone-900">{lead.phone || '—'}</span></div>
+      {(lead.salesRequest?.model || lead.deal?.model) && (
+        <div><span className="text-stone-500">Unit:</span> <span className="text-stone-900">{lead.salesRequest?.model || lead.deal?.model}</span></div>
+      )}
+      {lead.branch && <div><span className="text-stone-500">Branch:</span> <span className="text-stone-900">{lead.branch}</span></div>}
+    </div>
+  );
+}
+
+const leadName = (lead) => (lead ? (lead.companyName || lead.customerName || 'Lead') : null);
+
+function RecordCustomerCell({ rec, lead, onOpenLead }) {
+  if (lead) {
+    return (
+      <button onClick={e => { e.stopPropagation(); onOpenLead(lead); }} className="text-left font-medium text-stone-900 hover:text-brand-700 hover:underline"
+        title="Open the lead">
+        {rec.customerName || leadName(lead)}
+      </button>
+    );
+  }
+  return (
+    <>
+      <span className="text-stone-900">{rec.customerName || '—'}</span>
+      <div className="text-[10px] uppercase tracking-wider text-stone-400 mt-0.5">No lead</div>
+    </>
+  );
+}
+
+/* ===================== SALES REQUESTS (operations) ===================== */
+// Indy's "Sales Request" form: delivery, demo, get-ready, parts, pick-up and
+// service requests to the back office. The back office checks each involved
+// department off (Rental / Service / Parts); the request completes when all
+// have. Separate from the Sales Submittal (the deal paperwork).
+
+const REQUEST_STATUS_STYLES = {
+  'Open':        'bg-blue-50 text-blue-700',
+  'In Progress': 'bg-amber-50 text-amber-700',
+  'Completed':   'bg-emerald-50 text-emerald-700',
+  'Cancelled':   'bg-stone-100 text-stone-600'
+};
+
+function RequestModal({ lead, config, currentUser, busy, onSubmit, onCancel }) {
+  const users = (config.users || []).filter(u => !u.isSystem);
+  const [form, setForm] = useState(() => ({
+    requestDate: todayYmd(),
+    salesPerson: lead && !isUnassigned(lead) ? lead.assignedTo : (currentUser?.id || ''),
+    requestTypes: [],
+    fromLocation: lead ? fromLocationForBranch(lead.branch) : '',
+    toLocation: lead ? EXTERNAL_LOCATION : '',
+    customerName: lead ? (lead.companyName || lead.customerName || '') : '',
+    customerAddress: '',
+    dateNeeded: '',
+    equipmentRequest: lead ? (lead.salesRequest?.model || lead.deal?.model || '') : '',
+    serviceRequest: '', partsRequest: '', comments: ''
+  }));
+  const [errors, setErrors] = useState({});
+  const set = (k, v) => {
+    setForm(f => ({ ...f, [k]: v }));
+    if (errors[k]) setErrors(e => ({ ...e, [k]: undefined }));
+  };
+  const submit = () => {
+    const errs = validateRequest(form);
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    const pruned = pruneRequest(form);
+    const clean = {};
+    for (const f of REQUEST_FIELDS) clean[f.key] = Array.isArray(pruned[f.key]) ? pruned[f.key] : String(pruned[f.key] ?? '').trim();
+    onSubmit(clean);
+  };
+  return (
+    <ModalShell label="Sales request" icon={Send} accent={STAGE_ACCENTS[STAGE_SALES_REQUEST]} onCancel={() => { if (!busy) onCancel(); }}
+      title="Sales Request"
+      subtitle={lead
+        ? <>For <span className="font-medium text-stone-700">{leadName(lead)}</span> — emailed to the back office.</>
+        : 'Delivery, demo, get ready, parts, pick up or service — emailed to the back office.'}
+      footer={<>
+        <button onClick={onCancel} disabled={busy} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium disabled:opacity-50">Cancel</button>
+        <button onClick={submit} disabled={busy}
+          className="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md flex items-center gap-2 disabled:opacity-60">
+          <Send size={14}/> {busy ? 'Sending…' : 'Submit Request'}
+        </button>
+      </>}>
+      <LeadSummaryBox lead={lead}/>
+      <FieldGrid fields={REQUEST_FIELDS} values={form} errors={errors} onChange={set} idPrefix="rq" users={users}
+        shown={(f, v) => isRequestFieldShown(f, v)}/>
+    </ModalShell>
+  );
+}
+
+function RequestStatusControl({ req, isAdmin, onUpdate }) {
+  const options = requestStatusOptionsFor(req.status, isAdmin);
+  const cls = REQUEST_STATUS_STYLES[req.status] || REQUEST_STATUS_STYLES.Open;
+  if (options.length <= 1) {
+    return <span className={`inline-block text-xs font-medium px-2 py-1 rounded ${cls}`}>{req.status}</span>;
+  }
+  return (
+    <select value={req.status} onClick={e => e.stopPropagation()}
+      onChange={e => {
+        const next = e.target.value;
+        if (next === 'Cancelled' && !window.confirm('Cancel this request?')) return;
+        onUpdate(req.id, { status: next });
+      }}
+      className={`text-xs font-medium px-2 py-1 rounded border border-transparent hover:border-stone-300 cursor-pointer ${cls}`}>
+      {options.map(s => <option key={s} value={s}>{s}</option>)}
+    </select>
+  );
+}
+
+// Rental / Service / Parts check-offs. Departments the request's types don't
+// need are shown faded but can still be ticked (the sheet often has all three).
+function DepartmentCheckoffs({ req, canEdit, onUpdate }) {
+  const needed = departmentsFor(req.requestTypes);
+  const done = req.done || {};
+  return (
+    <div className="flex flex-wrap gap-1.5" onClick={e => e.stopPropagation()}>
+      {REQUEST_DEPARTMENTS.map(d => {
+        const on = !!done[d.key];
+        const need = needed.includes(d.key);
+        return (
+          <label key={d.key} title={need ? `${d.label} is needed for this request` : `${d.label} not needed for these request types`}
+            className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-1 rounded border ${
+              on ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : need ? 'bg-white border-stone-300 text-stone-700' : 'bg-white border-stone-200 text-stone-400'
+            } ${canEdit ? 'cursor-pointer' : ''}`}>
+            <input type="checkbox" checked={on} disabled={!canEdit} className="accent-emerald-600"
+              onChange={() => onUpdate(req.id, { done: { ...done, [d.key]: !on } })}/>
+            {d.label}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+function RequestsView({ requests, leads, config, currentUser, onUpdate, onOpenLead, onNew }) {
+  const isAdmin = currentUser?.role === 'admin';
+  const [show, setShow] = useState('open');
+  const [openId, setOpenId] = useState(null);
+  const users = config.users || [];
+  const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
+  const leadMap = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
+  const today = todayYmd();
+  const isOpen = (r) => OPEN_REQUEST_STATUSES.includes(r.status);
+
+  const rows = useMemo(() => {
+    const list = requests.filter(r => show === 'all' || (show === 'open' ? isOpen(r) : !isOpen(r)));
+    return [...list].sort((a, b) => show === 'open'
+      ? (a.dateNeeded || '9999').localeCompare(b.dateNeeded || '9999')
+      : (b.dateNeeded || '').localeCompare(a.dateNeeded || ''));
+  }, [requests, show]);
+
+  return (
+    <div>
+      <RecordListTabs value={show} onChange={setShow} onNew={onNew} newLabel="New Sales Request"
+        tabs={[['open', 'Open', requests.filter(isOpen).length],
+               ['closed', 'Completed / Cancelled', requests.filter(r => !isOpen(r)).length],
+               ['all', 'All', requests.length]]}/>
+      {rows.length === 0 ? (
+        <EmptyState icon={Send} title={show === 'open' ? 'No open sales requests' : 'Nothing here'}
+          subtitle="Deliveries, demos, get-readies, parts, pick-ups and service requests. Add one from a lead, or with New Sales Request."/>
+      ) : (
+        <div className="bg-white border border-stone-200 rounded-lg overflow-x-auto">
+          <table className="w-full text-sm min-w-[900px]">
+            <thead>
+              <tr className="border-b border-stone-200 text-left text-[10px] uppercase tracking-widest text-stone-500">
+                <th className="px-3 py-2.5 font-semibold">Needed By</th>
+                <th className="px-3 py-2.5 font-semibold">Request</th>
+                <th className="px-3 py-2.5 font-semibold">Customer</th>
+                <th className="px-3 py-2.5 font-semibold">From → To</th>
+                <th className="px-3 py-2.5 font-semibold">Sales Person</th>
+                <th className="px-3 py-2.5 font-semibold">Departments</th>
+                <th className="px-3 py-2.5 font-semibold">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => {
+                const lead = r.leadId ? leadMap[r.leadId] : null;
+                const overdue = isOpen(r) && r.dateNeeded && r.dateNeeded < today;
+                const expanded = openId === r.id;
+                return (
+                  <Fragment key={r.id}>
+                    <tr onClick={() => setOpenId(expanded ? null : r.id)}
+                      className={`border-b border-stone-100 align-top cursor-pointer hover:bg-stone-50 ${expanded ? 'bg-stone-50' : ''}`}>
+                      <td className={`px-3 py-3 whitespace-nowrap font-mono text-xs ${overdue ? 'text-rose-700 font-semibold' : 'text-stone-700'}`}>
+                        {fmtYmd(r.dateNeeded)}
+                        {overdue && <div className="text-[10px] font-sans uppercase tracking-wider">Overdue</div>}
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="flex flex-wrap gap-1">
+                          {(r.requestTypes || []).map(t => (
+                            <span key={t} className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-orange-50 text-orange-700">{t}</span>
+                          ))}
+                        </div>
+                        {r.equipmentRequest && <div className="text-xs text-stone-500 mt-1 line-clamp-2 max-w-xs whitespace-pre-line">{r.equipmentRequest}</div>}
+                      </td>
+                      <td className="px-3 py-3"><RecordCustomerCell rec={r} lead={lead} onOpenLead={onOpenLead}/></td>
+                      <td className="px-3 py-3 text-xs text-stone-700">
+                        <div className="whitespace-nowrap">{r.fromLocation || '—'}</div>
+                        {r.toLocation && <div className="whitespace-nowrap text-stone-500">→ {r.toLocation}</div>}
+                      </td>
+                      <td className="px-3 py-3 text-xs text-stone-700 whitespace-nowrap">
+                        {userMap[r.salesPerson]?.name || '—'}
+                        <div className="text-[10px] text-stone-400">requested {fmtYmd(r.requestDate)}</div>
+                      </td>
+                      <td className="px-3 py-3"><DepartmentCheckoffs req={r} canEdit={isAdmin && r.status !== 'Cancelled'} onUpdate={onUpdate}/></td>
+                      <td className="px-3 py-3" onClick={e => e.stopPropagation()}><RequestStatusControl req={r} isAdmin={isAdmin} onUpdate={onUpdate}/></td>
+                    </tr>
+                    {expanded && (
+                      <tr className="border-b border-stone-200 bg-stone-50">
+                        <td colSpan={7} className="px-5 py-4">
+                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <FieldRows fields={REQUEST_FIELDS} values={r} users={users}/>
+                            <AdminFieldsEditor title="Back Office" canEdit={isAdmin} idPrefix={`rqbo-${r.id}`}
+                              fields={[{ key: 'serviceOrderNumber', label: 'Service Order Number', type: 'text' }]}
+                              values={{ serviceOrderNumber: r.serviceOrderNumber || '' }}
+                              onSave={(v) => onUpdate(r.id, { serviceOrderNumber: v.serviceOrderNumber || '' })}/>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LeadRequestsSection({ requests, currentUser, onUpdate, onNew }) {
+  const isAdmin = currentUser?.role === 'admin';
+  const list = [...requests].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  return (
+    <Section title={
+      <span className="flex items-center justify-between w-full">
+        <span>Sales Requests</span>
+        <button onClick={onNew} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+          <Plus size={11}/> Add request
+        </button>
+      </span>
+    }>
+      {list.length === 0 && <div className="text-xs text-stone-400">Delivery, demo, get ready, parts, pick up or service for this customer.</div>}
+      {list.map(r => (
+        <div key={r.id} className="flex items-start justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-stone-900">{(r.requestTypes || []).join(', ')}</div>
+            <div className="text-xs text-stone-500">Needed {fmtYmd(r.dateNeeded)} · {r.fromLocation}{r.toLocation ? ` → ${r.toLocation}` : ''}</div>
+          </div>
+          <RequestStatusControl req={r} isAdmin={isAdmin} onUpdate={onUpdate}/>
+        </div>
+      ))}
+    </Section>
+  );
+}
+
+/* ===================== TRADE-IN EVALUATION ===================== */
+// The rep inspects the customer's machine; a sales manager (admin) puts a value
+// on it and approves or declines.
+
+const TRADE_STATUS_STYLES = {
+  'Awaiting Approval': 'bg-amber-50 text-amber-700',
+  'Approved':          'bg-emerald-50 text-emerald-700',
+  'Declined':          'bg-rose-50 text-rose-700'
+};
+
+function TradeInModal({ lead, busy, onSubmit, onCancel }) {
+  const [form, setForm] = useState(() => {
+    const init = {};
+    for (const f of TRADE_IN_FIELDS) init[f.key] = f.type === 'multi' ? [] : '';
+    return init;
+  });
+  const [errors, setErrors] = useState({});
+  const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); if (errors[k]) setErrors(e => ({ ...e, [k]: undefined })); };
+  const submit = () => {
+    const errs = validateFields(TRADE_IN_FIELDS, form);
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    const pruned = pruneHiddenAnswers(TRADE_IN_FIELDS, form);
+    pruned.customerName = lead ? leadName(lead) : customer.trim();
+    onSubmit(pruned);
+  };
+  const [customer, setCustomer] = useState('');
+  return (
+    <ModalShell label="Trade-in evaluation" icon={RefreshCw} accent={{ soft: 'bg-violet-50', text: 'text-violet-700' }}
+      onCancel={() => { if (!busy) onCancel(); }}
+      title="Trade-In Evaluation"
+      subtitle={lead ? <>Trade for <span className="font-medium text-stone-700">{leadName(lead)}</span> — sent to a sales manager for a value.</> : 'Sent to a sales manager for a value and approval.'}
+      footer={<>
+        <button onClick={onCancel} disabled={busy} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium disabled:opacity-50">Cancel</button>
+        <button onClick={submit} disabled={busy}
+          className="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md flex items-center gap-2 disabled:opacity-60">
+          <Send size={14}/> {busy ? 'Sending…' : 'Submit for Approval'}
+        </button>
+      </>}>
+      <LeadSummaryBox lead={lead}/>
+      {!lead && (
+        <Field label="Customer">
+          <input value={customer} onChange={e => setCustomer(e.target.value)} placeholder="Who is trading it in"
+            className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:border-brand-500"/>
+        </Field>
+      )}
+      {TRADE_IN_SECTIONS.map(section => (
+        <div key={section}>
+          <div className="text-[10px] uppercase tracking-widest font-semibold text-stone-500 mb-2 pb-1 border-b border-stone-100">
+            {section}{section === 'Condition' && <span className="normal-case tracking-normal font-normal text-stone-400"> — 1 poor · 5 excellent</span>}
+          </div>
+          <FieldGrid fields={TRADE_IN_FIELDS.filter(f => f.section === section)} values={form} errors={errors} onChange={set} idPrefix="ti"/>
+        </div>
+      ))}
+    </ModalShell>
+  );
+}
+
+function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLead, onNew }) {
+  const isAdmin = currentUser?.role === 'admin';
+  const [show, setShow] = useState('Awaiting Approval');
+  const [openId, setOpenId] = useState(null);
+  const users = config.users || [];
+  const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
+  const leadMap = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
+  const rows = tradeIns.filter(t => show === 'all' || tradeInStatus(t) === show);
+  const count = (s) => tradeIns.filter(t => tradeInStatus(t) === s).length;
+  return (
+    <div>
+      <RecordListTabs value={show} onChange={setShow} onNew={onNew} newLabel="New Trade-In"
+        tabs={[['Awaiting Approval', 'Awaiting Approval', count('Awaiting Approval')], ['Approved', 'Approved', count('Approved')],
+               ['Declined', 'Declined', count('Declined')], ['all', 'All', tradeIns.length]]}/>
+      {rows.length === 0 ? (
+        <EmptyState icon={RefreshCw} title="No trade-ins here" subtitle="Reps add a trade-in evaluation from the lead, or with New Trade-In."/>
+      ) : (
+        <div className="bg-white border border-stone-200 rounded-lg overflow-x-auto">
+          <table className="w-full text-sm min-w-[820px]">
+            <thead>
+              <tr className="border-b border-stone-200 text-left text-[10px] uppercase tracking-widest text-stone-500">
+                <th className="px-3 py-2.5 font-semibold">Submitted</th>
+                <th className="px-3 py-2.5 font-semibold">Machine</th>
+                <th className="px-3 py-2.5 font-semibold">Hours</th>
+                <th className="px-3 py-2.5 font-semibold">Customer</th>
+                <th className="px-3 py-2.5 font-semibold">Sales Person</th>
+                <th className="px-3 py-2.5 font-semibold">Value</th>
+                <th className="px-3 py-2.5 font-semibold">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(t => {
+                const expanded = openId === t.id;
+                const status = tradeInStatus(t);
+                return (
+                  <Fragment key={t.id}>
+                    <tr onClick={() => setOpenId(expanded ? null : t.id)}
+                      className={`border-b border-stone-100 align-top cursor-pointer hover:bg-stone-50 ${expanded ? 'bg-stone-50' : ''}`}>
+                      <td className="px-3 py-3 text-xs font-mono text-stone-700 whitespace-nowrap">{fmtYmd(t.createdAt)}</td>
+                      <td className="px-3 py-3">
+                        <div className="font-medium text-stone-900">{[t.year, t.make, t.model].filter(Boolean).join(' ')}</div>
+                        <div className="text-xs text-stone-500 font-mono">S/N {t.serial}</div>
+                      </td>
+                      <td className="px-3 py-3 text-xs text-stone-700">{t.hours}</td>
+                      <td className="px-3 py-3"><RecordCustomerCell rec={t} lead={t.leadId ? leadMap[t.leadId] : null} onOpenLead={onOpenLead}/></td>
+                      <td className="px-3 py-3 text-xs text-stone-700">{userMap[t.salesPerson]?.name || '—'}</td>
+                      <td className="px-3 py-3 text-sm font-semibold text-stone-900">{t.manager?.tradeInValue || '—'}</td>
+                      <td className="px-3 py-3"><span className={`text-xs font-medium px-2 py-1 rounded ${TRADE_STATUS_STYLES[status]}`}>{status}</span></td>
+                    </tr>
+                    {expanded && (
+                      <tr className="border-b border-stone-200 bg-stone-50">
+                        <td colSpan={7} className="px-5 py-4">
+                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <FieldRows fields={TRADE_IN_FIELDS} values={t}/>
+                            <AdminFieldsEditor title="Sales Manager" canEdit={isAdmin} idPrefix={`tim-${t.id}`}
+                              fields={TRADE_IN_MANAGER_FIELDS} values={t.manager || {}}
+                              onSave={(v) => onUpdate(t.id, { manager: v }, 'Manager review')}/>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LeadTradeInsSection({ tradeIns, onNew }) {
+  return (
+    <Section title={
+      <span className="flex items-center justify-between w-full">
+        <span>Trade-Ins</span>
+        <button onClick={onNew} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+          <Plus size={11}/> Add trade-in
+        </button>
+      </span>
+    }>
+      {tradeIns.length === 0 && <div className="text-xs text-stone-400">Evaluate the customer&rsquo;s machine for a manager&rsquo;s value.</div>}
+      {tradeIns.map(t => {
+        const status = tradeInStatus(t);
+        return (
+          <div key={t.id} className="flex items-start justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-stone-900">{[t.year, t.make, t.model].filter(Boolean).join(' ')}</div>
+              <div className="text-xs text-stone-500">{t.hours} hrs · S/N {t.serial}{t.manager?.tradeInValue ? ` · Value ${t.manager.tradeInValue}` : ''}</div>
+            </div>
+            <span className={`text-xs font-medium px-2 py-1 rounded shrink-0 ${TRADE_STATUS_STYLES[status]}`}>{status}</span>
+          </div>
+        );
+      })}
+    </Section>
+  );
+}
+
+/* ===================== FINANCE (Sales Tracker) ===================== */
+// The finance team's funding pipeline. The rep's half comes from the Sales
+// Submittal automatically for financed deals (or is entered by hand); the
+// sales admin works the Deal Status and dates here.
+
+const FINANCE_STATUS_STYLES = {
+  'Submitted':                   'bg-blue-50 text-blue-700',
+  'Approved':                    'bg-emerald-50 text-emerald-700',
+  'Manual Review':               'bg-amber-50 text-amber-700',
+  'Additional Info Needed':      'bg-amber-50 text-amber-700',
+  'Declined':                    'bg-rose-50 text-rose-700',
+  'Declined, Sent to 2nd Source':'bg-rose-50 text-rose-700',
+  'Ready to Invoice':            'bg-violet-50 text-violet-700',
+  'Invoiced-Pending Funding':    'bg-violet-50 text-violet-700',
+  'Invoice-Funded':              'bg-stone-100 text-stone-700'
+};
+
+function FinanceModal({ lead, busy, onSubmit, onCancel }) {
+  const [form, setForm] = useState(() => {
+    const base = lead && lead.salesRequest ? financeFromSubmittal(lead.salesRequest, lead) : {};
+    const init = {};
+    for (const f of FINANCE_REP_FIELDS) init[f.key] = base[f.key] ?? '';
+    if (!init.customerName && lead) init.customerName = leadName(lead);
+    return init;
+  });
+  const [errors, setErrors] = useState({});
+  const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); if (errors[k]) setErrors(e => ({ ...e, [k]: undefined })); };
+  const submit = () => {
+    const errs = validateFields(FINANCE_REP_FIELDS, form);
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    onSubmit(pruneHiddenAnswers(FINANCE_REP_FIELDS, form));
+  };
+  return (
+    <ModalShell label="Finance deal" icon={ClipboardList} accent={{ soft: 'bg-violet-50', text: 'text-violet-700' }}
+      onCancel={() => { if (!busy) onCancel(); }}
+      title="Finance Deal"
+      subtitle="Goes to the finance team's tracker."
+      footer={<>
+        <button onClick={onCancel} disabled={busy} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium disabled:opacity-50">Cancel</button>
+        <button onClick={submit} disabled={busy}
+          className="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md flex items-center gap-2 disabled:opacity-60">
+          <Send size={14}/> {busy ? 'Sending…' : 'Submit to Finance'}
+        </button>
+      </>}>
+      <LeadSummaryBox lead={lead}/>
+      <FieldGrid fields={FINANCE_REP_FIELDS} values={form} errors={errors} onChange={set} idPrefix="fi"/>
+    </ModalShell>
+  );
+}
+
+function FinanceView({ deals, leads, config, currentUser, onUpdate, onOpenLead, onNew }) {
+  const isAdmin = currentUser?.role === 'admin';
+  const [show, setShow] = useState('open');
+  const [openId, setOpenId] = useState(null);
+  const users = config.users || [];
+  const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
+  const leadMap = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
+  const today = todayYmd();
+  const isOpen = (d) => !FINANCE_CLOSED_STATUSES.includes(d.admin?.dealStatus);
+  const rows = deals.filter(d => show === 'all' || (show === 'open' ? isOpen(d) : !isOpen(d)));
+  const flagged = deals.filter(d => isOpen(d) && financeAudit(d, today).length).length;
+  return (
+    <div>
+      <RecordListTabs value={show} onChange={setShow} onNew={onNew} newLabel="New Finance Deal"
+        tabs={[['open', 'In Progress', deals.filter(isOpen).length], ['closed', 'Funded / Declined', deals.filter(d => !isOpen(d)).length], ['all', 'All', deals.length]]}/>
+      {flagged > 0 && show !== 'closed' && (
+        <div className="mb-3 text-xs font-medium text-rose-800 bg-rose-50 border border-rose-200 rounded-md px-3 py-2 inline-flex items-center gap-1.5">
+          <AlertTriangle size={13}/> {flagged} deal{flagged === 1 ? '' : 's'} failing the 3-day audit
+        </div>
+      )}
+      {rows.length === 0 ? (
+        <EmptyState icon={ClipboardList} title="No finance deals here"
+          subtitle="Financed Sales Submittals appear here automatically. Add one by hand with New Finance Deal."/>
+      ) : (
+        <div className="bg-white border border-stone-200 rounded-lg overflow-x-auto">
+          <table className="w-full text-sm min-w-[900px]">
+            <thead>
+              <tr className="border-b border-stone-200 text-left text-[10px] uppercase tracking-widest text-stone-500">
+                <th className="px-3 py-2.5 font-semibold">Created</th>
+                <th className="px-3 py-2.5 font-semibold">Customer</th>
+                <th className="px-3 py-2.5 font-semibold">Asset</th>
+                <th className="px-3 py-2.5 font-semibold">Amount</th>
+                <th className="px-3 py-2.5 font-semibold">Deal Type</th>
+                <th className="px-3 py-2.5 font-semibold">Sales Person</th>
+                <th className="px-3 py-2.5 font-semibold">Lender</th>
+                <th className="px-3 py-2.5 font-semibold">Deal Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(d => {
+                const expanded = openId === d.id;
+                const st = d.admin?.dealStatus || 'Submitted';
+                const audit = isOpen(d) ? financeAudit(d, today) : [];
+                return (
+                  <Fragment key={d.id}>
+                    <tr onClick={() => setOpenId(expanded ? null : d.id)}
+                      className={`border-b border-stone-100 align-top cursor-pointer hover:bg-stone-50 ${expanded ? 'bg-stone-50' : ''}`}>
+                      <td className="px-3 py-3 text-xs font-mono text-stone-700 whitespace-nowrap">
+                        {fmtYmd(d.createdAt)}
+                        <div className="text-[10px] font-sans text-stone-400">{daysSince(d.createdAt)}d old</div>
+                      </td>
+                      <td className="px-3 py-3"><RecordCustomerCell rec={d} lead={d.leadId ? leadMap[d.leadId] : null} onOpenLead={onOpenLead}/></td>
+                      <td className="px-3 py-3 text-xs text-stone-800 max-w-[14rem]">{d.assetToFinance}</td>
+                      <td className="px-3 py-3 text-sm font-semibold text-stone-900 whitespace-nowrap">{d.amount}</td>
+                      <td className="px-3 py-3 text-xs text-stone-700">{d.dealType}</td>
+                      <td className="px-3 py-3 text-xs text-stone-700 whitespace-nowrap">{userMap[d.salesPerson]?.name || '—'}</td>
+                      <td className="px-3 py-3 text-xs text-stone-700">{d.admin?.lenderName || '—'}</td>
+                      <td className="px-3 py-3">
+                        <span className={`text-xs font-medium px-2 py-1 rounded whitespace-nowrap ${FINANCE_STATUS_STYLES[st] || ''}`}>{st}</span>
+                        {audit.map(a => <div key={a} className="text-[10px] font-semibold text-rose-700 mt-1">{a}</div>)}
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr className="border-b border-stone-200 bg-stone-50">
+                        <td colSpan={8} className="px-5 py-4">
+                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div>
+                              <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-2">From the rep</div>
+                              <FieldRows fields={FINANCE_REP_FIELDS} values={d}/>
+                            </div>
+                            <AdminFieldsEditor title="Finance" canEdit={isAdmin} idPrefix={`fa-${d.id}`}
+                              fields={FINANCE_ADMIN_FIELDS} values={d.admin || {}}
+                              onSave={(v) => onUpdate(d.id, { admin: v }, 'Finance update')}/>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function daysSince(iso) {
+  if (!iso) return 0;
+  return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86400000));
+}
+
+function LeadFinanceSection({ deals, onNew }) {
+  return (
+    <Section title={
+      <span className="flex items-center justify-between w-full">
+        <span>Finance</span>
+        {deals.length === 0 && (
+          <button onClick={onNew} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+            <Plus size={11}/> Add finance deal
+          </button>
+        )}
+      </span>
+    }>
+      {deals.length === 0 && <div className="text-xs text-stone-400">Financed submittals create this automatically.</div>}
+      {deals.map(d => {
+        const st = d.admin?.dealStatus || 'Submitted';
+        return (
+          <div key={d.id} className="flex items-start justify-between gap-2 py-1.5 border-b border-stone-100 last:border-0">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-stone-900">{d.assetToFinance}</div>
+              <div className="text-xs text-stone-500">{d.dealType} · {d.amount}{d.admin?.lenderName ? ` · ${d.admin.lenderName}` : ''}</div>
+            </div>
+            <span className={`text-xs font-medium px-2 py-1 rounded shrink-0 ${FINANCE_STATUS_STYLES[st] || ''}`}>{st}</span>
+          </div>
+        );
+      })}
     </Section>
   );
 }

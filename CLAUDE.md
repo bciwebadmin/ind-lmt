@@ -143,7 +143,7 @@ Indy works leads through four steps, each its own dashboard, with a picker
 
   **Incoming** (New) → **Working** (Working, Prospect, Pending, Want) →
   **Sales Request** (Sales Request) → **Completed** (Completed, Lost,
-  Unqualified, Cancelled)
+  Unqualified, Dead, Cancelled)
 
 Indy calls a finished sale **Completed** (other forks: Won). `WON_STATUS` holds
 `'Completed'` so shared report code still reads the same. Choosing Completed on
@@ -180,6 +180,39 @@ submittal, `showIf` for conditional questions, `pruneHiddenAnswers` on save) and
 - The old Leads / My Open / My Closed / All Closed views are gone. Those view
   ids redirect to the picker.
 
+## Indy records: requests, trade-ins, finance
+
+Three things that hang off a lead but can also stand alone, so each lives in
+its own collection (`requests`, `tradeIns`, `finance`) with `leadId` (or null),
+`salesPerson`, `createdBy`, `createdAt`, `history[]`. One generic layer:
+`subscribeToRecords` / `addRecordDoc` / `updateRecordDoc` in firestoreData.js,
+`createRecord` / `updateRecord` in App.jsx, and one callable,
+`sendRecordEmail({ kind, id })`, which emails Settings →
+`notifications.salesRequestEmails` / `tradeInEmails` / `financeEmails` (cc and
+reply-to the rep). The server's `RECORD_FIELDS` copies the client field lists;
+a test fails if they drift.
+
+- **Requests**: Indy's "Sales Request" sheet (delivery, get ready, demo,
+  parts, pick up, service). Fields rebuilt from the 3,496-row completed export
+  — `REQUEST_FIELDS` with `showWhen` predicates (customer name/address only
+  when a location is External Customer; service/parts boxes by type). The back
+  office checks off Rental / Service / Parts (`departmentsFor`); status follows
+  from the check-offs (`requestStatusFromDone`). Admins only.
+- **Trade-Ins**: Indy's Trade-In Evaluation form; nine 1–5/N/A condition
+  ratings. A sales manager (admin) sets value + approval (`manager`).
+  Sidebar → Trade-Ins.
+- **Finance**: Indy's Sales Tracker. A financed Sales Submittal creates one
+  automatically (`financeFromSubmittal`); finance (admins) works `admin.*`
+  (Deal Status, lender, dates). `financeAudit` reproduces the sheet's 3-day
+  audit formulas. Sales Request dashboard → Finance tab.
+
+**`firestore.rules` changed for these collections. CI does not deploy rules —
+run `firebase deploy --only firestore:rules` after pushing, or every save of a
+request, trade-in or finance deal is refused.**
+
+The full Smartsheet → LMT map is in the Claude project,
+`claude/smartsheet-process-map.md`.
+
 ## Status model
 
 `config.statuses` drives everything; never hardcode a status list.
@@ -189,7 +222,7 @@ const closedStatuses = getClosedStatuses(config);   // always use the helper
 ```
 
 - **Open:** New, Working, Prospect, Pending, Want, Sales Request
-- **Closed:** Completed, Lost, Unqualified, Cancelled → the Completed step
+- **Closed:** Completed, Lost, Unqualified, Dead, Cancelled → the Completed step
 - **Junk:** its own tab, excluded from every dashboard and all report metrics
 
 "Working" was renamed from "Qualified"; `LEGACY_WORKING_STATUS` still maps the
