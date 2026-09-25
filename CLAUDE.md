@@ -141,9 +141,23 @@ on white. A blind swap in either direction breaks the UI and still builds.
 Indy works leads through four steps, each its own dashboard, with a picker
 (`home` view) as the landing screen:
 
-  **Incoming** (New) → **Working** (Working, Pending, Prospect, Wants) →
-  **Sales Request** (Sales Request) → **Completed** (Won, Lost, Unqualified,
-  No Decision, Cancelled)
+  **Incoming** (New) → **Working** (Working, Prospect, Pending, Want) →
+  **Sales Request** (Sales Request) → **Completed** (Completed, Lost,
+  Unqualified, Cancelled)
+
+Indy calls a finished sale **Completed** (other forks: Won). `WON_STATUS` holds
+`'Completed'` so shared report code still reads the same. Choosing Completed on
+a lead still being worked means "sale made": it opens the **Sales Submittal**
+(`SalesRequestModal`) and lands the lead in Sales Request
+(`completesViaSalesRequest`). Only an admin — the back office — can then mark it
+Completed (`canCloseSalesRequest`, enforced in the menus and in `updateLead`).
+Lost asks for a reason and competitor (`LostDealModal`).
+
+Field lists all live in `pipeline.js`, taken from Indy's Smartsheet exports:
+`DEAL_FIELDS` (lead.deal — one section on every lead, the tracker's columns do
+not vary by status), `LOST_FIELDS`, `SALES_REQUEST_FIELDS` (the rep's half of the
+submittal, `showIf` for conditional questions, `pruneHiddenAnswers` on save) and
+`BACK_OFFICE_FIELDS` (lead.salesRequest.backOffice, admin-only).
 
 - `src/lib/pipeline.js` is the single source of truth for which status is in
   which step, which moves each step allows, and who sees what. It is pure, so
@@ -174,8 +188,8 @@ Indy works leads through four steps, each its own dashboard, with a picker
 const closedStatuses = getClosedStatuses(config);   // always use the helper
 ```
 
-- **Open:** New, Working, Pending, Prospect, Wants, Sales Request
-- **Closed:** Won, Lost, Unqualified, No Decision, Cancelled → the Completed step
+- **Open:** New, Working, Prospect, Pending, Want, Sales Request
+- **Closed:** Completed, Lost, Unqualified, Cancelled → the Completed step
 - **Junk:** its own tab, excluded from every dashboard and all report metrics
 
 "Working" was renamed from "Qualified"; `LEGACY_WORKING_STATUS` still maps the

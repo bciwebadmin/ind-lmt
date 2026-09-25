@@ -206,8 +206,9 @@ divergences from Bobcat of Atlanta, which this repo was taken from:
 | Export filenames | `ind-lmt-report`, `ind-lmt-archived`, `ind-leads`, `ind-lmt-import-template`, `ind-routing-overview` | `atl-` equivalents |
 | Temp password prefix | `IND-` | `ATL-` |
 | Lead views | Four-step pipeline — Incoming, Working, Sales Request, Completed — behind a dashboard picker (`src/lib/pipeline.js`) | Leads / My Open / My Closed / All Closed |
-| Statuses | New · Working, Pending, Prospect, Wants · Sales Request · Won, Lost, Unqualified, No Decision, Cancelled · Junk | New, Contacted, Working, Quoted, Won, Lost, Unqualified, No Decision, Junk |
-| Sales request | Form on the lead + `sendSalesRequestEmail` to Settings → Sales Requests | — |
+| Statuses | New · Working, Prospect, Pending, Want · Sales Request · Completed, Lost, Unqualified, Cancelled · Junk | New, Contacted, Working, Quoted, Won, Lost, Unqualified, No Decision, Junk |
+| Sales Submittal | Rep form on the lead + back-office fields (admins) + `sendSalesRequestEmail` to Settings → Sales Submittals | — |
+| Deal details | `lead.deal` — machine, model, new/used, temperature, quoted date, location, competitor, lost reason | — |
 
 Brand-agnostic fixes made here that Atlanta still needs:
 `buildResubmissionEmailHtml` was called but never defined in `functions/index.js`,

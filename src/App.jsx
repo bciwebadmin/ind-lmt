@@ -38,10 +38,11 @@ import { nearestBranchForZip } from './lib/branchRouting';
 import {
   PIPELINE_STAGES, PIPELINE_STATUSES, PIPELINE_CLOSED_STATUSES,
   STAGE_INCOMING, STAGE_WORKING, STAGE_SALES_REQUEST, STAGE_COMPLETED,
-  SALES_REQUEST_STATUS, WON_STATUS,
+  SALES_REQUEST_STATUS, WON_STATUS, LOST_STATUS,
   getStage, stageForView, stageOfStatus, stageOfLead, statusOptionsFor, bulkStatusOptionsFor,
-  ensurePipelineStatuses, isLeadVisibleInStage, isUnassigned,
-  SALES_REQUEST_FIELDS, validateSalesRequest
+  ensurePipelineStatuses, isLeadVisibleInStage, isUnassigned, completesViaSalesRequest, canCloseSalesRequest,
+  DEAL_FIELDS, LOST_FIELDS, SALES_REQUEST_FIELDS, SALES_REQUEST_SECTIONS, BACK_OFFICE_FIELDS,
+  isFieldShown, pruneHiddenAnswers, validateSalesRequest
 } from './lib/pipeline';
 
 const DEFAULT_CONFIG = {
@@ -52,7 +53,11 @@ const DEFAULT_CONFIG = {
   closedStatuses: PIPELINE_CLOSED_STATUSES,
   branches: ['Anderson', 'Columbus', 'Ellettsville', 'Indy', 'Indy North'],
   departments: ['Sales', 'Rental', 'Parts', 'Service', 'Supplies'],
-  sources: ['Gravity Forms', 'Bobcat Leads', 'Manual Entry', 'CSV Import'],
+  // The first four are the web/system sources shared with the other forks; the
+  // rest are how Indy's reps record where a deal came from.
+  sources: ['Gravity Forms', 'Bobcat Leads', 'Manual Entry', 'CSV Import',
+            'Call In', 'Walk In', 'Cold Call', 'Customer Relationship', 'Customer Referral',
+            'Internal Referral', 'Internet', 'SPICE'],
   // Departments used for ROUTING. Deliberately separate from `departments` above,
   // which categorises the lead itself — a lead's department and the team that
   // handles it are not the same list.
@@ -111,18 +116,18 @@ const STAGE_EMPTY = {
   },
   [STAGE_WORKING]: {
     title: 'No leads being worked',
-    admin: 'Assign a lead in Incoming and set it to Working (or Pending, Prospect, Wants) to move it here.',
-    rep:   'Assign yourself a lead in Incoming and set it to Working to move it here.'
+    admin: 'Assign a lead in Incoming and set it to Working, Prospect, Pending or Want to move it here.',
+    rep:   'Assign yourself a lead in Incoming and set it to Working, Prospect, Pending or Want to move it here.'
   },
   [STAGE_SALES_REQUEST]: {
-    title: 'No open sales requests',
-    admin: 'When a rep wins a lead in Working, they fill in the sales request and it moves here.',
-    rep:   'When you win a lead in Working, set it to Sales Request and fill in the form.'
+    title: 'No open sales submittals',
+    admin: 'When a rep sets a Working lead to Completed, they fill in the Sales Submittal and it lands here for the back office.',
+    rep:   'When you set a Working lead to Completed, you fill in the Sales Submittal and it waits here for the back office.'
   },
   [STAGE_COMPLETED]: {
     title: 'Nothing completed yet',
-    admin: 'Won, lost, unqualified and cancelled leads end up here. After 30 days they move to Archived.',
-    rep:   'Your won, lost, unqualified and cancelled leads end up here for 30 days.'
+    admin: 'Completed sales, lost, unqualified and cancelled leads end up here. After 30 days they move to Archived.',
+    rep:   'Your completed sales, lost, unqualified and cancelled leads end up here for 30 days.'
   }
 };
 
@@ -319,7 +324,8 @@ const STATUS_COLORS = {
   Quoted:         { bg: 'bg-cyan-50',   text: 'text-cyan-700',   dot: 'bg-cyan-500'   },
   Pending:        { bg: 'bg-amber-50',  text: 'text-amber-700',  dot: 'bg-amber-500'  },
   Prospect:       { bg: 'bg-sky-50',    text: 'text-sky-700',    dot: 'bg-sky-500'    },
-  Wants:          { bg: 'bg-cyan-50',   text: 'text-cyan-700',   dot: 'bg-cyan-500'   },
+  Want:           { bg: 'bg-cyan-50',   text: 'text-cyan-700',   dot: 'bg-cyan-500'   },
+  Completed:      { bg: 'bg-emerald-50',text: 'text-emerald-700',dot: 'bg-emerald-500'},
   'Sales Request':{ bg: 'bg-orange-50', text: 'text-orange-700', dot: 'bg-orange-500' },
   Cancelled:      { bg: 'bg-stone-100', text: 'text-stone-600',  dot: 'bg-stone-400'  },
   Won:            { bg: 'bg-emerald-50',text: 'text-emerald-700',dot: 'bg-emerald-500'},
@@ -824,11 +830,11 @@ const DEFAULT_STALENESS = {
     // null/0 = never goes stale.
     New: 24,           // 1 day to review, fill in and assign
     Working: 168,      // fallback only — a Working lead with a deadline ignores this
-    Pending: 168,      // 7 days
     Prospect: 336,     // 14 days
-    Wants: 336,        // 14 days
-    'Sales Request': 72, // 3 days for the sales request to be completed
-    Won: null,
+    Pending: 168,      // 7 days
+    Want: 336,         // 14 days
+    'Sales Request': 72, // 3 days for the back office to complete the submittal
+    Completed: null,
     Lost: null,
     Unqualified: null,
     Cancelled: null
@@ -836,7 +842,7 @@ const DEFAULT_STALENESS = {
 };
 // Thresholds ensurePipelineStatuses adds to a stored config that predates them.
 const PIPELINE_STALENESS_DEFAULTS = {
-  Pending: 168, Prospect: 336, Wants: 336, 'Sales Request': 72, Cancelled: null
+  Prospect: 336, Pending: 168, Want: 336, 'Sales Request': 72, Completed: null, Cancelled: null
 };
 
 function getLastActivityAt(lead) {
@@ -1495,9 +1501,15 @@ export default function BobcatIndyCRM() {
         showToast('Assign a rep before moving this lead to Working', 'error');
         return false;
       }
-      // Sales Request is only entered through its form, which supplies the data.
-      if (patch.status === SALES_REQUEST_STATUS && !patch.salesRequest) {
-        showToast('Use the Sales Request form to move a lead into Sales Request', 'error');
+      if (!canCloseSalesRequest(lead.status, patch.status, currentUser?.role === 'admin', closed)) {
+        showToast('Only the back office (an admin) can mark a submittal Completed', 'error');
+        return false;
+      }
+      // A sale made while the lead is being worked goes through the Sales
+      // Submittal, which is what supplies patch.salesRequest.
+      if ((patch.status === SALES_REQUEST_STATUS || completesViaSalesRequest(lead.status, patch.status, closed))
+          && !patch.salesRequest) {
+        showToast('Completing a sale opens the Sales Submittal — change one lead at a time', 'error');
         return false;
       }
     }
@@ -1517,12 +1529,21 @@ export default function BobcatIndyCRM() {
       patch = { ...patch, statusChangedAt: now, statusChangedBy: actor || null };
     }
 
-    // A submitted sales request gets its own timeline entry alongside the status change.
-    if (patch.salesRequest) {
+    // A submitted sales request gets its own timeline entry alongside the status
+    // change. Back-office edits to it later come through with _salesRequestEdit.
+    if (patch.salesRequest && patch.status === SALES_REQUEST_STATUS) {
       events.push({
         id: uid('h'), type: 'sales_request', timestamp: now, actor,
-        equipment: patch.salesRequest.equipment || ''
+        equipment: patch.salesRequest.model || ''
       });
+    }
+    if (patch.deal !== undefined) {
+      events.push({ id: uid('h'), type: 'edited', timestamp: now, actor, changes: [{ field: 'deal' }] });
+    }
+    if (patch._salesRequestEdit) {
+      events.push({ id: uid('h'), type: 'edited', timestamp: now, actor, changes: [{ field: 'salesRequest' }] });
+      patch = { ...patch };
+      delete patch._salesRequestEdit;
     }
 
     // Secondary assignment change — logged so "why is this in my list?" is answerable
@@ -1593,9 +1614,16 @@ export default function BobcatIndyCRM() {
       showToast('Assign a rep before moving this lead to Working', 'error');
       return;
     }
-    // Won from Working goes through the sales request, per Indy's process.
-    if (status === SALES_REQUEST_STATUS && lead.status !== SALES_REQUEST_STATUS) {
+    // Completed on a lead still being worked = the rep made the sale. That opens
+    // the Sales Submittal and the lead goes to Sales Request, per Indy's process.
+    if (completesViaSalesRequest(lead.status, status, closed)
+        || (status === SALES_REQUEST_STATUS && lead.status !== SALES_REQUEST_STATUS)) {
       setSalesRequestPrompt({ leadId: id });
+      return;
+    }
+    // Lost asks why (and who won it) before the lead goes to Completed.
+    if (status === LOST_STATUS && lead.status !== LOST_STATUS) {
+      setLostPrompt({ leadId: id });
       return;
     }
     if (status === WORKING_STATUS && lead.status !== WORKING_STATUS) {
@@ -1633,6 +1661,20 @@ export default function BobcatIndyCRM() {
   // email the order desk (Settings → Sales Request recipients) and the rep. The
   // server re-reads the lead rather than trusting what the browser sends.
   const [salesRequestPrompt, setSalesRequestPrompt] = useState(null);
+  const [lostPrompt, setLostPrompt] = useState(null);
+
+  // Lost reason and competitor are kept on the deal record, next to what the
+  // customer wanted, so the Completed step shows why it was lost.
+  const submitLost = async ({ lostReason, competitor }) => {
+    if (!lostPrompt) return;
+    const lead = leads.find(l => l.id === lostPrompt.leadId);
+    setLostPrompt(null);
+    if (!lead) return;
+    await updateLead(lead.id, {
+      status: LOST_STATUS,
+      deal: { ...(lead.deal || {}), lostReason, competitor: competitor || (lead.deal && lead.deal.competitor) || '' }
+    });
+  };
   const [salesRequestBusy, setSalesRequestBusy] = useState(false);
 
   const submitSalesRequest = async (form, extraPatch = {}) => {
@@ -1652,9 +1694,9 @@ export default function BobcatIndyCRM() {
     setSalesRequestBusy(false);
     setSalesRequestPrompt(null);
     if (res?.sent && res.deskRecipients > 0) {
-      showToast(`Sales request sent to ${res.deskRecipients} recipient${res.deskRecipients === 1 ? '' : 's'}`);
+      showToast(`Sales Submittal sent to ${res.deskRecipients} recipient${res.deskRecipients === 1 ? '' : 's'}`);
     } else if (res?.sent) {
-      showToast('Moved to Sales Request — no order-desk recipients set in Settings, so only the rep was emailed', 'error');
+      showToast('Moved to Sales Request — no back-office recipients set in Settings, so only the rep was emailed', 'error');
     } else if (res?.reason === 'no-recipients') {
       showToast('Moved to Sales Request — but no one was emailed. Add recipients in Settings.', 'error');
     } else {
@@ -1980,6 +2022,7 @@ export default function BobcatIndyCRM() {
                 onUpdate={updateLead} onDelete={deleteLead}
                 onStatusChange={requestStatusChange}
                 creatorUserId={currentUser.id}
+                isAdmin={currentUser.role === 'admin'}
                 /* Watch-only for reps. This is the one table that can show a rep
                    leads assigned to someone else, and it exists for following
                    them — not for reaching into another rep's work. Admins keep
@@ -2054,6 +2097,18 @@ export default function BobcatIndyCRM() {
           onExtendWorking={requestWorkingExtend}
         />
       )}
+
+      {lostPrompt && (() => {
+        const lostLead = leads.find(l => l.id === lostPrompt.leadId);
+        if (!lostLead) return null;
+        return (
+          <LostDealModal
+            lead={lostLead}
+            onSubmit={submitLost}
+            onCancel={() => setLostPrompt(null)}
+          />
+        );
+      })()}
 
       {salesRequestPrompt && (() => {
         const srLead = leads.find(l => l.id === salesRequestPrompt.leadId);
@@ -2540,8 +2595,8 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
           )}
           {stage && stage.id === STAGE_COMPLETED && (
             <div className="hidden lg:flex gap-2">
-              <StatChip label="Completed" value={stats.total} onClick={() => onChipFilter('all')}  title="Show every completed lead (clear filters)"/>
-              <StatChip label="Won"       value={stats.won}   accent="brand" onClick={() => onChipFilter('won')}  title="Filter to won deals"/>
+              <StatChip label="Total" value={stats.total} onClick={() => onChipFilter('all')}  title="Show everything in this step (clear filters)"/>
+              <StatChip label={WON_STATUS} value={stats.won}   accent="brand" onClick={() => onChipFilter('won')}  title="Filter to completed sales"/>
               <StatChip label="Lost"      value={stats.lost}  accent={stats.lost > 0 ? 'rose' : undefined} onClick={() => onChipFilter('lost')} title="Filter to lost deals"/>
             </div>
           )}
@@ -2549,7 +2604,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
             <div className="hidden lg:flex gap-2">
               <StatChip label="Created" value={stats.total} onClick={() => onChipFilter('all')}  title="Show every lead I entered (clear filters)"/>
               <StatChip label="Open"    value={stats.open}  onClick={() => onChipFilter('open')} title="Filter to the ones still in play"/>
-              <StatChip label="Won"     value={stats.won}   accent="brand" onClick={() => onChipFilter('won')}  title="Filter to the ones that closed won"/>
+              <StatChip label={WON_STATUS} value={stats.won} accent="brand" onClick={() => onChipFilter('won')}  title="Filter to the ones that became a completed sale"/>
             </div>
           )}
 
@@ -3067,7 +3122,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
         break;
       case 'won':
         clear();
-        setFilterStatus('Won');
+        setFilterStatus(WON_STATUS);
         break;
       case 'lost':
         clear();
@@ -3337,7 +3392,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
               <option value="" disabled>Set status…</option>
               {/* On a step dashboard, only the moves that step allows — and never
                   Sales Request, which needs its form filled in one lead at a time. */}
-              {(stage ? bulkStatusOptionsFor(stage, config.statuses, getClosedStatuses(config)) : config.statuses)
+              {(stage ? bulkStatusOptionsFor(stage, config.statuses, getClosedStatuses(config), { isAdmin }) : config.statuses)
                 .map(s => <option key={s} value={s}>{s}</option>)}
             </select>
             <button onClick={bulkDelete} className="text-xs px-2.5 py-1.5 text-rose-700 hover:bg-rose-100 rounded flex items-center gap-1">
@@ -3408,6 +3463,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
                 lead={lead}
                 config={config}
                 readOnly={readOnly}
+                isAdmin={isAdmin}
                 onStatusChange={changeStatus}
                 isSelected={selected.has(lead.id)}
                 onSelect={() => onSelect(lead)}
@@ -3502,7 +3558,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
                         <InlineStatusSelect
                           readOnly={readOnly}
                           value={lead.status}
-                          options={statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config))}
+                          options={statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config), { isAdmin })}
                           onChange={(status) => changeStatus(lead.id, status)}
                         />
                         <AgeIndicator staleness={lead._staleness}/>
@@ -3656,7 +3712,7 @@ function PaginationControls({ page, totalPages, pageSize, totalCount, onPageChan
 }
 
 /* ===================== MOBILE LEAD CARD ===================== */
-function MobileLeadCard({ lead, config, isSelected, onSelect, onToggleSelect, onUpdate, onStatusChange, readOnly }) {
+function MobileLeadCard({ lead, config, isSelected, onSelect, onToggleSelect, onUpdate, onStatusChange, readOnly, isAdmin = false }) {
   return (
     <div
       onClick={onSelect}
@@ -3760,7 +3816,7 @@ function MobileLeadCard({ lead, config, isSelected, onSelect, onToggleSelect, on
             fullWidth
             readOnly={readOnly}
             value={lead.status}
-            options={statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config))}
+            options={statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config), { isAdmin })}
             onChange={(status) => onStatusChange(lead.id, status)}
           />
         </div>
@@ -5805,12 +5861,12 @@ function ReportsView({ leads, config }) {
     const total = rangeLeads.length;
     const priorTotal = priorLeads.length;
 
-    const won = rangeLeads.filter(l => l.status === 'Won').length;
+    const won = rangeLeads.filter(l => l.status === WON_STATUS).length;
     const lost = rangeLeads.filter(l => l.status === 'Lost').length;
     const closed = won + lost;
     const winRate = closed > 0 ? won / closed : null;
 
-    const open = rangeLeads.filter(l => !['Won', 'Lost', 'Unqualified'].includes(l.status)).length;
+    const open = rangeLeads.filter(l => !getClosedStatuses(config).includes(l.status)).length;
     const hot = rangeLeads.filter(l => scoreLead(l, config.scoringRules).tier === 'Urgent').length;
 
     const avgFirstContact = avgTimeToFirstContactHours(rangeLeads);
@@ -5872,11 +5928,11 @@ function ReportsView({ leads, config }) {
   const repStats = useMemo(() => {
     return config.users.filter(u => !u.isSystem).map(u => {
       const userLeads = rangeLeads.filter(l => l.assignedTo === u.id);  // primary only — no double counting
-      const won = userLeads.filter(l => l.status === 'Won').length;
+      const won = userLeads.filter(l => l.status === WON_STATUS).length;
       const lost = userLeads.filter(l => l.status === 'Lost').length;
       const closed = won + lost;
       const hot = userLeads.filter(l => scoreLead(l, config.scoringRules).tier === 'Urgent').length;
-      const open = userLeads.filter(l => !['Won', 'Lost', 'Unqualified'].includes(l.status)).length;
+      const open = userLeads.filter(l => !getClosedStatuses(config).includes(l.status)).length;
       const stale = userLeads.filter(l => isLeadStale(l, config.staleness)).length;
       return {
         user: u, total: userLeads.length, open, won, closed, hot, stale,
@@ -6336,7 +6392,8 @@ function ChartCard({ title, subtitle, icon: Icon, children }) {
 function statusBarColor(status) {
   const map = {
     New: '#3b82f6', Contacted: '#f59e0b', Working: '#8b5cf6', Qualified: '#8b5cf6', Quoted: '#06b6d4',
-    Won: '#10b981', Lost: '#f43f5e', Unqualified: '#a8a29e'
+    Won: '#10b981', Completed: '#10b981', Lost: '#f43f5e', Unqualified: '#a8a29e',
+    Prospect: '#0ea5e9', Pending: '#f59e0b', Want: '#06b6d4', 'Sales Request': '#f97316', Cancelled: '#a8a29e'
   };
   return map[status] || '#a8a29e';
 }
@@ -7161,18 +7218,18 @@ function NotificationsConfigCard({ config, onSave }) {
 
       {/* ---- Sales requests ---- */}
       <div className="px-5 py-4 border-t border-stone-100">
-        <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">Sales Requests</div>
+        <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">Sales Submittals</div>
         <div className="text-xs text-stone-500 mb-3">
-          Email these people (the order desk) whenever a rep submits a sales request. The rep who owns the lead
+          Email these people (the back office) whenever a rep submits a Sales Submittal. The rep who owns the lead
           always gets a copy, and replies go to the rep.
           {salesRequestEmails.length === 0 && (
-            <span className="block mt-1 text-amber-700">No recipients yet &mdash; sales requests only reach the rep.</span>
+            <span className="block mt-1 text-amber-700">No recipients yet &mdash; submittals only reach the rep.</span>
           )}
         </div>
         <EmailRecipientList
           recipients={salesRequestEmails}
           onChange={(list) => persistNotifications({ salesRequestEmails: list })}
-          emptyHint="No recipients yet — add the order desk to start receiving sales requests."
+          emptyHint="No recipients yet — add the back office to start receiving Sales Submittals."
         />
       </div>
     </div>
@@ -7499,16 +7556,16 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
           <div className="px-4 md:px-6 py-3 border-b border-stone-200 bg-stone-50 flex items-center gap-2 flex-wrap">
             <select value={lead.status} onChange={e => quickStatus(e.target.value)}
               className="text-xs px-2.5 py-1.5 border border-stone-200 rounded bg-white">
-              {statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config))
+              {statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config), { isAdmin: currentUser?.role === 'admin' })
                 .map(s => <option key={s} value={s}>{s}</option>)}
             </select>
-            {/* The one move worth a button: winning a lead in Working means
-                filling in the sales request. */}
+            {/* The one move worth a button: a sale made in Working means
+                filling in the Sales Submittal. */}
             {leadStage === STAGE_WORKING && (
-              <button onClick={() => quickStatus(SALES_REQUEST_STATUS)}
+              <button onClick={() => quickStatus(WON_STATUS)}
                 className="text-xs px-2.5 py-1.5 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded inline-flex items-center gap-1"
-                title="Won — fill in the sales request and move this lead to Sales Request">
-                <ClipboardList size={12}/> Sales Request
+                title="Sale made — fill in the Sales Submittal and send it to the back office">
+                <ClipboardList size={12}/> Sales Submittal
               </button>
             )}
             <SearchableSelect
@@ -7656,7 +7713,10 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
 
               {/* Near the top: once a lead has a sales request, what was sold is
                   the first thing anyone opening it wants. */}
-              <SalesRequestSection lead={lead} config={config}/>
+              <SalesRequestSection lead={lead} config={config} currentUser={currentUser}
+                onUpdate={onUpdate} onStatusChange={onStatusChange}/>
+
+              {leadStage !== 'junk' && <DealSection lead={lead} onUpdate={onUpdate}/>}
 
               <Section title="Contact">
                 <DetailRow icon={Building2} label="Company" value={lead.companyName}/>
@@ -8120,7 +8180,8 @@ function ActivityIcon({ type }) {
 const FIELD_LABELS = {
   customerName: 'Customer Name', companyName: 'Company Name', contactEmail: 'Email', phone: 'Phone',
   comment: 'Customer Comment', branch: 'Branch', zip: 'ZIP',
-  formTitle: 'Form Title', leadSource: 'Lead Source', dateSubmitted: 'Date Submitted'
+  formTitle: 'Form Title', leadSource: 'Lead Source', dateSubmitted: 'Date Submitted',
+  deal: 'Deal details', salesRequest: 'Sales Submittal'
 };
 
 function renderEventText(event, userMap) {
@@ -8132,7 +8193,7 @@ function renderEventText(event, userMap) {
         : (event.source ? <>created this lead from <span className="font-medium">{event.source}</span></> : <>created this lead</>);
 
     case 'sales_request':
-      return <>submitted a sales request{event.equipment ? <> for <span className="font-medium">{event.equipment}</span></> : null}</>;
+      return <>submitted the Sales Submittal{event.equipment ? <> for <span className="font-medium">{event.equipment}</span></> : null}</>;
 
     case 'status_change':
       return <>changed status from <span className="font-medium">{event.from}</span> to <span className="font-medium">{event.to}</span></>;
@@ -8435,28 +8496,117 @@ function HomeChip({ className, children }) {
   return <span className={`text-[11px] font-semibold px-2 py-0.5 rounded ${className}`}>{children}</span>;
 }
 
-/* ===================== PIPELINE: SALES REQUEST ===================== */
-// Filled in when a rep wins a lead in Working. Submitting moves the lead to the
-// Sales Request step and emails the order desk. Branch sits on the form as well
-// as the lead because the desk cannot act without it — it is written back to the
-// lead, not stored twice. A lead sent back to Working keeps its last request, so
-// re-entering Sales Request starts from what was already filled in.
-function SalesRequestModal({ lead, config, busy, onSubmit, onCancel }) {
-  const [form, setForm] = useState(() => {
-    const prior = lead.salesRequest || {};
-    const init = {};
-    for (const f of SALES_REQUEST_FIELDS) init[f.key] = prior[f.key] ?? '';
-    if (init.quantity === '') init.quantity = '1';
-    return init;
-  });
-  const [branch, setBranch] = useState(lead.branch || '');
-  const [errors, setErrors] = useState({});
+/* ===================== PIPELINE: FORM FIELDS ===================== */
+// One renderer for the field lists in src/lib/pipeline.js (deal, lost, sales
+// submittal, back office), so each form is just "which list, which values".
+function PipelineFieldInput({ field, value, onChange, error, idPrefix = 'f' }) {
+  const cls = `w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:border-brand-500 bg-white ${
+    error ? 'border-rose-400' : 'border-stone-200'
+  }`;
+  if (field.type === 'select') {
+    return (
+      <select value={value || ''} onChange={e => onChange(e.target.value)} className={cls}>
+        <option value="">—</option>
+        {field.options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    );
+  }
+  if (field.type === 'multi') {
+    const picked = Array.isArray(value) ? value : [];
+    const toggle = (o) => onChange(picked.includes(o) ? picked.filter(x => x !== o) : [...picked, o]);
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {field.options.map(o => {
+          const on = picked.includes(o);
+          return (
+            <button key={o} type="button" onClick={() => toggle(o)} aria-pressed={on}
+              className={`text-xs px-2.5 py-1.5 rounded-md border transition-colors ${
+                on ? 'border-brand-500 bg-brand-50 text-brand-700 font-semibold' : 'border-stone-200 text-stone-600 hover:border-stone-400'
+              }`}>
+              {o}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+  if (field.type === 'textarea') {
+    return <textarea value={value || ''} onChange={e => onChange(e.target.value)} rows={3}
+      placeholder={field.placeholder} className={`${cls} resize-none`}/>;
+  }
+  const listId = field.suggestions ? `${idPrefix}-${field.key}-list` : undefined;
+  return (
+    <>
+      <input type={field.type} value={value || ''} onChange={e => onChange(e.target.value)}
+        min={field.type === 'number' ? 0 : undefined} list={listId}
+        placeholder={field.placeholder} className={cls}/>
+      {listId && (
+        <datalist id={listId}>
+          {field.suggestions.map(s => <option key={s} value={s}/>)}
+        </datalist>
+      )}
+    </>
+  );
+}
 
+// Display value for a stored answer; null when there is nothing to show.
+function pipelineFieldDisplay(field, value) {
+  if (value === undefined || value === null) return null;
+  if (Array.isArray(value)) return value.length ? value.join(', ') : null;
+  const v = String(value).trim();
+  if (!v) return null;
+  if (field.type === 'date') return fmtDate(`${v}T12:00:00`);
+  return v;
+}
+
+function ModalShell({ label, icon: Icon, accent, title, subtitle, onCancel, footer, children, wide = true }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onCancel(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [onCancel]);
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-start md:items-center justify-center p-4 overflow-y-auto"
+         onClick={onCancel} role="dialog" aria-modal="true" aria-label={label}>
+      <div className={`bg-white rounded-lg ${wide ? 'max-w-2xl' : 'max-w-md'} w-full shadow-xl overflow-hidden my-4`}
+           onClick={e => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-stone-200 flex items-start gap-3">
+          <div className={`w-9 h-9 rounded-md flex items-center justify-center shrink-0 ${accent.soft}`}>
+            <Icon size={18} className={accent.text}/>
+          </div>
+          <div className="min-w-0">
+            <div className="font-display text-lg font-bold text-stone-900">{title}</div>
+            <div className="text-sm text-stone-500 mt-0.5">{subtitle}</div>
+          </div>
+        </div>
+        <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto scrollbar-thin">{children}</div>
+        <div className="px-5 py-3 border-t border-stone-200 bg-stone-50 flex items-center justify-end gap-2">{footer}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ===================== PIPELINE: SALES SUBMITTAL ===================== */
+// Opened when a rep marks a Working lead Completed. Submitting saves the
+// submittal on the lead, moves it to Sales Request and emails the back office.
+// Store is the lead's branch — asked here too because the back office cannot
+// act without it, and written back to the lead rather than stored twice. A lead
+// sent back to Working keeps its last submittal, so doing it again starts from
+// what was already filled in.
+function SalesRequestModal({ lead, config, busy, onSubmit, onCancel }) {
+  const [form, setForm] = useState(() => {
+    const prior = lead.salesRequest || {};
+    const init = {};
+    for (const f of SALES_REQUEST_FIELDS) init[f.key] = prior[f.key] ?? '';
+    // Sensible starting answers, all editable.
+    if (!init.customerName) init.customerName = lead.companyName || lead.customerName || '';
+    if (!init.model && lead.deal?.model) init.model = lead.deal.model;
+    for (const k of ['rebate', 'drSubmission', 'spiff', 'trade']) if (!init[k]) init[k] = 'No';
+    if (!init.specialization) init.specialization = 'None';
+    return init;
+  });
+  const [branch, setBranch] = useState(lead.branch || '');
+  const [errors, setErrors] = useState({});
 
   const set = (k, v) => {
     setForm(f => ({ ...f, [k]: v }));
@@ -8467,105 +8617,178 @@ function SalesRequestModal({ lead, config, busy, onSubmit, onCancel }) {
     const errs = validateSalesRequest(form);
     if (!branch) errs.branch = 'Required';
     if (Object.keys(errs).length) { setErrors(errs); return; }
+    const pruned = pruneHiddenAnswers(SALES_REQUEST_FIELDS, form);
     const clean = {};
-    for (const f of SALES_REQUEST_FIELDS) clean[f.key] = String(form[f.key] ?? '').trim();
+    for (const f of SALES_REQUEST_FIELDS) clean[f.key] = String(pruned[f.key] ?? '').trim();
+    // Back-office answers survive a resubmission.
+    if (lead.salesRequest?.backOffice) clean.backOffice = lead.salesRequest.backOffice;
     onSubmit(clean, branch !== lead.branch ? { branch } : {});
   };
 
-  const inputCls = (k) => `w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:border-brand-500 bg-white ${
-    errors[k] ? 'border-rose-400' : 'border-stone-200'
-  }`;
-
+  const accent = STAGE_ACCENTS[STAGE_SALES_REQUEST];
   return (
-    <div className="fixed inset-0 z-50 bg-black/40 flex items-start md:items-center justify-center p-4 overflow-y-auto"
-         onClick={onCancel} role="dialog" aria-modal="true" aria-label="Sales request">
-      <div className="bg-white rounded-lg max-w-2xl w-full shadow-xl overflow-hidden my-4"
-           onClick={e => e.stopPropagation()}>
-        <div className="px-5 py-4 border-b border-stone-200 flex items-start gap-3">
-          <div className={`w-9 h-9 rounded-md flex items-center justify-center shrink-0 ${STAGE_ACCENTS[STAGE_SALES_REQUEST].soft}`}>
-            <ClipboardList size={18} className={STAGE_ACCENTS[STAGE_SALES_REQUEST].text}/>
-          </div>
-          <div className="min-w-0">
-            <div className="font-display text-lg font-bold text-stone-900">Sales Request</div>
-            <div className="text-sm text-stone-500 mt-0.5">
-              Submitting moves <span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'this lead'}</span> to
-              Sales Request and emails the order desk.
+    <ModalShell label="Sales submittal" icon={ClipboardList} accent={accent} onCancel={() => { if (!busy) onCancel(); }}
+      title="Sales Submittal"
+      subtitle={<>Submitting moves <span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'this lead'}</span> to Sales Request and emails the back office.</>}
+      footer={<>
+        <button onClick={onCancel} disabled={busy}
+          className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium disabled:opacity-50">Cancel</button>
+        <button onClick={submit} disabled={busy}
+          className="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md flex items-center gap-2 disabled:opacity-60">
+          <Send size={14}/> {busy ? 'Sending…' : 'Submit to Back Office'}
+        </button>
+      </>}>
+      <div className="bg-stone-50 border border-stone-200 rounded-md px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
+        <div><span className="text-stone-500">Contact:</span> <span className="font-medium text-stone-900">{lead.customerName || '—'}</span></div>
+        <div><span className="text-stone-500">Company:</span> <span className="text-stone-900">{lead.companyName || '—'}</span></div>
+        <div><span className="text-stone-500">Phone:</span> <span className="font-mono text-stone-900">{lead.phone || '—'}</span></div>
+        <div className="truncate"><span className="text-stone-500">Email:</span> <span className="text-stone-900">{lead.contactEmail || '—'}</span></div>
+      </div>
+
+      {SALES_REQUEST_SECTIONS.map(section => {
+        const fields = SALES_REQUEST_FIELDS.filter(f => f.section === section && isFieldShown(f, form));
+        return (
+          <div key={section}>
+            <div className="text-[10px] uppercase tracking-widest font-semibold text-stone-500 mb-2 pb-1 border-b border-stone-100">{section}</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-3">
+              {section === 'Unit' && (
+                <Field label="Store" required error={errors.branch}>
+                  <select value={branch} onChange={e => { setBranch(e.target.value); if (errors.branch) setErrors(er => ({ ...er, branch: undefined })); }}
+                    className={`w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:border-brand-500 bg-white ${errors.branch ? 'border-rose-400' : 'border-stone-200'}`}>
+                    <option value="">Choose a store…</option>
+                    {(config.branches || []).map(b => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                </Field>
+              )}
+              {fields.map(f => (
+                <div key={f.key} className={f.type === 'textarea' ? 'md:col-span-2' : ''}>
+                  <Field label={f.label} required={f.required} error={errors[f.key]}>
+                    <PipelineFieldInput field={f} value={form[f.key]} onChange={v => set(f.key, v)} error={errors[f.key]} idPrefix="sr"/>
+                  </Field>
+                </div>
+              ))}
             </div>
           </div>
-        </div>
-
-        <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto scrollbar-thin">
-          {/* Who it's for — read-only; edit the lead itself to change these. */}
-          <div className="bg-stone-50 border border-stone-200 rounded-md px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
-            <div><span className="text-stone-500">Customer:</span> <span className="font-medium text-stone-900">{lead.customerName || '—'}</span></div>
-            <div><span className="text-stone-500">Company:</span> <span className="text-stone-900">{lead.companyName || '—'}</span></div>
-            <div><span className="text-stone-500">Phone:</span> <span className="font-mono text-stone-900">{lead.phone || '—'}</span></div>
-            <div className="truncate"><span className="text-stone-500">Email:</span> <span className="text-stone-900">{lead.contactEmail || '—'}</span></div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <Field label="Branch" required error={errors.branch}>
-              <select value={branch} onChange={e => { setBranch(e.target.value); if (errors.branch) setErrors(er => ({ ...er, branch: undefined })); }}
-                className={inputCls('branch')}>
-                <option value="">Choose a branch…</option>
-                {(config.branches || []).map(b => <option key={b} value={b}>{b}</option>)}
-              </select>
-            </Field>
-            {SALES_REQUEST_FIELDS.map(f => (
-              <div key={f.key} className={f.type === 'textarea' ? 'md:col-span-2' : ''}>
-                <Field label={f.label} required={f.required} error={errors[f.key]}>
-                  {f.type === 'select' ? (
-                    <select value={form[f.key]} onChange={e => set(f.key, e.target.value)} className={inputCls(f.key)}>
-                      <option value="">—</option>
-                      {f.options.map(o => <option key={o} value={o}>{o}</option>)}
-                    </select>
-                  ) : f.type === 'textarea' ? (
-                    <textarea value={form[f.key]} onChange={e => set(f.key, e.target.value)} rows={3}
-                      placeholder={f.placeholder} className={`${inputCls(f.key)} resize-none`}/>
-                  ) : (
-                    <input type={f.type} value={form[f.key]} onChange={e => set(f.key, e.target.value)}
-                      min={f.type === 'number' ? 1 : undefined}
-                      placeholder={f.placeholder} className={inputCls(f.key)}/>
-                  )}
-                </Field>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="px-5 py-3 border-t border-stone-200 bg-stone-50 flex items-center justify-end gap-2">
-          <button onClick={onCancel} disabled={busy}
-            className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium disabled:opacity-50">
-            Cancel
-          </button>
-          <button onClick={submit} disabled={busy}
-            className="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md flex items-center gap-2 disabled:opacity-60">
-            <Send size={14}/> {busy ? 'Sending…' : 'Submit Sales Request'}
-          </button>
-        </div>
-      </div>
-    </div>
+        );
+      })}
+    </ModalShell>
   );
 }
 
-// The submitted request, shown in the lead panel whenever one exists — including
-// after the lead has moved on to Completed, so the record of what was sold stays
-// with the lead.
-function SalesRequestSection({ lead, config }) {
-  const sr = lead.salesRequest;
-  if (!sr) return null;
-  const submitter = (config.users || []).find(u => u.id === sr.submittedBy);
-  const fmt = (f) => {
-    const v = sr[f.key];
-    if (v === undefined || v === null || String(v).trim() === '') return null;
-    if (f.type === 'date') return fmtDate(`${v}T12:00:00`);
-    return String(v);
+// Asked when a single lead is set to Lost.
+function LostDealModal({ lead, onSubmit, onCancel }) {
+  const [form, setForm] = useState({ lostReason: '', competitor: lead.deal?.competitor || '' });
+  const [errors, setErrors] = useState({});
+  const submit = () => {
+    const errs = {};
+    for (const f of LOST_FIELDS) if (f.required && !String(form[f.key] || '').trim()) errs[f.key] = 'Required';
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    onSubmit({ lostReason: form.lostReason.trim(), competitor: (form.competitor || '').trim() });
   };
   return (
-    <Section title="Sales Request">
-      {SALES_REQUEST_FIELDS.filter(f => f.type !== 'textarea').map(f => {
-        const v = fmt(f);
-        return v ? <DetailRow key={f.key} icon={FileText} label={f.label} value={v}/> : null;
+    <ModalShell label="Lost deal" icon={X} accent={{ soft: 'bg-rose-50', text: 'text-rose-700' }} wide={false} onCancel={onCancel}
+      title="Mark as Lost"
+      subtitle={<><span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'This lead'}</span> moves to Completed.</>}
+      footer={<>
+        <button onClick={onCancel} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium">Cancel</button>
+        <button onClick={submit} className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white text-sm font-semibold rounded-md">Mark Lost</button>
+      </>}>
+      {LOST_FIELDS.map(f => (
+        <Field key={f.key} label={f.label} required={f.required} error={errors[f.key]}>
+          <PipelineFieldInput field={f} value={form[f.key]} error={errors[f.key]}
+            onChange={v => { setForm(x => ({ ...x, [f.key]: v })); if (errors[f.key]) setErrors(e => ({ ...e, [f.key]: undefined })); }}/>
+        </Field>
+      ))}
+    </ModalShell>
+  );
+}
+
+/* ===================== PIPELINE: DEAL SECTION ===================== */
+// What the customer wants, recorded while the lead is worked. One section on
+// every lead — Indy's tracker uses the same columns whatever the status.
+function DealSection({ lead, onUpdate }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(lead.deal || {});
+  useEffect(() => { setDraft(lead.deal || {}); setEditing(false); }, [lead.id]);
+
+  const deal = lead.deal || {};
+  const shown = DEAL_FIELDS.map(f => [f, pipelineFieldDisplay(f, deal[f.key])]).filter(([, v]) => v);
+
+  if (editing) {
+    return (
+      <Section title="Deal">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-3 pt-1">
+          {DEAL_FIELDS.map(f => (
+            <div key={f.key} className={f.type === 'multi' ? 'sm:col-span-2' : ''}>
+              <Field label={f.label}>
+                <PipelineFieldInput field={f} value={draft[f.key]} idPrefix="deal"
+                  onChange={v => setDraft(d => ({ ...d, [f.key]: v }))}/>
+              </Field>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2 pt-2">
+          <button onClick={() => { onUpdate(lead.id, { deal: { ...(lead.deal || {}), ...draft } }); setEditing(false); }}
+            className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-md">Save Deal</button>
+          <button onClick={() => { setDraft(lead.deal || {}); setEditing(false); }}
+            className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-xs">Cancel</button>
+        </div>
+      </Section>
+    );
+  }
+
+  return (
+    <Section title={
+      <span className="flex items-center justify-between w-full">
+        <span>Deal</span>
+        <button onClick={() => setEditing(true)} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+          <Edit3 size={11}/> {shown.length ? 'Edit' : 'Add deal details'}
+        </button>
+      </span>
+    }>
+      {shown.length === 0 && !deal.lostReason && (
+        <div className="text-xs text-stone-400">What they want, the model, whether it&rsquo;s been quoted.</div>
+      )}
+      {shown.map(([f, v]) => <DetailRow key={f.key} icon={Tag} label={f.label} value={v}/>)}
+      {deal.lostReason && (
+        <div className="text-sm text-rose-800 bg-rose-50 p-3 rounded-md border border-rose-100 whitespace-pre-wrap leading-relaxed mt-1">
+          <span className="font-semibold">Lost: </span>{deal.lostReason}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// The submittal on the lead: what the rep sent, and the back office's fields.
+// Shown from Sales Request onwards so the record of the sale stays with the lead.
+// Admins (the back office) edit their fields here and close the submittal out.
+function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChange }) {
+  const sr = lead.salesRequest;
+  const isAdmin = currentUser?.role === 'admin';
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState((sr && sr.backOffice) || {});
+  useEffect(() => { setDraft((lead.salesRequest && lead.salesRequest.backOffice) || {}); setEditing(false); }, [lead.id]);
+  if (!sr) return null;
+
+  const submitter = (config.users || []).find(u => u.id === sr.submittedBy);
+  const bo = sr.backOffice || {};
+  const inSalesRequest = lead.status === SALES_REQUEST_STATUS;
+
+  const saveBackOffice = (extra = {}) => {
+    const backOffice = pruneHiddenAnswers(BACK_OFFICE_FIELDS, { ...draft });
+    onUpdate(lead.id, { salesRequest: { ...sr, backOffice }, _salesRequestEdit: true, ...extra });
+    setEditing(false);
+  };
+
+  return (
+    <Section title="Sales Submittal">
+      <DetailRow icon={Building} label="Store" value={lead.branch}/>
+      {SALES_REQUEST_SECTIONS.map(section => {
+        const rows = SALES_REQUEST_FIELDS
+          .filter(f => f.section === section && f.type !== 'textarea')
+          .map(f => [f, pipelineFieldDisplay(f, sr[f.key])])
+          .filter(([, v]) => v);
+        return rows.map(([f, v]) => <DetailRow key={f.key} icon={FileText} label={f.label} value={v}/>);
       })}
       {sr.notes && (
         <div className="text-sm text-stone-700 bg-stone-50 p-3 rounded-md border border-stone-100 whitespace-pre-wrap leading-relaxed mt-1">
@@ -8574,6 +8797,63 @@ function SalesRequestSection({ lead, config }) {
       )}
       <div className="text-[11px] text-stone-500 pt-1">
         Submitted {fmtDateTime(sr.submittedAt)}{submitter ? ` by ${submitter.name}` : ''}
+      </div>
+
+      {/* ---- Back office ---- */}
+      <div className="mt-3 pt-3 border-t border-stone-100">
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold">Back Office</div>
+          {isAdmin && !editing && (
+            <button onClick={() => setEditing(true)} className="text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+              <Edit3 size={11}/> Edit
+            </button>
+          )}
+        </div>
+        {editing ? (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-3">
+              {BACK_OFFICE_FIELDS.filter(f => isFieldShown(f, draft)).map(f => (
+                <div key={f.key} className={f.type === 'textarea' ? 'sm:col-span-2' : ''}>
+                  <Field label={f.label}>
+                    <PipelineFieldInput field={f} value={draft[f.key]} idPrefix="bo"
+                      onChange={v => setDraft(d => ({ ...d, [f.key]: v }))}/>
+                  </Field>
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2 pt-3">
+              <button onClick={() => saveBackOffice()}
+                className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-md">Save</button>
+              <button onClick={() => { setDraft(bo); setEditing(false); }}
+                className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-xs">Cancel</button>
+            </div>
+          </>
+        ) : (
+          <>
+            {BACK_OFFICE_FIELDS.map(f => {
+              const v = pipelineFieldDisplay(f, bo[f.key]);
+              if (!v) return null;
+              return f.type === 'textarea'
+                ? <div key={f.key} className="text-sm text-stone-700 bg-stone-50 p-3 rounded-md border border-stone-100 whitespace-pre-wrap mt-1"><span className="font-semibold">{f.label}: </span>{v}</div>
+                : <DetailRow key={f.key} icon={FileText} label={f.label} value={v}/>;
+            })}
+            {!BACK_OFFICE_FIELDS.some(f => pipelineFieldDisplay(f, bo[f.key])) && (
+              <div className="text-xs text-stone-400">{isAdmin ? 'Nothing recorded yet.' : 'The back office hasn’t recorded anything yet.'}</div>
+            )}
+          </>
+        )}
+        {isAdmin && inSalesRequest && !editing && (
+          <button
+            onClick={() => {
+              if (!window.confirm('Mark this submittal complete? The lead moves to Completed.')) return;
+              const today = new Date().toISOString().slice(0, 10);
+              const backOffice = { ...bo, completionDate: bo.completionDate || today };
+              onUpdate(lead.id, { status: WON_STATUS, salesRequest: { ...sr, backOffice } });
+            }}
+            className="mt-3 w-full px-3 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold rounded-md inline-flex items-center justify-center gap-1.5">
+            <CheckCircle2 size={13}/> Mark Submittal Complete
+          </button>
+        )}
       </div>
     </Section>
   );

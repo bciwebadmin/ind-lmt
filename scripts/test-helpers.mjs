@@ -156,34 +156,49 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('legacy Contacted -> incoming', st('Contacted') === 'incoming');
   check('legacy Quoted -> working', st('Quoted') === 'working');
   check('legacy Qualified -> working', st('Qualified') === 'working');
+  check('legacy Wants -> working', st('Wants') === 'working');
+  check('legacy Won -> completed', st('Won') === 'completed');
+  check('legacy No Decision -> completed', st('No Decision') === 'completed');
+  check('Indy calls a finished sale Completed', P.WON_STATUS === 'Completed');
   check('custom closed status -> completed', st('Sold Elsewhere', [...P.PIPELINE_CLOSED_STATUSES, 'Sold Elsewhere']) === 'completed');
   check('unknown open status -> incoming', st('On Hold') === 'incoming');
   check('a missing status -> incoming', st(undefined) === 'incoming');
 
   // The flow only goes forward through the dropdowns.
-  const inc = opts('New'), wrk = opts('Working'), sr = opts('Sales Request'), done = opts('Won');
-  check('Incoming cannot jump to Sales Request or Won', !inc.includes('Sales Request') && !inc.includes('Won'), inc.join(','));
-  check('Incoming can reach Working and fall through', ['Working', 'Pending', 'Prospect', 'Wants', 'Lost', 'Unqualified'].every(s => inc.includes(s)), inc.join(','));
-  check('Working reaches Sales Request, not Won', wrk.includes('Sales Request') && !wrk.includes('Won'), wrk.join(','));
+  const inc = opts('New'), wrk = opts('Prospect'), sr = opts('Sales Request'), done = opts('Completed');
+  check('Incoming cannot jump to Sales Request or Completed', !inc.includes('Sales Request') && !inc.includes('Completed'), inc.join(','));
+  check('Incoming can reach Working and fall through', ['Working', 'Prospect', 'Pending', 'Want', 'Lost', 'Unqualified'].every(s => inc.includes(s)), inc.join(','));
+  check('Working offers exactly Erin\'s list (+ Working, Junk)',
+    JSON.stringify(wrk) === JSON.stringify(['Working', 'Prospect', 'Pending', 'Want', 'Completed', 'Lost', 'Unqualified', 'Junk']), wrk.join(','));
   check('Working does not go back to New', !wrk.includes('New'), wrk.join(','));
-  check('Sales Request offers exactly Won / Working / Cancelled',
-    JSON.stringify(sr) === JSON.stringify(['Sales Request', 'Won', 'Working', 'Cancelled']), sr.join(','));
+  check('Completed from Working goes via the Sales Submittal', P.completesViaSalesRequest('Pending', 'Completed'));
+  check('Completed from Sales Request is the back office closing it', !P.completesViaSalesRequest('Sales Request', 'Completed'));
+  check('Lost from Working is not a sale', !P.completesViaSalesRequest('Working', 'Lost'));
+  check('a rep cannot close a submittal from the menu',
+    JSON.stringify(opts('Sales Request', undefined, undefined, { isAdmin: false })) === JSON.stringify(['Sales Request', 'Working', 'Cancelled']));
+  check('a rep cannot close a submittal via a direct write', !P.canCloseSalesRequest('Sales Request', 'Completed', false));
+  check('an admin can close a submittal', P.canCloseSalesRequest('Sales Request', 'Completed', true));
+  check('a rep bulk menu on Sales Request has no Completed', !bulk('sales-request', undefined, undefined, { isAdmin: false }).includes('Completed'));
+  check('Sales Request offers exactly Completed / Working / Cancelled',
+    JSON.stringify(sr) === JSON.stringify(['Sales Request', 'Completed', 'Working', 'Cancelled']), sr.join(','));
   check('Completed can reopen to Working, not Sales Request', done.includes('Working') && !done.includes('Sales Request'), done.join(','));
   check('current status always offered', opts('On Hold').includes('On Hold'));
   check('custom statuses stay reachable', opts('New', [...P.PIPELINE_STATUSES, 'On Hold']).includes('On Hold'));
   for (const s of P.PIPELINE_STAGES) {
     check(`bulk menu for ${s.id} never offers Sales Request`, !bulk(s.id).includes('Sales Request'), bulk(s.id).join(','));
   }
+  check('bulk menu for working cannot complete a sale', !bulk('working').includes('Completed'), bulk('working').join(','));
+  check('bulk menu for completed can still set Completed', bulk('completed').includes('Completed'), bulk('completed').join(','));
 
   // A config saved before the pipeline existed (Atlanta's status list) heals.
   const old = {
-    statuses: ['New', 'Contacted', 'Working', 'Quoted', 'Won', 'Lost', 'Unqualified', 'No Decision', 'On Hold', 'Junk'],
+    statuses: ['New', 'Contacted', 'Working', 'Quoted', 'Wants', 'Won', 'Lost', 'Unqualified', 'No Decision', 'On Hold', 'Junk'],
     closedStatuses: ['Won', 'Lost', 'Unqualified', 'No Decision', 'Junk', 'Working'],
     staleness: { enabled: true, thresholds: { New: 24, Pending: 999 } }
   };
   const healed = P.ensurePipelineStatuses(old, { Pending: 168, Prospect: 336 });
   check('heal: adds the pipeline statuses', P.PIPELINE_STATUSES.every(s => healed.statuses.includes(s)), healed.statuses.join(','));
-  check('heal: drops Contacted and Quoted', !healed.statuses.includes('Contacted') && !healed.statuses.includes('Quoted'));
+  check('heal: drops the legacy names', ['Contacted', 'Quoted', 'Wants', 'Won', 'No Decision'].every(s => !healed.statuses.includes(s)), healed.statuses.join(','));
   check('heal: keeps a custom status', healed.statuses.includes('On Hold'));
   check('heal: Junk stays last', healed.statuses[healed.statuses.length - 1] === 'Junk');
   check('heal: Cancelled counts as closed', healed.closedStatuses.includes('Cancelled'));
@@ -202,10 +217,30 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('rep sees unassigned leads in Incoming', P.isLeadVisibleInStage(nobody, 'incoming', rep));
   check('rep does not see unassigned leads elsewhere', !P.isLeadVisibleInStage(nobody, 'completed', rep));
 
-  // The sales request form.
-  check('sales request needs equipment', 'equipment' in P.validateSalesRequest({}));
-  check('sales request rejects quantity 0', 'quantity' in P.validateSalesRequest({ equipment: 'S66', quantity: '0' }));
-  check('sales request accepts a valid form', Object.keys(P.validateSalesRequest({ equipment: 'S66', quantity: '2' })).length === 0);
+  // The Sales Submittal.
+  const bare = P.validateSalesRequest({});
+  check('submittal requires model, value, customer, payment',
+    ['model', 'estimatedValue', 'customerName', 'payment'].every(k => k in bare), Object.keys(bare).join(','));
+  const cash = { model: 'T66', estimatedValue: '63000', customerName: 'Andrew Doub', payment: 'Cash' };
+  check('a cash deal with no trade is valid', Object.keys(P.validateSalesRequest(cash)).length === 0);
+  check('trade hours must be a number', 'tradeHours' in P.validateSalesRequest({ ...cash, trade: 'Yes', tradeHours: 'lots' }));
+  const byKey = Object.fromEntries(P.SALES_REQUEST_FIELDS.map(f => [f.key, f]));
+  check('lender only asked for a loan', P.isFieldShown(byKey.loanLender, { payment: 'Loan' }) && !P.isFieldShown(byKey.loanLender, { payment: 'Cash' }));
+  check('payoff fields hidden without a trade', !P.isFieldShown(byKey.payoffNeeded, { trade: 'No' }));
+  const pruned = P.pruneHiddenAnswers(P.SALES_REQUEST_FIELDS,
+    { ...cash, loanLender: 'Wells Fargo', trade: 'No', payoffNeeded: 'Yes', payoffAmount: '5000' });
+  check('switching to Cash drops the lender', pruned.loanLender === '');
+  check('no trade drops the payoff chain two levels deep', pruned.payoffNeeded === '' && pruned.payoffAmount === '');
+  check('pruning keeps real answers', pruned.model === 'T66' && pruned.payment === 'Cash');
+  check('every submittal field has a known section',
+    P.SALES_REQUEST_FIELDS.every(f => P.SALES_REQUEST_SECTIONS.includes(f.section)));
+  const srKeys = new Set(P.SALES_REQUEST_FIELDS.map(f => f.key));
+  check('every showIf points at a real question',
+    [...P.SALES_REQUEST_FIELDS, ...P.BACK_OFFICE_FIELDS].every(f => !f.showIf || Object.keys(f.showIf).every(k =>
+      srKeys.has(k) || P.BACK_OFFICE_FIELDS.some(b => b.key === k))));
+  check('rep and back-office fields do not share keys',
+    P.BACK_OFFICE_FIELDS.every(f => !srKeys.has(f.key)));
+  check('deal fields offer the tracker\'s machine list', P.DEAL_FIELDS[0].options.length === 8);
 
   // App.jsx seeds its config from the module rather than a copied list.
   check('DEFAULT_CONFIG.statuses comes from pipeline.js', /statuses: PIPELINE_STATUSES,/.test(app));

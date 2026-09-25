@@ -1510,17 +1510,34 @@ exports.sendImportSummaryEmail = onCall(
 // the client and functions). Keep the keys and labels in step with it; a field
 // missing here simply doesn't appear in the email.
 const SALES_REQUEST_FIELDS = [
-  { key: 'equipment',    label: 'Equipment / Model' },
-  { key: 'condition',    label: 'New or Used' },
-  { key: 'stockNumber',  label: 'Stock #' },
-  { key: 'serialNumber', label: 'Serial #' },
-  { key: 'quantity',     label: 'Quantity' },
-  { key: 'salePrice',    label: 'Sale Price' },
-  { key: 'tradeIn',      label: 'Trade-In' },
-  { key: 'financing',    label: 'Financing' },
-  { key: 'deliveryDate', label: 'Requested Delivery' },
-  { key: 'poNumber',     label: 'Customer PO #' },
-  { key: 'notes',        label: 'Notes' }
+  { key: 'model', label: 'Model Number of Unit/Attachment' },
+  { key: 'estimatedValue', label: 'Estimated Value of Sale' },
+  { key: 'customerName', label: 'Customer Name' },
+  { key: 'payment', label: 'Payment/Financing' },
+  { key: 'loanLender', label: 'Loan/Lease' },
+  { key: 'lease', label: 'Lease' },
+  { key: 'otherFinancing', label: 'Other Financing Options' },
+  { key: 'rebate', label: 'Rebate' },
+  { key: 'rebateType', label: 'Type of Rebate' },
+  { key: 'rebateAmount', label: 'Dollar Amount for Rebate' },
+  { key: 'specialization', label: 'Specialization' },
+  { key: 'competitiveModel', label: 'Competitive Model' },
+  { key: 'drSubmission', label: 'DR Submission' },
+  { key: 'spiff', label: 'Spiff?' },
+  { key: 'spiffAmount', label: 'Amount for Spiff' },
+  { key: 'trade', label: 'Trade?' },
+  { key: 'tradeOptions', label: 'Options' },
+  { key: 'tradeHours', label: 'Hours' },
+  { key: 'tradeSerial', label: 'S/N' },
+  { key: 'tradeBucket', label: 'Bucket' },
+  { key: 'tradeBucketDesc', label: 'Bucket Description' },
+  { key: 'overAllowance', label: 'Over allowance Amount' },
+  { key: 'tradeEinNotes', label: 'Trade EIN - Notes' },
+  { key: 'payoffNeeded', label: 'Payoff Needed for Customer Trade-In' },
+  { key: 'payoffInstitution', label: 'Financial Institution for Payoff' },
+  { key: 'payoffAmount', label: 'Amount Needed for Payoff' },
+  { key: 'expectedMargin', label: 'Expected Profit Margin' },
+  { key: 'notes', label: 'Notes' }
 ];
 
 /**
@@ -1594,14 +1611,14 @@ exports.sendSalesRequestEmail = onCall(
     const leadUrl = `${CRM_URL.value()}?lead=${encodeURIComponent(leadId)}`;
     const html = buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl });
     const who = lead.customerName || lead.companyName || 'Unnamed lead';
-    const what = sr.equipment ? ` — ${String(sr.equipment).slice(0, 80)}` : '';
+    const what = sr.model ? ` — ${String(sr.model).slice(0, 80)}` : '';
 
     try {
       const resend = new Resend(RESEND_API_KEY.value());
       const message = {
         from: EMAIL_FROM.value(),
         to,
-        subject: `Sales Request: ${who}${what}`,
+        subject: `Sales Submittal: ${who}${what}`,
         html
       };
       if (desk.length && repEmail && !repInDesk) message.cc = [repEmail];
@@ -1619,15 +1636,6 @@ exports.sendSalesRequestEmail = onCall(
     }
   }
 );
-
-// "2026-10-09" -> "Oct 9, 2026". Parsed as a calendar date, not an instant, so no
-// timezone can shift it a day.
-function fmtDateOnly(v) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
-  if (!m) return v;
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  return `${months[Number(m[2]) - 1]} ${Number(m[3])}, ${m[1]}`;
-}
 
 function buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl }) {
   const row = (label, value) => {
@@ -1649,12 +1657,14 @@ function buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl }) {
     </td>
   </tr>` : '';
 
-  const requestRows = SALES_REQUEST_FIELDS
+  // Store is the lead's branch; everything else is the rep's submittal, in form
+  // order. Unanswered and hidden questions are blank and drop out of row().
+  const requestRows = row('Store', lead.branch) + SALES_REQUEST_FIELDS
     .filter(f => f.key !== 'notes')
-    .map(f => row(f.label, f.key === 'deliveryDate' ? fmtDateOnly(sr[f.key]) : sr[f.key]))
+    .map(f => row(f.label, sr[f.key]))
     .join('');
   const customerRows = [
-    row('Customer', lead.customerName),
+    row('Contact', lead.customerName),
     row('Company', lead.companyName),
     row('Phone', lead.phone),
     row('Email', lead.contactEmail),
@@ -1674,7 +1684,7 @@ function buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl }) {
     </td>
   </tr>` : '';
 
-  const who = escapeHtml(lead.customerName || lead.companyName || 'Unnamed lead');
+  const who = escapeHtml(sr.customerName || lead.companyName || lead.customerName || 'Unnamed lead');
 
   return `<!DOCTYPE html>
 <html>
@@ -1693,7 +1703,7 @@ function buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl }) {
                 </td>
                 <td>
                   <div style="color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">BOBCAT OF INDY</div>
-                  <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">Sales Request</div>
+                  <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">Sales Submittal</div>
                 </td>
               </tr>
             </table>
@@ -1703,12 +1713,12 @@ function buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl }) {
         <!-- Headline -->
         <tr>
           <td style="padding: 28px 28px 16px;">
-            <div style="font-size: 22px; font-weight: 700; color: #1c1917;">Sales request: ${who}</div>
-            <div style="font-size: 14px; color: #57534e; margin-top: 4px;">${escapeHtml(rep?.name || 'A rep')} has won this lead and submitted a sales request. Reply to this email to reach the rep.</div>
+            <div style="font-size: 22px; font-weight: 700; color: #1c1917;">Sales Submittal: ${who}</div>
+            <div style="font-size: 14px; color: #57534e; margin-top: 4px;">${escapeHtml(rep?.name || 'A rep')} completed this sale and submitted it to the back office. Reply to this email to reach the rep.</div>
           </td>
         </tr>
 
-        ${block('Request', requestRows)}
+        ${block('Submittal', requestRows)}
         ${notes}
         ${block('Customer', customerRows)}
         ${block('Submitted by', repRows)}
@@ -1723,7 +1733,7 @@ function buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl }) {
         <!-- Footer -->
         <tr>
           <td style="padding: 0 28px 28px; text-align: center; color: #a8a29e; font-size: 11px;">
-            You received this email because you are on the sales request list for the Bobcat of Indy LMT, or you are the rep on this lead. To change recipients, sign in and visit Settings.
+            You received this email because you are on the Sales Submittal list for the Bobcat of Indy LMT, or you are the rep on this lead. To change recipients, sign in and visit Settings.
           </td>
         </tr>
 
