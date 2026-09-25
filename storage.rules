@@ -1,0 +1,31 @@
+rules_version = '2';
+
+// Firebase Storage rules for the Bobcat of Indy LMT.
+//
+// Only attachments/ is used: files on leads, Sales Submittals, Sales Requests
+// and Trade-In Evaluations (see src/lib/attachments.js). Any signed-in user may
+// read and add them, as with leads in firestore.rules. Size and type limits
+// mirror checkAttachment() in src/lib/pipeline.js — keep the two in step.
+//
+// CI does NOT deploy these. After changing them:
+//   firebase deploy --only storage
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /attachments/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+                    && request.resource.size > 0
+                    && request.resource.size < 25 * 1024 * 1024
+                    && request.resource.contentType.matches('image/.+|application/pdf|text/plain|text/csv|application/msword|application/vnd[.]openxmlformats-officedocument[.].+|application/vnd[.]ms-excel|application/vnd[.]ms-powerpoint');
+      // Files are never edited in place; replacing one is delete + upload.
+      allow update: if false;
+      // The app only offers delete to the uploader and admins.
+      allow delete: if request.auth != null;
+    }
+
+    // Nothing else in the bucket is reachable.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

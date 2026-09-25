@@ -676,3 +676,53 @@ export function isOwnRecordVisible(rec, viewer) {
   if (viewer.role === 'admin') return true;
   return rec.salesPerson === viewer.id || rec.createdBy === viewer.id;
 }
+
+/* ===================== ATTACHMENTS ===================== */
+// Files on leads, Sales Submittals, Sales Requests and Trade-In Evaluations,
+// stored in Firebase Storage under attachments/<owner>/… (see
+// src/lib/attachments.js). storage.rules enforces the same size and type
+// limits server-side — keep ATTACHMENT_TYPE_PATTERN in step with it.
+export const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+export const ATTACHMENT_MAX_FILES = 10;   // per upload
+export const ATTACHMENT_TYPE_PATTERN =
+  /^(image\/.+|application\/pdf|text\/plain|text\/csv|application\/msword|application\/vnd\.openxmlformats-officedocument\..+|application\/vnd\.ms-excel|application\/vnd\.ms-powerpoint)$/;
+export const ATTACHMENT_ACCEPT = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.txt';
+
+// Browsers leave `type` blank for some files (HEIC photos from older phones,
+// Office files on some systems); fill it in from the extension so the rule
+// check and Storage both see a real content type.
+const EXT_TYPES = {
+  pdf: 'application/pdf', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+  webp: 'image/webp', heic: 'image/heic', heif: 'image/heif', txt: 'text/plain', csv: 'text/csv',
+  doc: 'application/msword', xls: 'application/vnd.ms-excel', ppt: 'application/vnd.ms-powerpoint',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+};
+export function attachmentContentType(file) {
+  if (file && file.type) return file.type;
+  const ext = String((file && file.name) || '').split('.').pop().toLowerCase();
+  return EXT_TYPES[ext] || '';
+}
+
+/** Why a file can't be attached, or null if it can. */
+export function checkAttachment(file) {
+  if (!file) return 'No file';
+  if (!file.size) return 'The file is empty';
+  if (file.size > ATTACHMENT_MAX_BYTES) return `Over the ${ATTACHMENT_MAX_BYTES / 1024 / 1024} MB limit`;
+  if (!ATTACHMENT_TYPE_PATTERN.test(attachmentContentType(file))) return 'Only photos, PDFs and Office documents';
+  return null;
+}
+
+/** A Storage-safe file name that still reads like the original. */
+export function safeFileName(name) {
+  const cleaned = String(name || 'file').replace(/[^\w.\- ()]+/g, '_').replace(/\s+/g, ' ').trim();
+  return (cleaned || 'file').slice(-120);
+}
+
+export function formatBytes(n) {
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}

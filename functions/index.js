@@ -1662,7 +1662,7 @@ function buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl }) {
   const requestRows = row('Store', lead.branch) + SALES_REQUEST_FIELDS
     .filter(f => f.key !== 'notes')
     .map(f => row(f.label, sr[f.key]))
-    .join('');
+    .join('') + row('Paperwork', attachmentSummary((lead.attachments || []).filter(a => a && a.category === 'submittal')));
   const customerRows = [
     row('Contact', lead.customerName),
     row('Company', lead.companyName),
@@ -1886,6 +1886,15 @@ exports.sendRecordEmail = onCall(
   }
 );
 
+// "3 files — open the LMT to view: a.pdf, b.jpg, c.docx". Files stay in
+// Storage behind sign-in; the email only names them.
+function attachmentSummary(list) {
+  const files = Array.isArray(list) ? list.filter(a => a && a.name) : [];
+  if (!files.length) return '';
+  const names = files.slice(0, 8).map(a => a.name).join(', ') + (files.length > 8 ? ', …' : '');
+  return `${files.length} file${files.length === 1 ? '' : 's'} (open the LMT to view): ${names}`;
+}
+
 function recordSummary(kind, rec, lead) {
   const who = rec.customerName || lead?.companyName || lead?.customerName || '';
   if (kind === 'requests') {
@@ -1909,7 +1918,7 @@ function buildRecordEmailHtml({ kind, spec, rec, lead, rep, leadUrl, summary }) 
   };
   const fieldRows = RECORD_FIELDS[kind]
     .map(f => f.key === 'salesPerson' ? row(f.label, rep?.name) : row(f.label, rec[f.key]))
-    .join('');
+    .join('') + row('Attachments', attachmentSummary(rec.attachments));
   const leadRows = lead ? [
     row('Contact', lead.customerName),
     row('Company', lead.companyName),

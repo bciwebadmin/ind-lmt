@@ -5,7 +5,7 @@
 
 import {
   collection, doc, addDoc, updateDoc, deleteDoc, setDoc,
-  onSnapshot, query, orderBy, writeBatch, getDocs
+  onSnapshot, query, orderBy, writeBatch, getDocs, arrayUnion, arrayRemove
 } from 'firebase/firestore';
 import { db } from '../firebase';
 
@@ -154,4 +154,17 @@ export async function addRecordDoc(collectionName, shape) {
 
 export async function updateRecordDoc(collectionName, id, patch) {
   await updateDoc(doc(db, collectionName, id), patch);
+}
+
+/* ===================== ATTACHMENT LISTS ===================== */
+// Add or remove entries in a document's `attachments` array atomically, so two
+// people adding files to the same lead at once can't overwrite each other.
+// collectionName: 'leads' | 'requests' | 'tradeIns'.
+export async function addAttachmentRecords(collectionName, id, records) {
+  if (!records || !records.length) return;
+  await updateDoc(doc(db, collectionName, id), { attachments: arrayUnion(...records) });
+}
+
+export async function removeAttachmentRecord(collectionName, id, record) {
+  await updateDoc(doc(db, collectionName, id), { attachments: arrayRemove(record) });
 }

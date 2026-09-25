@@ -327,6 +327,39 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('every email builder that is called is defined', missing.length === 0, missing.join(', '));
 }
 
+// ---- Attachments ------------------------------------------------------------
+{
+  const P = await import('../src/lib/pipeline.js');
+  const f = (name, type, size = 1000) => ({ name, type, size });
+  check('pdf accepted',               P.checkAttachment(f('quote.pdf', 'application/pdf')) === null);
+  check('photo accepted',             P.checkAttachment(f('IMG_1.HEIC', 'image/heic')) === null);
+  check('xlsx with no browser type falls back to extension', P.attachmentContentType(f('deal.xlsx', '')) === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  check('xlsx with no type accepted', P.checkAttachment(f('deal.xlsx', '')) === null);
+  check('exe rejected',               P.checkAttachment(f('setup.exe', 'application/x-msdownload')) !== null);
+  check('empty file rejected',        P.checkAttachment(f('a.pdf', 'application/pdf', 0)) !== null);
+  check('over 25 MB rejected',        P.checkAttachment(f('big.pdf', 'application/pdf', P.ATTACHMENT_MAX_BYTES + 1)) !== null);
+  check('safeFileName strips path and odd characters', !/[\/\\#?%]/.test(P.safeFileName('..\\a/b#c?d%e.pdf')) && P.safeFileName('..\\a/b#c?d%e.pdf').endsWith('.pdf'));
+  check('safeFileName never empty',   P.safeFileName('').length > 0);
+  check('formatBytes',                P.formatBytes(2048) === '2 KB' || P.formatBytes(2048) === '2.0 KB');
+
+  // storage.rules must accept the same types the client lets through.
+  const rules = readFileSync(join(root, 'storage.rules'), 'utf8');
+  const m = rules.match(/contentType\.matches\('([^']+)'\)/);
+  check('storage.rules has a content-type check', !!m);
+  if (m) {
+    const re = new RegExp(m[1]);
+    const types = ['application/pdf', 'image/jpeg', 'image/heic', 'text/csv', 'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel'];
+    const drift = types.filter(t => P.ATTACHMENT_TYPE_PATTERN.test(t) !== re.test(t));
+    check('storage.rules and client agree on file types', drift.length === 0, drift.join(', '));
+    check('storage.rules rejects executables', !re.test('application/x-msdownload'));
+  }
+  check('storage.rules size cap matches client', rules.includes(String(P.ATTACHMENT_MAX_BYTES)) || rules.includes('25 * 1024 * 1024'));
+  const fb = JSON.parse(readFileSync(join(root, 'firebase.json'), 'utf8'));
+  check('firebase.json points at storage.rules', fb.storage?.rules === 'storage.rules');
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

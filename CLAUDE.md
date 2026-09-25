@@ -23,8 +23,9 @@ node scripts/verify-invariants.mjs # palette, contrast, icons, stale branding
 node scripts/test-helpers.mjs      # model regex, service area, router
 ```
 
-**Firestore rules are not deployed by CI.** After changing `firestore.rules`,
-run `firebase deploy --only firestore:rules` by hand.
+**Firestore and Storage rules are not deployed by CI.** After changing
+`firestore.rules` run `firebase deploy --only firestore:rules`; after changing
+`storage.rules` run `firebase deploy --only storage`. Both by hand.
 
 `functions/.env.ind-lmt` holds `EMAIL_FROM` and `CRM_URL`. Both are read at
 **deploy time** — editing the file changes nothing until functions redeploy.
@@ -177,8 +178,23 @@ submittal, `showIf` for conditional questions, `pruneHiddenAnswers` on save) and
   `notifications.salesRequestEmails` (Settings → Sales Requests), cc and
   reply-to the rep. The form's field list is copied in `functions/index.js`
   (`SALES_REQUEST_FIELDS`); a test fails if the two drift.
-- The old Leads / My Open / My Closed / All Closed views are gone. Those view
-  ids redirect to the picker.
+- The old Leads / My Open / My Closed / All Closed / My Created views are gone
+  (`RETIRED_VIEWS`); those ids redirect to the picker. My Created became the
+  **Created by me** toggle on every step dashboard (`createdByUserId`). A rep
+  also sees leads they entered but handed off; those rows are watch-only
+  (`watchOnly` — no checkbox, no inline assign/status, "Created by you" tag).
+
+## Navigation
+
+Sidebar (`Sidebar`): **+ New** menu (`NEW_MENU`: lead, sales request, trade-in,
+walk-in sales submittal, finance deal → `handleNew`), then **Pipeline**
+(Dashboards + the four steps), **Back Office** (Sales Requests, Finance,
+Trade-Ins — badges are open counts), Reports, **Admin** (Users, Settings).
+
+Old views moved rather than removed — `MOVED_VIEWS` maps them, and `goTo` /
+the `?view=` redirect follow the map: Junk → a tab on Incoming, Archived → a
+tab on Completed, Import / Scoring / Lead Routing → tabs in Settings
+(`SETTINGS_TABS`). Tabs use `SubTabs`.
 
 ## Indy records: requests, trade-ins, finance
 
@@ -200,11 +216,30 @@ a test fails if they drift.
   from the check-offs (`requestStatusFromDone`). Admins only.
 - **Trade-Ins**: Indy's Trade-In Evaluation form; nine 1–5/N/A condition
   ratings. A sales manager (admin) sets value + approval (`manager`).
-  Sidebar → Trade-Ins.
+  Sidebar → Back Office → Trade-Ins.
 - **Finance**: Indy's Sales Tracker. A financed Sales Submittal creates one
   automatically (`financeFromSubmittal`); finance (admins) works `admin.*`
   (Deal Status, lender, dates). `financeAudit` reproduces the sheet's 3-day
-  audit formulas. Sales Request dashboard → Finance tab.
+  audit formulas. Sidebar → Back Office → Finance.
+
+## Attachments
+
+Files go to Firebase Storage under `attachments/<collection>/<id>/`, and the
+record gets an `attachments[]` array of `{id, name, path, size, contentType,
+uploadedAt, uploadedBy, category?}` (added with `arrayUnion`, removed with
+`arrayRemove`, so two people attaching at once don't lose each other's). Lives
+on leads (lead panel → Files; the submittal's paperwork carries
+`category: 'submittal'`), requests, and trade-ins (Photos).
+
+- Upload / URL / delete: `src/lib/attachments.js`. Record writes:
+  `addAttachmentRecords` / `removeAttachmentRecord` in firestoreData.js.
+- Allowed types and the 25 MB cap: `ATTACHMENT_TYPE_PATTERN` /
+  `ATTACHMENT_MAX_BYTES` in pipeline.js, mirrored in `storage.rules`. A test
+  fails if they drift. Forms stage files (`AttachmentStager`) and upload after
+  the record is created, before the email goes, so the email lists them.
+- Remove is offered to the uploader or an admin; the rules allow any signed-in
+  user (Storage rules can't read Firestore cheaply).
+- Storage must be enabled once in the console (Build → Storage → Get started).
 
 **`firestore.rules` changed for these collections. CI does not deploy rules —
 run `firebase deploy --only firestore:rules` after pushing, or every save of a
@@ -286,8 +321,9 @@ still opens; it's just wrong. Assert the two lengths match.
 ## Roles
 
 Two tiers only — `admin` and `user`. `ADMIN_ONLY_VIEWS` at the top of `App.jsx`
-is the single source of truth. `lead-routing` is deliberately *not* admin-only:
-every signed-in user can open it, and reps get a read-only overview.
+is the single source of truth: reports, users, settings. Lead Routing now
+lives inside Settings, so it is admin-only too (it used to give reps a
+read-only overview).
 
 ## Working from the user's local copy
 

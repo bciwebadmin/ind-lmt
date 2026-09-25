@@ -45,7 +45,9 @@ In the `ind-lmt` project:
    region **`us-south1`**. This must match `firebase.json`; it cannot be changed later.
 2. **Build → Authentication** → Get started → enable **Email/Password**.
    Leave "Email link (passwordless)" off.
-3. **Project Settings → General** → confirm the web app config matches
+3. **Build → Storage** → Get started → production mode → same region. File
+   uploads (lead files, request paperwork, trade-in photos) need it.
+4. **Project Settings → General** → confirm the web app config matches
    `src/firebase.js`. It's already filled in for `ind-lmt`.
 
 ---
@@ -184,7 +186,8 @@ department, formTitle, leadSource, dateSubmitted, branch, status
 - [ ] Email wordmark, footer and CTA all say Bobcat of Indy
 - [ ] Favicon and browser tab title are right
 - [ ] Reports XLSX filename starts `ind-lmt-report`, title row says Bobcat of Indy
-- [ ] CSV import template is `ind-lmt-import-template.csv`
+- [ ] CSV import template is `ind-lmt-import-template.csv` (Settings → Import CSV)
+- [ ] Attach a file to a lead and open it again — proves Storage and its rules
 - [ ] Approve a test access request — temp password starts `IND-`
 - [ ] Node runtime: Node 20 is decommissioned 30 October 2026 — bump
       `engines.node` and both workflows' `node-version:` before then
@@ -213,6 +216,8 @@ divergences from Bobcat of Atlanta, which this repo was taken from:
 | Trade-In Evaluations | `tradeIns` collection — condition ratings, manager value + approval | — |
 | Finance tracker | `finance` collection — funding pipeline, auto-created from financed submittals | — |
 | Firestore rules | Extra rules for `requests`, `tradeIns`, `finance` — **deploy by hand**: `firebase deploy --only firestore:rules` | — |
+| File uploads | Firebase Storage, `storage.rules` — **deploy by hand**: `firebase deploy --only storage` | — |
+| Navigation | + New menu; Pipeline / Back Office / Admin groups; Junk, Archived, Import, Scoring, Lead Routing moved into tabs; My Created → "Created by me" toggle | Flat sidebar |
 
 Brand-agnostic fixes made here that Atlanta still needs:
 `buildResubmissionEmailHtml` was called but never defined in `functions/index.js`,
