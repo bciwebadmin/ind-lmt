@@ -107,6 +107,25 @@ export async function sendImportSummaryEmailViaFunction({ imported, unassigned, 
   }
 }
 
+/**
+ * Email a submitted sales request to the order desk (Settings → Sales Request
+ * recipients) and the rep. Only the lead id is sent: the server reads the lead,
+ * and the request saved on it, from Firestore itself.
+ *
+ * Never throws — the lead has already moved to Sales Request by the time this
+ * runs, and a failed email must not make that look like it failed too.
+ */
+export async function sendSalesRequestEmailViaFunction({ leadId }) {
+  try {
+    const fn = httpsCallable(fns, 'sendSalesRequestEmail');
+    const res = await fn({ leadId });
+    return res?.data || { sent: false, reason: 'no-response' };
+  } catch (e) {
+    console.error('[sales-request] callable failed:', e);
+    return { sent: false, reason: 'error' };
+  }
+}
+
 export async function sendWelcomeEmailToUser({ email, name, password }) {
   const fn = httpsCallable(fns, 'sendWelcomeEmail');
   return fn({ email, name, password });

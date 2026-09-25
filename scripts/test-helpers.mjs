@@ -140,6 +140,92 @@ check('branch list matches the ZIP test fixtures',
 check('5 routing departments', depts.length === 5, `got ${depts.length}`);
 console.log(`  routing grid: ${branches.length} branches x ${depts.length} departments = ${branches.length * depts.length} entries`);
 
+/* ---------- Indy's four-step pipeline (src/lib/pipeline.js) ---------- */
+{
+  const P = await import('../src/lib/pipeline.js');
+  const { stageOfStatus: st, statusOptionsFor: opts, bulkStatusOptionsFor: bulk } = P;
+
+  // Every pipeline status sits in exactly one step.
+  const seen = {};
+  for (const s of P.PIPELINE_STAGES) for (const x of s.statuses) seen[x] = (seen[x] || 0) + 1;
+  check('each status belongs to exactly one step', Object.values(seen).every(n => n === 1), JSON.stringify(seen));
+  for (const s of P.PIPELINE_STAGES) for (const x of s.statuses) {
+    check(`"${x}" -> ${s.id}`, st(x) === s.id, `got ${st(x)}`);
+  }
+  check('Junk is not a step', st('Junk') === P.STAGE_JUNK);
+  check('legacy Contacted -> incoming', st('Contacted') === 'incoming');
+  check('legacy Quoted -> working', st('Quoted') === 'working');
+  check('legacy Qualified -> working', st('Qualified') === 'working');
+  check('custom closed status -> completed', st('Sold Elsewhere', [...P.PIPELINE_CLOSED_STATUSES, 'Sold Elsewhere']) === 'completed');
+  check('unknown open status -> incoming', st('On Hold') === 'incoming');
+  check('a missing status -> incoming', st(undefined) === 'incoming');
+
+  // The flow only goes forward through the dropdowns.
+  const inc = opts('New'), wrk = opts('Working'), sr = opts('Sales Request'), done = opts('Won');
+  check('Incoming cannot jump to Sales Request or Won', !inc.includes('Sales Request') && !inc.includes('Won'), inc.join(','));
+  check('Incoming can reach Working and fall through', ['Working', 'Pending', 'Prospect', 'Wants', 'Lost', 'Unqualified'].every(s => inc.includes(s)), inc.join(','));
+  check('Working reaches Sales Request, not Won', wrk.includes('Sales Request') && !wrk.includes('Won'), wrk.join(','));
+  check('Working does not go back to New', !wrk.includes('New'), wrk.join(','));
+  check('Sales Request offers exactly Won / Working / Cancelled',
+    JSON.stringify(sr) === JSON.stringify(['Sales Request', 'Won', 'Working', 'Cancelled']), sr.join(','));
+  check('Completed can reopen to Working, not Sales Request', done.includes('Working') && !done.includes('Sales Request'), done.join(','));
+  check('current status always offered', opts('On Hold').includes('On Hold'));
+  check('custom statuses stay reachable', opts('New', [...P.PIPELINE_STATUSES, 'On Hold']).includes('On Hold'));
+  for (const s of P.PIPELINE_STAGES) {
+    check(`bulk menu for ${s.id} never offers Sales Request`, !bulk(s.id).includes('Sales Request'), bulk(s.id).join(','));
+  }
+
+  // A config saved before the pipeline existed (Atlanta's status list) heals.
+  const old = {
+    statuses: ['New', 'Contacted', 'Working', 'Quoted', 'Won', 'Lost', 'Unqualified', 'No Decision', 'On Hold', 'Junk'],
+    closedStatuses: ['Won', 'Lost', 'Unqualified', 'No Decision', 'Junk', 'Working'],
+    staleness: { enabled: true, thresholds: { New: 24, Pending: 999 } }
+  };
+  const healed = P.ensurePipelineStatuses(old, { Pending: 168, Prospect: 336 });
+  check('heal: adds the pipeline statuses', P.PIPELINE_STATUSES.every(s => healed.statuses.includes(s)), healed.statuses.join(','));
+  check('heal: drops Contacted and Quoted', !healed.statuses.includes('Contacted') && !healed.statuses.includes('Quoted'));
+  check('heal: keeps a custom status', healed.statuses.includes('On Hold'));
+  check('heal: Junk stays last', healed.statuses[healed.statuses.length - 1] === 'Junk');
+  check('heal: Cancelled counts as closed', healed.closedStatuses.includes('Cancelled'));
+  check('heal: Working can never be closed', !healed.closedStatuses.includes('Working'));
+  check('heal: never overwrites an admin threshold', healed.staleness.thresholds.Pending === 999);
+  check('heal: adds a missing threshold', healed.staleness.thresholds.Prospect === 336);
+
+  // Who sees what.
+  const admin = { id: 'a1', role: 'admin' }, rep = { id: 'r1', role: 'user' };
+  const mine = { assignedTo: 'r1' }, second = { assignedTo: 'r2', secondaryAssignedTo: 'r1' };
+  const other = { assignedTo: 'r2' }, nobody = { assignedTo: 'u_1' };
+  check('admin sees everything', P.isLeadVisibleInStage(other, 'working', admin));
+  check('rep sees own lead', P.isLeadVisibleInStage(mine, 'working', rep));
+  check('rep sees lead where secondary', P.isLeadVisibleInStage(second, 'completed', rep));
+  check('rep does not see another rep\'s lead', !P.isLeadVisibleInStage(other, 'incoming', rep));
+  check('rep sees unassigned leads in Incoming', P.isLeadVisibleInStage(nobody, 'incoming', rep));
+  check('rep does not see unassigned leads elsewhere', !P.isLeadVisibleInStage(nobody, 'completed', rep));
+
+  // The sales request form.
+  check('sales request needs equipment', 'equipment' in P.validateSalesRequest({}));
+  check('sales request rejects quantity 0', 'quantity' in P.validateSalesRequest({ equipment: 'S66', quantity: '0' }));
+  check('sales request accepts a valid form', Object.keys(P.validateSalesRequest({ equipment: 'S66', quantity: '2' })).length === 0);
+
+  // App.jsx seeds its config from the module rather than a copied list.
+  check('DEFAULT_CONFIG.statuses comes from pipeline.js', /statuses: PIPELINE_STATUSES,/.test(app));
+
+  // The email's field list is a hand copy (no shared build) — keys must match.
+  const fnSrc = readFileSync(join(root, 'functions/index.js'), 'utf8');
+  const block = fnSrc.match(/const SALES_REQUEST_FIELDS = \[([\s\S]*?)\];/);
+  const serverKeys = block ? [...block[1].matchAll(/key: '([^']+)'/g)].map(m => m[1]) : [];
+  const clientKeys = P.SALES_REQUEST_FIELDS.map(f => f.key);
+  check('email and form list the same sales request fields',
+    JSON.stringify(serverKeys) === JSON.stringify(clientKeys), `server=[${serverKeys}] client=[${clientKeys}]`);
+
+  // Every email builder functions/index.js calls must exist. One didn't
+  // (buildResubmissionEmailHtml) and the try/catch around it hid the error.
+  const called  = new Set([...fnSrc.matchAll(/\b(build\w+EmailHtml)\(/g)].map(m => m[1]));
+  const defined = new Set([...fnSrc.matchAll(/function (build\w+EmailHtml)\(/g)].map(m => m[1]));
+  const missing = [...called].filter(n => !defined.has(n));
+  check('every email builder that is called is defined', missing.length === 0, missing.join(', '));
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

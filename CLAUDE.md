@@ -136,6 +136,36 @@ Watch the direction when porting. Note that in BMH only ~19 of its 97
 `text-stone-900` occurrences are on brand fills; the rest are ordinary dark text
 on white. A blind swap in either direction breaks the UI and still builds.
 
+## The four-step pipeline (Indy only)
+
+Indy works leads through four steps, each its own dashboard, with a picker
+(`home` view) as the landing screen:
+
+  **Incoming** (New) → **Working** (Working, Pending, Prospect, Wants) →
+  **Sales Request** (Sales Request) → **Completed** (Won, Lost, Unqualified,
+  No Decision, Cancelled)
+
+- `src/lib/pipeline.js` is the single source of truth for which status is in
+  which step, which moves each step allows, and who sees what. It is pure, so
+  `scripts/test-helpers.mjs` imports it directly. Change the mapping there.
+- A lead's step is **derived from its status**, never stored. That is what
+  guarantees a lead is in exactly one step; do not add a `stage` field.
+- `ensurePipelineStatuses()` heals a stored `config/app` that predates the
+  pipeline (stored config replaces defaults — see below). Pipeline statuses
+  cannot be removed in Settings; they come back on the next read.
+- Guards live in `updateLead`, so every path (row, bulk, panel) obeys them:
+  entering Working needs an assigned rep, and Sales Request can only be
+  entered through `SalesRequestModal`, which supplies `lead.salesRequest`.
+- Visibility: admins see every lead; reps see leads where they are primary or
+  secondary, plus unassigned leads in Incoming only.
+- Submitting a sales request calls the `sendSalesRequestEmail` callable with
+  just the lead id. The server re-reads the lead and emails
+  `notifications.salesRequestEmails` (Settings → Sales Requests), cc and
+  reply-to the rep. The form's field list is copied in `functions/index.js`
+  (`SALES_REQUEST_FIELDS`); a test fails if the two drift.
+- The old Leads / My Open / My Closed / All Closed views are gone. Those view
+  ids redirect to the picker.
+
 ## Status model
 
 `config.statuses` drives everything; never hardcode a status list.
@@ -144,9 +174,9 @@ on white. A blind swap in either direction breaks the UI and still builds.
 const closedStatuses = getClosedStatuses(config);   // always use the helper
 ```
 
-- **Working:** New, Contacted, Working, Quoted → Leads tab, My Open
-- **Closed:** Won, Lost, Unqualified, No Decision → All Closed, My Closed
-- **Junk:** its own tab, excluded from every pipeline view and all report metrics
+- **Open:** New, Working, Pending, Prospect, Wants, Sales Request
+- **Closed:** Won, Lost, Unqualified, No Decision, Cancelled → the Completed step
+- **Junk:** its own tab, excluded from every dashboard and all report metrics
 
 "Working" was renamed from "Qualified"; `LEGACY_WORKING_STATUS` still maps the
 old stored value. A Working lead carries an absolute `workingUntil` deadline that

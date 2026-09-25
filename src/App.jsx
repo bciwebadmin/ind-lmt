@@ -15,7 +15,8 @@ import {
   Lock, AlertTriangle, Flame, Sparkles, BarChart3, TrendingUp, TrendingDown,
   Trophy, Target, Printer, FileSpreadsheet, Eye, EyeOff, Copy, Menu,
   RotateCcw, CalendarOff, Archive, ArchiveX, Key, Route,
-  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight
+  ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
+  Inbox, Briefcase, ClipboardList, LayoutDashboard, ArrowRight
 } from 'lucide-react';
 
 import {
@@ -30,15 +31,25 @@ import {
   sendResetEmail, createUserOnSecondaryApp, sendWelcomeEmailToUser,
   reassignUserLeadsViaFunction, restoreLoaLeadsForUserViaFunction,
   adminResetUserPasswordViaFunction,
-  sendImportSummaryEmailViaFunction
+  sendImportSummaryEmailViaFunction,
+  sendSalesRequestEmailViaFunction
 } from './lib/firestoreAuth';
 import { nearestBranchForZip } from './lib/branchRouting';
+import {
+  PIPELINE_STAGES, PIPELINE_STATUSES, PIPELINE_CLOSED_STATUSES,
+  STAGE_INCOMING, STAGE_WORKING, STAGE_SALES_REQUEST, STAGE_COMPLETED,
+  SALES_REQUEST_STATUS, WON_STATUS,
+  getStage, stageForView, stageOfStatus, stageOfLead, statusOptionsFor, bulkStatusOptionsFor,
+  ensurePipelineStatuses, isLeadVisibleInStage, isUnassigned,
+  SALES_REQUEST_FIELDS, validateSalesRequest
+} from './lib/pipeline';
 
 const DEFAULT_CONFIG = {
-  statuses: ['New', 'Contacted', 'Working', 'Quoted', 'Won', 'Lost', 'Unqualified', 'No Decision', 'Junk'],
+  // Indy's four-step pipeline — see src/lib/pipeline.js for which status is in which step.
+  statuses: PIPELINE_STATUSES,
   // Which of the statuses above count as "closed" (terminal). Configurable via
   // Settings → Closed Statuses. Non-closed statuses count as open.
-  closedStatuses: ['Won', 'Lost', 'Unqualified', 'No Decision', 'Junk'],
+  closedStatuses: PIPELINE_CLOSED_STATUSES,
   branches: ['Anderson', 'Columbus', 'Ellettsville', 'Indy', 'Indy North'],
   departments: ['Sales', 'Rental', 'Parts', 'Service', 'Supplies'],
   sources: ['Gravity Forms', 'Bobcat Leads', 'Manual Entry', 'CSV Import'],
@@ -80,7 +91,55 @@ const DEFAULT_CONFIG = {
 // NOTE: 'lead-routing' is deliberately NOT here. Every signed-in user can open it;
 // reps get the read-only Routing Logic Overview instead of the editor, so anyone
 // can answer "where do our leads go?" without being able to change it.
-const ADMIN_ONLY_VIEWS = ['leads', 'all-closed', 'reports', 'import', 'archived', 'users', 'scoring', 'settings'];
+const ADMIN_ONLY_VIEWS = ['reports', 'import', 'archived', 'users', 'scoring', 'settings'];
+
+// The four step dashboards plus the picker in front of them. Every signed-in
+// user can open all five; what they SEE inside is narrowed by
+// isLeadVisibleInStage (reps get their own leads, plus unowned ones in Incoming).
+const HOME_VIEW = 'home';
+const STAGE_VIEWS = PIPELINE_STAGES.map(s => s.view);
+// View ids the older forks used. Indy replaced them with the step dashboards, so
+// an old bookmark or email link carrying one lands on the picker instead.
+const RETIRED_VIEWS = ['leads', 'my-open', 'my-closed', 'all-closed'];
+
+// Empty-state copy for each step dashboard.
+const STAGE_EMPTY = {
+  [STAGE_INCOMING]: {
+    title: 'Nothing waiting in Incoming',
+    admin: 'New leads from the web forms, CSV imports and Add Lead land here first.',
+    rep:   'New leads assigned to you, and unassigned ones you can pick up, land here first.'
+  },
+  [STAGE_WORKING]: {
+    title: 'No leads being worked',
+    admin: 'Assign a lead in Incoming and set it to Working (or Pending, Prospect, Wants) to move it here.',
+    rep:   'Assign yourself a lead in Incoming and set it to Working to move it here.'
+  },
+  [STAGE_SALES_REQUEST]: {
+    title: 'No open sales requests',
+    admin: 'When a rep wins a lead in Working, they fill in the sales request and it moves here.',
+    rep:   'When you win a lead in Working, set it to Sales Request and fill in the form.'
+  },
+  [STAGE_COMPLETED]: {
+    title: 'Nothing completed yet',
+    admin: 'Won, lost, unqualified and cancelled leads end up here. After 30 days they move to Archived.',
+    rep:   'Your won, lost, unqualified and cancelled leads end up here for 30 days.'
+  }
+};
+
+const STAGE_ICONS = {
+  [STAGE_INCOMING]:      Inbox,
+  [STAGE_WORKING]:       Briefcase,
+  [STAGE_SALES_REQUEST]: ClipboardList,
+  [STAGE_COMPLETED]:     CheckCircle2
+};
+// Accent per step, reused from the status palette so a step and its statuses
+// read as the same colour family. Text shades are all -700 on a -50 tint (AA).
+const STAGE_ACCENTS = {
+  [STAGE_INCOMING]:      { bar: 'bg-blue-500',    soft: 'bg-blue-50',    text: 'text-blue-700'    },
+  [STAGE_WORKING]:       { bar: 'bg-violet-500',  soft: 'bg-violet-50',  text: 'text-violet-700'  },
+  [STAGE_SALES_REQUEST]: { bar: 'bg-orange-500',  soft: 'bg-orange-50',  text: 'text-orange-700'  },
+  [STAGE_COMPLETED]:     { bar: 'bg-emerald-500', soft: 'bg-emerald-50', text: 'text-emerald-700' }
+};
 
 function canAccessView(view, role) {
   if (ADMIN_ONLY_VIEWS.includes(view)) return role === 'admin';
@@ -90,7 +149,7 @@ function canAccessView(view, role) {
 // Landing page and safety-redirect fallback. Admins see the full pipeline;
 // sales reps land on their own open leads.
 function getDefaultView(role) {
-  return role === 'admin' ? 'leads' : 'my-open';
+  return HOME_VIEW;
 }
 
 // Auto-archival rule: leads closed for this many consecutive days (no reopen in between)
@@ -147,7 +206,7 @@ const SYSTEM_UNASSIGNED = { id: 'u_1', name: 'Unassigned', email: '', isSystem: 
 // admins can add new statuses (like "No Decision") and mark them closed via Settings.
 // If a config isn't provided or the field is missing, fall back to the defaults —
 // this matters for cold-start renders before the Firestore config has loaded.
-const DEFAULT_CLOSED_STATUSES = ['Won', 'Lost', 'Unqualified', 'No Decision', 'Junk'];
+const DEFAULT_CLOSED_STATUSES = PIPELINE_CLOSED_STATUSES;
 
 // When the current status was set. Leads created before this field existed have
 // no `statusChangedAt`, so fall back to the most recent status_change event in
@@ -258,6 +317,11 @@ const STATUS_COLORS = {
   Working:        { bg: 'bg-violet-50', text: 'text-violet-700', dot: 'bg-violet-500' },
   Qualified:      { bg: 'bg-violet-50', text: 'text-violet-700', dot: 'bg-violet-500' },  // legacy alias of Working
   Quoted:         { bg: 'bg-cyan-50',   text: 'text-cyan-700',   dot: 'bg-cyan-500'   },
+  Pending:        { bg: 'bg-amber-50',  text: 'text-amber-700',  dot: 'bg-amber-500'  },
+  Prospect:       { bg: 'bg-sky-50',    text: 'text-sky-700',    dot: 'bg-sky-500'    },
+  Wants:          { bg: 'bg-cyan-50',   text: 'text-cyan-700',   dot: 'bg-cyan-500'   },
+  'Sales Request':{ bg: 'bg-orange-50', text: 'text-orange-700', dot: 'bg-orange-500' },
+  Cancelled:      { bg: 'bg-stone-100', text: 'text-stone-600',  dot: 'bg-stone-400'  },
   Won:            { bg: 'bg-emerald-50',text: 'text-emerald-700',dot: 'bg-emerald-500'},
   Lost:           { bg: 'bg-rose-50',   text: 'text-rose-700',   dot: 'bg-rose-500'   },
   Unqualified:    { bg: 'bg-stone-100', text: 'text-stone-600',  dot: 'bg-stone-400'  },
@@ -758,14 +822,21 @@ const DEFAULT_STALENESS = {
   thresholds: {
     // Hours a lead can sit in each status before being flagged as stale.
     // null/0 = never goes stale.
-    New: 24,           // 1 day to make first contact
-    Contacted: 72,     // 3 days to follow up
+    New: 24,           // 1 day to review, fill in and assign
     Working: 168,      // fallback only — a Working lead with a deadline ignores this
-    Quoted: 240,       // 10 days to chase a sent quote
+    Pending: 168,      // 7 days
+    Prospect: 336,     // 14 days
+    Wants: 336,        // 14 days
+    'Sales Request': 72, // 3 days for the sales request to be completed
     Won: null,
     Lost: null,
-    Unqualified: null
+    Unqualified: null,
+    Cancelled: null
   }
+};
+// Thresholds ensurePipelineStatuses adds to a stored config that predates them.
+const PIPELINE_STALENESS_DEFAULTS = {
+  Pending: 168, Prospect: 336, Wants: 336, 'Sales Request': 72, Cancelled: null
 };
 
 function getLastActivityAt(lead) {
@@ -913,10 +984,10 @@ export default function BobcatIndyCRM() {
     // Allow ?view=users or ?view=leads etc. via URL — used by email notifications
     try {
       const requested = new URLSearchParams(window.location.search).get('view');
-      const valid = ['leads', 'my-open', 'my-closed', 'my-created', 'all-closed', 'archived', 'add', 'import', 'reports', 'users', 'scoring', 'settings'];
+      const valid = [HOME_VIEW, ...STAGE_VIEWS, 'my-created', 'archived', 'junk', 'add', 'import', 'reports', 'users', 'lead-routing', 'scoring', 'settings'];
       if (requested && valid.includes(requested)) return requested;
     } catch { /* ignore */ }
-    return 'leads';
+    return HOME_VIEW;
   });
   const [leads, setLeads] = useState([]);
   const [config, setConfig] = useState(DEFAULT_CONFIG);
@@ -943,12 +1014,9 @@ export default function BobcatIndyCRM() {
   // For sales reps who can't see the team-wide Leads view, keep them on their own
   // scoped view instead.
   const applyChipFilter = (preset) => {
-    const role = currentUser?.role;
-    const canSeeAllLeads = canAccessView('leads', role);
-    // If the user is already on a "My ..." or "All Closed" view, keep them there.
-    if (view !== 'my-open' && view !== 'my-closed' && view !== 'my-created' && view !== 'all-closed') {
-      setView(canSeeAllLeads ? 'leads' : 'my-open');
-    }
+    // Chips only render on the step dashboards and My Created, so the table the
+    // chip filters is already on screen — stay on it.
+    if (!STAGE_VIEWS.includes(view) && view !== 'my-created') setView(HOME_VIEW);
     setLeadsPrefilter(preset);
   };
 
@@ -992,7 +1060,7 @@ export default function BobcatIndyCRM() {
         duplicateDetection: DEFAULT_DUPLICATE_DETECTION,
         ...data
       };
-      setConfig(ensureWorkingStatus(ensureJunkStatus(merged)));
+      setConfig(ensurePipelineStatuses(ensureWorkingStatus(ensureJunkStatus(merged)), PIPELINE_STALENESS_DEFAULTS));
     });
 
     const unsubUsers = subscribeToUsers((data) => {
@@ -1121,7 +1189,7 @@ export default function BobcatIndyCRM() {
   // default (Leads for admins/dept mgrs, My Open for sales reps).
   useEffect(() => {
     if (!currentUser) return;
-    if (!canAccessView(view, currentUser.role)) {
+    if (RETIRED_VIEWS.includes(view) || !canAccessView(view, currentUser.role)) {
       setView(getDefaultView(currentUser.role));
     }
   }, [view, currentUser]);
@@ -1155,6 +1223,28 @@ export default function BobcatIndyCRM() {
     [activeLeads]
   );
 
+  // The four step dashboards. Each bucket holds the leads in that step that the
+  // current user may see: admins everything, reps their own plus (Incoming only)
+  // unowned leads. Sidebar badges, the picker's counts, the top-bar chips and the
+  // tables all read these same buckets, so a count can never disagree with its list.
+  const stageLeads = useMemo(() => {
+    const out = Object.fromEntries(PIPELINE_STAGES.map(s => [s.id, []]));
+    if (!currentUser) return out;
+    const closed = getClosedStatuses(config);
+    for (const l of pipelineLeads) {
+      const st = stageOfLead(l, closed);
+      if (out[st] && isLeadVisibleInStage(l, st, currentUser)) out[st].push(l);
+    }
+    return out;
+  }, [pipelineLeads, config.closedStatuses, currentUser]);
+
+  // Where a given lead lives, for "take me to it" navigation after adding one.
+  const stageViewOf = (lead) => {
+    const st = stageOfLead(lead, getClosedStatuses(config));
+    if (st === 'junk') return 'junk';
+    return getStage(st)?.view || HOME_VIEW;
+  };
+
   // Adapter: child components were written expecting users/accessRequests to live inside config.
   // We keep them as separate top-level state but inject them into a derived config
   // so the child UI components don't all need new props.
@@ -1170,7 +1260,7 @@ export default function BobcatIndyCRM() {
     if (!currentUser) return;
     const adminOnly = ['import', 'reports', 'users', 'scoring', 'settings'];
     if (currentUser.role !== 'admin' && adminOnly.includes(view)) {
-      setView('leads');
+      setView(HOME_VIEW);
     }
   }, [currentUser, view]);
 
@@ -1198,7 +1288,7 @@ export default function BobcatIndyCRM() {
 
   const signOut = async () => {
     await signOutCurrent();
-    setView('leads');
+    setView(HOME_VIEW);
     setSelectedLead(null);
   };
 
@@ -1393,6 +1483,25 @@ export default function BobcatIndyCRM() {
     const lead = leads.find(l => l.id === id);
     if (!lead) return;
 
+    // Pipeline guards. Every write path (row dropdown, bulk menu, detail panel)
+    // lands here, so these hold however the change was made.
+    if (patch.status !== undefined && patch.status !== lead.status) {
+      const closed = getClosedStatuses(config);
+      const fromStage = stageOfStatus(lead.status, closed);
+      const toStage   = stageOfStatus(patch.status, closed);
+      // A lead only enters Working once a rep owns it.
+      const owner = patch.assignedTo !== undefined ? patch.assignedTo : lead.assignedTo;
+      if (toStage === STAGE_WORKING && fromStage !== STAGE_WORKING && isUnassigned({ assignedTo: owner })) {
+        showToast('Assign a rep before moving this lead to Working', 'error');
+        return false;
+      }
+      // Sales Request is only entered through its form, which supplies the data.
+      if (patch.status === SALES_REQUEST_STATUS && !patch.salesRequest) {
+        showToast('Use the Sales Request form to move a lead into Sales Request', 'error');
+        return false;
+      }
+    }
+
     const events = [];
     const now = new Date().toISOString();
     const actor = currentUser?.id;
@@ -1406,6 +1515,14 @@ export default function BobcatIndyCRM() {
         from: lead.status, to: patch.status
       });
       patch = { ...patch, statusChangedAt: now, statusChangedBy: actor || null };
+    }
+
+    // A submitted sales request gets its own timeline entry alongside the status change.
+    if (patch.salesRequest) {
+      events.push({
+        id: uid('h'), type: 'sales_request', timestamp: now, actor,
+        equipment: patch.salesRequest.equipment || ''
+      });
     }
 
     // Secondary assignment change — logged so "why is this in my list?" is answerable
@@ -1452,8 +1569,10 @@ export default function BobcatIndyCRM() {
     try {
       await updateLeadDoc(id, finalPatch);
       if (selectedLead?.id === id) setSelectedLead({ ...selectedLead, ...finalPatch });
+      return true;
     } catch (e) {
       showToast('Failed to save change', 'error');
+      return false;
     }
   };
   // Single-lead status changes route through here so entering Working can ask
@@ -1465,6 +1584,20 @@ export default function BobcatIndyCRM() {
   const requestStatusChange = (id, status) => {
     const lead = leads.find(l => l.id === id);
     if (!lead) return;
+    // Check ownership before opening any dialog, so nobody fills one in only to
+    // have the change refused at the end.
+    const closed = getClosedStatuses(config);
+    if (stageOfStatus(status, closed) === STAGE_WORKING
+        && stageOfStatus(lead.status, closed) !== STAGE_WORKING
+        && isUnassigned(lead)) {
+      showToast('Assign a rep before moving this lead to Working', 'error');
+      return;
+    }
+    // Won from Working goes through the sales request, per Indy's process.
+    if (status === SALES_REQUEST_STATUS && lead.status !== SALES_REQUEST_STATUS) {
+      setSalesRequestPrompt({ leadId: id });
+      return;
+    }
     if (status === WORKING_STATUS && lead.status !== WORKING_STATUS) {
       setWorkingPrompt({ leadId: id, leadName: lead.customerName || lead.companyName || '', current: null });
       return;
@@ -1492,6 +1625,41 @@ export default function BobcatIndyCRM() {
       workingUntil: workingDeadlineFrom(weeks),
       workingWeeks: weeks
     });
+  };
+
+  // ------------- SALES REQUEST -------------
+  // Opened when a lead is moved into Sales Request. Submitting saves the form on
+  // the lead, moves it into the Sales Request step, then asks the server to
+  // email the order desk (Settings → Sales Request recipients) and the rep. The
+  // server re-reads the lead rather than trusting what the browser sends.
+  const [salesRequestPrompt, setSalesRequestPrompt] = useState(null);
+  const [salesRequestBusy, setSalesRequestBusy] = useState(false);
+
+  const submitSalesRequest = async (form, extraPatch = {}) => {
+    if (!salesRequestPrompt) return;
+    const { leadId } = salesRequestPrompt;
+    const lead = leads.find(l => l.id === leadId);
+    if (!lead) { setSalesRequestPrompt(null); return; }
+    setSalesRequestBusy(true);
+    const salesRequest = {
+      ...form,
+      submittedAt: new Date().toISOString(),
+      submittedBy: currentUser?.id || null
+    };
+    const saved = await updateLead(leadId, { ...extraPatch, status: SALES_REQUEST_STATUS, salesRequest });
+    if (!saved) { setSalesRequestBusy(false); return; }   // updateLead already said why
+    const res = await sendSalesRequestEmailViaFunction({ leadId });
+    setSalesRequestBusy(false);
+    setSalesRequestPrompt(null);
+    if (res?.sent && res.deskRecipients > 0) {
+      showToast(`Sales request sent to ${res.deskRecipients} recipient${res.deskRecipients === 1 ? '' : 's'}`);
+    } else if (res?.sent) {
+      showToast('Moved to Sales Request — no order-desk recipients set in Settings, so only the rep was emailed', 'error');
+    } else if (res?.reason === 'no-recipients') {
+      showToast('Moved to Sales Request — but no one was emailed. Add recipients in Settings.', 'error');
+    } else {
+      showToast('Moved to Sales Request — but the email failed to send', 'error');
+    }
   };
 
   const deleteLead = async (id) => {
@@ -1598,7 +1766,7 @@ export default function BobcatIndyCRM() {
     if (matches.length === 0) {
       const lead = await addLead(payload, sourceLabel);
       showToast('Lead added');
-      setView('leads');
+      if (lead) setView(stageViewOf(lead));
       setSelectedLead(lead);
       return;
     }
@@ -1626,7 +1794,7 @@ export default function BobcatIndyCRM() {
       });
       showToast('New submission linked to existing lead');
       setDuplicateCheck(null);
-      setView('leads');
+      setView(stageViewOf(existing));
       // selectedLead will get refreshed via the onSnapshot subscription
       setSelectedLead({ ...existing, history: [...(existing.history || []), event], dateSubmitted: now });
     } catch (e) {
@@ -1639,14 +1807,14 @@ export default function BobcatIndyCRM() {
     const lead = await addLead(duplicateCheck.payload, duplicateCheck.sourceLabel);
     showToast('Lead created as new (duplicate override)');
     setDuplicateCheck(null);
-    setView('leads');
+    if (lead) setView(stageViewOf(lead));
     setSelectedLead(lead);
   };
 
   const openExistingLead = (id) => {
     const existing = leads.find(l => l.id === id);
     setDuplicateCheck(null);
-    setView('leads');
+    if (existing) setView(stageViewOf(existing));
     setSelectedLead(existing);
   };
 
@@ -1755,11 +1923,8 @@ export default function BobcatIndyCRM() {
       <div className="flex">
         <Sidebar
           view={view} setView={setView}
-          leadsCount={pipelineLeads.filter(l => !getClosedStatuses(config).includes(l.status)).length}
-          myOpenCount={pipelineLeads.filter(l => isLeadForUser(l, currentUser.id) && !getClosedStatuses(config).includes(l.status)).length}
-          myClosedCount={pipelineLeads.filter(l => isLeadForUser(l, currentUser.id) && getClosedStatuses(config).includes(l.status)).length}
+          stageCounts={Object.fromEntries(PIPELINE_STAGES.map(s => [s.id, stageLeads[s.id].length]))}
           myCreatedCount={pipelineLeads.filter(l => isCreatedByUser(l, currentUser.id)).length}
-          allClosedCount={pipelineLeads.filter(l => getClosedStatuses(config).includes(l.status)).length}
           archivedCount={archivedLeads.length}
           junkCount={junkLeads.length}
           isAdmin={currentUser.role === 'admin'}
@@ -1771,51 +1936,40 @@ export default function BobcatIndyCRM() {
 
         <main className="flex-1 min-h-screen min-w-0 overflow-x-clip">
           <TopBar
-            view={view} leads={pipelineLeads} config={configWithUsers}
+            view={view} leads={pipelineLeads} stageLeads={stageLeads} config={configWithUsers}
             currentUser={currentUser} onSignOut={signOut}
             onMobileMenuOpen={() => setMobileNavOpen(true)}
             onChipFilter={applyChipFilter}
           />
 
           <div className="px-4 md:px-8 py-4 md:py-6">
-            {view === 'leads' && (
-              /* The Leads tab is the working pipeline: New / Contacted / Working /
-                 Quoted. Anything in a closed status moves to All Closed (team) and
-                 My Closed (rep). scope="open" with no myUserId = team-wide open. */
+            {view === HOME_VIEW && (
+              <StageHomeView
+                stageLeads={stageLeads}
+                config={configWithUsers}
+                currentUser={currentUser}
+                onOpen={setView}
+              />
+            )}
+            {PIPELINE_STAGES.map(stage => view === stage.view && (
+              /* One dashboard per step. `stageLeads` is already narrowed to the
+                 step AND to what this user may see, so the table does no
+                 scoping of its own (scope="all"). `stage` only drives the
+                 status options and the empty state. key= resets filters when
+                 switching between steps. */
               <LeadsView
-                leads={pipelineLeads} config={configWithUsers}
+                key={stage.id}
+                leads={stageLeads[stage.id]} config={configWithUsers}
                 onSelect={setSelectedLead}
                 onUpdate={updateLead} onDelete={deleteLead}
                 onStatusChange={requestStatusChange}
-                scope="open"
+                stage={stage.id}
+                isAdmin={currentUser.role === 'admin'}
+                scope="all"
                 prefilter={leadsPrefilter}
                 onPrefilterConsumed={() => setLeadsPrefilter(null)}
               />
-            )}
-            {view === 'my-open' && (
-              <LeadsView
-                leads={pipelineLeads} config={configWithUsers}
-                onSelect={setSelectedLead}
-                onUpdate={updateLead} onDelete={deleteLead}
-                onStatusChange={requestStatusChange}
-                myUserId={currentUser.id}
-                scope="open"
-                prefilter={leadsPrefilter}
-                onPrefilterConsumed={() => setLeadsPrefilter(null)}
-              />
-            )}
-            {view === 'my-closed' && (
-              <LeadsView
-                leads={pipelineLeads} config={configWithUsers}
-                onSelect={setSelectedLead}
-                onUpdate={updateLead} onDelete={deleteLead}
-                onStatusChange={requestStatusChange}
-                myUserId={currentUser.id}
-                scope="closed"
-                prefilter={leadsPrefilter}
-                onPrefilterConsumed={() => setLeadsPrefilter(null)}
-              />
-            )}
+            ))}
             {view === 'my-created' && (
               /* Leads this user entered by hand, open AND closed, whoever they're
                  assigned to now. scope="all" on purpose — the point is following
@@ -1832,17 +1986,6 @@ export default function BobcatIndyCRM() {
                    full control here, as they do everywhere else. */
                 readOnly={currentUser.role !== 'admin'}
                 scope="all"
-                prefilter={leadsPrefilter}
-                onPrefilterConsumed={() => setLeadsPrefilter(null)}
-              />
-            )}
-            {view === 'all-closed' && canAccessView('all-closed', currentUser.role) && (
-              <LeadsView
-                leads={pipelineLeads} config={configWithUsers}
-                onSelect={setSelectedLead}
-                onUpdate={updateLead} onDelete={deleteLead}
-                onStatusChange={requestStatusChange}
-                scope="closed"
                 prefilter={leadsPrefilter}
                 onPrefilterConsumed={() => setLeadsPrefilter(null)}
               />
@@ -1911,6 +2054,20 @@ export default function BobcatIndyCRM() {
           onExtendWorking={requestWorkingExtend}
         />
       )}
+
+      {salesRequestPrompt && (() => {
+        const srLead = leads.find(l => l.id === salesRequestPrompt.leadId);
+        if (!srLead) return null;
+        return (
+          <SalesRequestModal
+            lead={srLead}
+            config={configWithUsers}
+            busy={salesRequestBusy}
+            onSubmit={submitSalesRequest}
+            onCancel={() => { if (!salesRequestBusy) setSalesRequestPrompt(null); }}
+          />
+        );
+      })()}
 
       {workingPrompt && (
         <WorkingWeeksModal
@@ -2208,15 +2365,16 @@ function AuthField({ label, children }) {
 }
 
 /* ===================== SIDEBAR ===================== */
-function Sidebar({ view, setView, leadsCount, myOpenCount, myClosedCount, myCreatedCount, allClosedCount, archivedCount, junkCount, userRole, pendingCount, mobileOpen, onMobileClose }) {
+function Sidebar({ view, setView, stageCounts = {}, myCreatedCount, archivedCount, junkCount, userRole, pendingCount, mobileOpen, onMobileClose }) {
   // Filter using the canAccessView helper so the rule lives in one place.
   // Each item just declares its view id; access is computed centrally.
+  // The pipeline group comes first: the picker, then the four steps in order.
   const items = [
-    { id: 'leads',      label: 'Leads',       icon: LayoutGrid, badge: leadsCount },
-    { id: 'my-open',    label: 'My Open',     icon: User,       badge: myOpenCount || undefined },
-    { id: 'my-closed',  label: 'My Closed',   icon: CheckCircle2, badge: myClosedCount || undefined },
-    { id: 'my-created', label: 'My Created Leads', icon: Edit3,   badge: myCreatedCount || undefined },
-    { id: 'all-closed', label: 'All Closed',  icon: Archive,    badge: allClosedCount || undefined },
+    { id: HOME_VIEW,    label: 'Dashboards',  icon: LayoutDashboard },
+    ...PIPELINE_STAGES.map(s => ({
+      id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id] || undefined, indent: true
+    })),
+    { id: 'my-created', label: 'My Created Leads', icon: Edit3,   badge: myCreatedCount || undefined, groupStart: true },
     { id: 'archived',   label: 'Archived',    icon: ArchiveX,   badge: archivedCount || undefined },
     { id: 'junk',       label: 'Junk',        icon: Trash2,     badge: junkCount || undefined },
     { id: 'add',        label: 'Add Lead',    icon: Plus },
@@ -2277,7 +2435,9 @@ function Sidebar({ view, setView, leadsCount, myOpenCount, myClosedCount, myCrea
             const active = view === item.id;
             return (
               <button key={item.id} onClick={() => handleNav(item.id)}
-                className={`w-full flex items-center gap-3 px-3 py-3 md:py-2.5 rounded-md text-sm font-medium transition-colors ${
+                className={`w-full flex items-center gap-3 ${item.indent ? 'pl-6 pr-3' : 'px-3'} py-3 md:py-2.5 rounded-md text-sm font-medium transition-colors ${
+                  item.groupStart ? 'mt-3' : ''
+                } ${
                   active ? 'bg-stone-800 text-white' : 'text-stone-400 hover:text-white hover:bg-stone-800/50'
                 }`}>
                 <Icon size={16} className={active ? 'text-brand-500' : ''} />
@@ -2297,57 +2457,44 @@ function Sidebar({ view, setView, leadsCount, myOpenCount, myClosedCount, myCrea
 }
 
 /* ===================== TOP BAR ===================== */
-function TopBar({ view, leads, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter }) {
+function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const stage = stageForView(view);
   const titles = {
-    leads: 'Leads',
-    'my-open': 'My Open Leads',
-    'my-closed': 'My Closed Leads',
+    [HOME_VIEW]: 'Dashboards',
+    ...Object.fromEntries(PIPELINE_STAGES.map(s => [s.view, s.label])),
     'my-created': 'My Created Leads',
-    'all-closed': 'All Closed Leads',
     archived: 'Archived Leads',
+    junk: 'Junk',
     add: 'Add Lead', import: 'Import Leads',
     reports: 'Reports',
-    users: 'Users', scoring: 'Scoring Rules', settings: 'Settings'
+    users: 'Users', scoring: 'Scoring Rules', settings: 'Settings',
+    'lead-routing': 'Lead Routing'
   };
 
-  const isMyOpen    = view === 'my-open';
-  const isMyClosed  = view === 'my-closed';
   const isMyCreated = view === 'my-created';
-  const isAllClosed = view === 'all-closed';
-  const isMine      = isMyOpen || isMyClosed;
 
   const stats = useMemo(() => {
     const closedStatuses = getClosedStatuses(config);
-    // Base list: scoped to current user (My views), all closed (admin), or all leads
+    // A step dashboard counts exactly what its table shows (the same bucket).
     let lst;
-    if (isMyCreated) {
-      // Created-by, not assigned-to — and never narrowed to open or closed, since
-      // the tab's whole purpose is watching a lead through to its outcome.
-      lst = leads.filter(l => isCreatedByUser(l, currentUser.id));
-    } else if (isMine) {
-      lst = leads.filter(l => isLeadForUser(l, currentUser.id));
-    } else if (isAllClosed) {
-      lst = leads.filter(l => closedStatuses.includes(l.status));
-    } else {
-      lst = leads;
-    }
-    // Further narrow by open/closed for My views
-    if (isMyOpen)   lst = lst.filter(l => !closedStatuses.includes(l.status));
-    if (isMyClosed) lst = lst.filter(l =>  closedStatuses.includes(l.status));
+    if (stage)            lst = stageLeads[stage.id] || [];
+    else if (isMyCreated) lst = leads.filter(l => isCreatedByUser(l, currentUser.id));
+    else                  lst = [];
 
     return {
       total:      lst.length,
       hot:        lst.filter(l => scoreLead(l, config.scoringRules).tier === 'Urgent').length,
       stale:      lst.filter(l => isLeadStale(l, config.staleness)).length,
-      unassigned: lst.filter(l => !l.assignedTo || l.assignedTo === 'u_1').length,
+      unassigned: lst.filter(l => isUnassigned(l)).length,
       open:       lst.filter(l => !closedStatuses.includes(l.status)).length,
-      won:        lst.filter(l => l.status === 'Won').length,
+      won:        lst.filter(l => l.status === WON_STATUS).length,
       lost:       lst.filter(l => l.status === 'Lost').length
     };
-  }, [leads, config.scoringRules, config.staleness, config.closedStatuses, isMine, isMyOpen, isMyClosed, isMyCreated, isAllClosed, currentUser.id]);
+  }, [leads, stageLeads, stage, config.scoringRules, config.staleness, config.closedStatuses, isMyCreated, currentUser.id]);
 
   const initials = currentUser.name.split(' ').map(s => s[0]).join('').slice(0,2).toUpperCase();
+  const mine = currentUser.role !== 'admin';
 
   return (
     <header className="border-b border-stone-200 bg-white sticky top-0 z-30 no-print">
@@ -2363,12 +2510,11 @@ function TopBar({ view, leads, config, currentUser, onSignOut, onMobileMenuOpen,
           <div className="min-w-0">
             <h1 className="font-display text-xl md:text-3xl font-bold text-stone-900 leading-tight truncate">{titles[view]}</h1>
             <div className="text-[11px] md:text-xs text-stone-500 mt-0.5 truncate hidden sm:block">
-              {view === 'leads' && `${leads.length} total leads in pipeline`}
-              {view === 'my-open' && `${stats.total} open lead${stats.total === 1 ? '' : 's'} in your pipeline`}
-              {view === 'my-closed' && `${stats.total} closed deal${stats.total === 1 ? '' : 's'} · ${stats.won} won, ${stats.lost} lost`}
+              {view === HOME_VIEW && (mine ? 'Your leads at each step of the sale' : 'Every lead, at each step of the sale')}
+              {stage && `${stats.total} lead${stats.total === 1 ? '' : 's'}${mine ? (stage.id === STAGE_INCOMING ? ' assigned to you or unassigned' : ' assigned to you') : ''} · ${stage.blurb}`}
               {view === 'my-created' && `${stats.total} lead${stats.total === 1 ? '' : 's'} you entered · ${stats.open} still open, ${stats.won} won, ${stats.lost} lost`}
-              {view === 'all-closed' && `${stats.total} closed lead${stats.total === 1 ? '' : 's'} across all reps · ${stats.won} won, ${stats.lost} lost`}
               {view === 'archived' && 'Leads closed for 30+ days — exported or cleared from here'}
+              {view === 'junk' && 'Spam and non-leads, kept out of every dashboard and report'}
               {view === 'add' && 'Manually enter a new lead'}
               {view === 'import' && 'Upload a CSV file with leads'}
               {view === 'reports' && 'Pipeline health, conversion, and team performance'}
@@ -2382,26 +2528,21 @@ function TopBar({ view, leads, config, currentUser, onSignOut, onMobileMenuOpen,
 
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
           {/* Stat chips — desktop only; mobile keeps the top bar uncluttered */}
-          {view === 'leads' && (
+          {stage && stage.id !== STAGE_COMPLETED && (
             <div className="hidden lg:flex gap-2">
-              <StatChip label="Total"      value={stats.total}      onClick={() => onChipFilter('all')}        title="Show all leads (clear filters)"/>
+              <StatChip label="Total"      value={stats.total}      onClick={() => onChipFilter('all')}        title="Show every lead in this step (clear filters)"/>
               <StatChip label="🚨 Urgent"  value={stats.hot}        accent="brand" onClick={() => onChipFilter('hot')}        title="Filter to Urgent leads"/>
               <StatChip label="Stale"      value={stats.stale}      accent={stats.stale > 0 ? 'rose' : undefined} onClick={() => onChipFilter('stale')}      title="Filter to stale leads"/>
-              <StatChip label="Unassigned" value={stats.unassigned} onClick={() => onChipFilter('unassigned')} title="Filter to unassigned leads"/>
+              {stage.id === STAGE_INCOMING && (
+                <StatChip label="Unassigned" value={stats.unassigned} onClick={() => onChipFilter('unassigned')} title="Filter to unassigned leads"/>
+              )}
             </div>
           )}
-          {view === 'my-open' && (
+          {stage && stage.id === STAGE_COMPLETED && (
             <div className="hidden lg:flex gap-2">
-              <StatChip label="My Open" value={stats.total} onClick={() => onChipFilter('all')}   title="Show all my open leads (clear filters)"/>
-              <StatChip label="🚨 Urgent"  value={stats.hot}   accent="brand" onClick={() => onChipFilter('hot')}   title="Filter to my Urgent open leads"/>
-              <StatChip label="Stale"   value={stats.stale} accent={stats.stale > 0 ? 'rose' : undefined} onClick={() => onChipFilter('stale')} title="Filter to my stale open leads"/>
-            </div>
-          )}
-          {view === 'my-closed' && (
-            <div className="hidden lg:flex gap-2">
-              <StatChip label="Closed" value={stats.total} onClick={() => onChipFilter('all')}     title="Show all my closed deals (clear filters)"/>
-              <StatChip label="Won"    value={stats.won}   accent="brand" onClick={() => onChipFilter('won')}    title="Filter to deals I won"/>
-              <StatChip label="Lost"   value={stats.lost}  accent={stats.lost > 0 ? 'rose' : undefined} onClick={() => onChipFilter('lost')}   title="Filter to deals I lost"/>
+              <StatChip label="Completed" value={stats.total} onClick={() => onChipFilter('all')}  title="Show every completed lead (clear filters)"/>
+              <StatChip label="Won"       value={stats.won}   accent="brand" onClick={() => onChipFilter('won')}  title="Filter to won deals"/>
+              <StatChip label="Lost"      value={stats.lost}  accent={stats.lost > 0 ? 'rose' : undefined} onClick={() => onChipFilter('lost')} title="Filter to lost deals"/>
             </div>
           )}
           {view === 'my-created' && (
@@ -2409,13 +2550,6 @@ function TopBar({ view, leads, config, currentUser, onSignOut, onMobileMenuOpen,
               <StatChip label="Created" value={stats.total} onClick={() => onChipFilter('all')}  title="Show every lead I entered (clear filters)"/>
               <StatChip label="Open"    value={stats.open}  onClick={() => onChipFilter('open')} title="Filter to the ones still in play"/>
               <StatChip label="Won"     value={stats.won}   accent="brand" onClick={() => onChipFilter('won')}  title="Filter to the ones that closed won"/>
-            </div>
-          )}
-          {view === 'all-closed' && (
-            <div className="hidden lg:flex gap-2">
-              <StatChip label="Closed" value={stats.total} onClick={() => onChipFilter('all')} title="Show all closed leads (clear filters)"/>
-              <StatChip label="Won"    value={stats.won}   accent="brand" onClick={() => onChipFilter('won')}  title="Filter to won deals"/>
-              <StatChip label="Lost"   value={stats.lost}  accent={stats.lost > 0 ? 'rose' : undefined} onClick={() => onChipFilter('lost')} title="Filter to lost deals"/>
             </div>
           )}
 
@@ -2860,7 +2994,7 @@ function JunkLeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusCh
   );
 }
 
-function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange, myUserId, creatorUserId, readOnly = false, scope = 'all', prefilter, onPrefilterConsumed }) {
+function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange, myUserId, creatorUserId, readOnly = false, scope = 'all', stage = null, isAdmin = false, prefilter, onPrefilterConsumed }) {
   // Falls back to a plain write if a caller didn't pass the gate, so a missing
   // prop degrades to the old behaviour rather than throwing on first click.
   const changeStatus = onStatusChange || ((id, status) => onUpdate(id, { status }));
@@ -2982,11 +3116,13 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
   const statusFilterOptions = useMemo(() => {
     const closedStatuses = getClosedStatuses(config);
     const all = config.statuses || [];
+    // A step dashboard only ever holds that step's statuses.
+    if (stage)              return ['All', ...all.filter(st => stageOfStatus(st, closedStatuses) === stage)];
     if (scope === 'junk')   return ['All'];
     if (scope === 'open')   return ['All', ...all.filter(st => !closedStatuses.includes(st))];
     if (scope === 'closed') return ['All', ...all.filter(st => closedStatuses.includes(st) && st !== JUNK_STATUS)];
     return ['All', 'Open', ...all];
-  }, [scope, config.statuses, config.closedStatuses]);
+  }, [scope, stage, config.statuses, config.closedStatuses]);
 
   // A scope change can strand the filter on a status the new scope excludes.
   useEffect(() => {
@@ -3199,7 +3335,10 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
             <select onChange={e => { if (e.target.value) { bulkStatus(e.target.value); e.target.value=''; } }} defaultValue=""
               className="text-xs px-2.5 py-1.5 border border-stone-300 rounded bg-white">
               <option value="" disabled>Set status…</option>
-              {config.statuses.map(s => <option key={s} value={s}>{s}</option>)}
+              {/* On a step dashboard, only the moves that step allows — and never
+                  Sales Request, which needs its form filled in one lead at a time. */}
+              {(stage ? bulkStatusOptionsFor(stage, config.statuses, getClosedStatuses(config)) : config.statuses)
+                .map(s => <option key={s} value={s}>{s}</option>)}
             </select>
             <button onClick={bulkDelete} className="text-xs px-2.5 py-1.5 text-rose-700 hover:bg-rose-100 rounded flex items-center gap-1">
               <Trash2 size={12}/> Delete
@@ -3212,13 +3351,15 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
       {filtered.length === 0 ? (
         <EmptyState
           icon={
-            scope === 'closed' ? CheckCircle2
+            stage ? STAGE_ICONS[stage]
+            : scope === 'closed' ? CheckCircle2
             : myUserId ? User
             : LayoutGrid
           }
           title={
             visibleLeads.length === 0
-              ? (scope === 'open'   ? (myUserId ? 'No open leads in your pipeline' : 'No leads in the working pipeline')
+              ? (stage ? STAGE_EMPTY[stage].title
+                : scope === 'open'   ? (myUserId ? 'No open leads in your pipeline' : 'No leads in the working pipeline')
                 : scope === 'closed' ? 'No closed deals yet'
                 : myUserId           ? 'No leads assigned to you yet'
                                      : 'No leads yet')
@@ -3226,7 +3367,8 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
           }
           subtitle={
             visibleLeads.length === 0
-              ? (scope === 'open'   ? (myUserId
+              ? (stage ? (isAdmin ? STAGE_EMPTY[stage].admin : STAGE_EMPTY[stage].rep)
+                : scope === 'open'   ? (myUserId
                     ? 'Open leads assigned to you will appear here. Check My Closed for completed deals.'
                     : 'Leads being worked \u2014 New, Contacted, Working or Quoted \u2014 appear here. Closed leads move to All Closed.')
                 : scope === 'closed' ? 'When you mark a lead as Won, Lost, Unqualified or No Decision it moves here.'
@@ -3360,7 +3502,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
                         <InlineStatusSelect
                           readOnly={readOnly}
                           value={lead.status}
-                          options={config.statuses}
+                          options={statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config))}
                           onChange={(status) => changeStatus(lead.id, status)}
                         />
                         <AgeIndicator staleness={lead._staleness}/>
@@ -3618,7 +3760,7 @@ function MobileLeadCard({ lead, config, isSelected, onSelect, onToggleSelect, on
             fullWidth
             readOnly={readOnly}
             value={lead.status}
-            options={config.statuses}
+            options={statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config))}
             onChange={(status) => onStatusChange(lead.id, status)}
           />
         </div>
@@ -4031,6 +4173,10 @@ function AddLeadView({ config, onAdd, currentUser }) {
     if (form.status === WORKING_STATUS && !form.workingWeeks) {
       errs.workingWeeks = 'Pick how long this stays active';
     }
+    // A lead only reaches the Working step once a rep owns it.
+    if (stageOfStatus(form.status) === STAGE_WORKING && isUnassigned(form)) {
+      errs.status = 'Assign a rep to add this straight to Working';
+    }
     if (Object.keys(errs).length) { setErrors(errs); return; }
     const payload = {
       ...form,
@@ -4063,6 +4209,8 @@ function AddLeadView({ config, onAdd, currentUser }) {
       return next;
     });
     if (errors[field]) setErrors(e => ({ ...e, [field]: undefined }));
+    // Picking a rep clears the "assign a rep" complaint on Status.
+    if (field === 'assignedTo' && errors.status) setErrors(e => ({ ...e, status: undefined }));
   };
 
   return (
@@ -4155,10 +4303,14 @@ function AddLeadView({ config, onAdd, currentUser }) {
               )}
             />
           </Field>
-          <Field label="Status">
+          <Field label="Status" error={errors.status}>
+            {/* A new lead starts in Incoming or Working. Sales Request needs its
+                form and Completed means there is nothing to add. */}
             <select value={form.status} onChange={e => update('status', e.target.value)}
               className="w-full px-3 py-2 border border-stone-200 rounded-md focus:outline-none focus:border-brand-500 text-sm bg-white">
-              {config.statuses.map(s => <option key={s} value={s}>{s}</option>)}
+              {config.statuses
+                .filter(s => [STAGE_INCOMING, STAGE_WORKING].includes(stageOfStatus(s, getClosedStatuses(config))))
+                .map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </Field>
         </div>
@@ -6936,6 +7088,8 @@ function NotificationsConfigCard({ config, onSave }) {
   const newLeadEmails = Array.isArray(config.notifications?.newLeadEmails)
     ? config.notifications.newLeadEmails : [];
   const newLeadEnabled = config.notifications?.newLeadAlertsEnabled !== false;
+  const salesRequestEmails = Array.isArray(config.notifications?.salesRequestEmails)
+    ? config.notifications.salesRequestEmails : [];
 
   const persistNotifications = (patch) => {
     onSave({ ...config, notifications: { ...(config.notifications || {}), ...patch } });
@@ -7003,6 +7157,23 @@ function NotificationsConfigCard({ config, onSave }) {
         <div className="text-[11px] text-stone-400 mt-3 leading-relaxed">
           A CSV import sends one summary email instead of one per lead.
         </div>
+      </div>
+
+      {/* ---- Sales requests ---- */}
+      <div className="px-5 py-4 border-t border-stone-100">
+        <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">Sales Requests</div>
+        <div className="text-xs text-stone-500 mb-3">
+          Email these people (the order desk) whenever a rep submits a sales request. The rep who owns the lead
+          always gets a copy, and replies go to the rep.
+          {salesRequestEmails.length === 0 && (
+            <span className="block mt-1 text-amber-700">No recipients yet &mdash; sales requests only reach the rep.</span>
+          )}
+        </div>
+        <EmailRecipientList
+          recipients={salesRequestEmails}
+          onChange={(list) => persistNotifications({ salesRequestEmails: list })}
+          emptyHint="No recipients yet — add the order desk to start receiving sales requests."
+        />
       </div>
     </div>
   );
@@ -7262,6 +7433,8 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
   };
 
   const quickStatus = (status) => onStatusChange(lead.id, status);
+  const leadStage = stageOfLead(lead, getClosedStatuses(config));
+  const stageInfo = getStage(leadStage);
 
   return (
     <>
@@ -7276,6 +7449,11 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
         <div className="sticky top-0 z-10 bg-white px-4 md:px-6 py-3 md:py-4 border-b border-stone-200 flex items-start justify-between gap-2">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1 flex-wrap">
+              {stageInfo && (
+                <span className={`text-[10px] uppercase tracking-widest font-bold px-2 py-0.5 rounded flex items-center gap-1 ${STAGE_ACCENTS[stageInfo.id].soft} ${STAGE_ACCENTS[stageInfo.id].text}`}>
+                  {(() => { const I = STAGE_ICONS[stageInfo.id]; return <I size={10}/>; })()} {stageInfo.label}
+                </span>
+              )}
               <StatusBadge status={lead.status}/>
               {isLeadArchived(lead, undefined, config) && (
                 <span className="text-[10px] uppercase tracking-widest font-bold px-2 py-0.5 rounded bg-stone-200 text-stone-700 border border-stone-300 flex items-center gap-1">
@@ -7321,8 +7499,18 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
           <div className="px-4 md:px-6 py-3 border-b border-stone-200 bg-stone-50 flex items-center gap-2 flex-wrap">
             <select value={lead.status} onChange={e => quickStatus(e.target.value)}
               className="text-xs px-2.5 py-1.5 border border-stone-200 rounded bg-white">
-              {config.statuses.map(s => <option key={s} value={s}>{s}</option>)}
+              {statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config))
+                .map(s => <option key={s} value={s}>{s}</option>)}
             </select>
+            {/* The one move worth a button: winning a lead in Working means
+                filling in the sales request. */}
+            {leadStage === STAGE_WORKING && (
+              <button onClick={() => quickStatus(SALES_REQUEST_STATUS)}
+                className="text-xs px-2.5 py-1.5 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded inline-flex items-center gap-1"
+                title="Won — fill in the sales request and move this lead to Sales Request">
+                <ClipboardList size={12}/> Sales Request
+              </button>
+            )}
             <SearchableSelect
               value={lead.assignedTo}
               onChange={quickAssign}
@@ -7465,6 +7653,10 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
           ) : (
             <>
               <LeadScoreSection lead={lead} rules={config.scoringRules}/>
+
+              {/* Near the top: once a lead has a sales request, what was sold is
+                  the first thing anyone opening it wants. */}
+              <SalesRequestSection lead={lead} config={config}/>
 
               <Section title="Contact">
                 <DetailRow icon={Building2} label="Company" value={lead.companyName}/>
@@ -7919,7 +8111,8 @@ function ActivityIcon({ type }) {
     created:           <Sparkles size={12} className="text-emerald-600"/>,
     status_change:     <RefreshCw size={12} className="text-blue-600"/>,
     assignment_change: <User size={12} className="text-violet-600"/>,
-    edited:            <Edit3 size={12} className="text-stone-600"/>
+    edited:            <Edit3 size={12} className="text-stone-600"/>,
+    sales_request:     <ClipboardList size={12} className="text-orange-600"/>
   };
   return icons[type] || <ChevronDown size={12} className="text-stone-400"/>;
 }
@@ -7937,6 +8130,9 @@ function renderEventText(event, userMap) {
       return event.viaImport
         ? <>imported this lead from <span className="font-medium">{event.source || 'CSV'}</span></>
         : (event.source ? <>created this lead from <span className="font-medium">{event.source}</span></> : <>created this lead</>);
+
+    case 'sales_request':
+      return <>submitted a sales request{event.equipment ? <> for <span className="font-medium">{event.equipment}</span></> : null}</>;
 
     case 'status_change':
       return <>changed status from <span className="font-medium">{event.from}</span> to <span className="font-medium">{event.to}</span></>;
@@ -8165,6 +8361,221 @@ function WorkingWeeksModal({ leadName, current, onChoose, onCancel }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/* ===================== PIPELINE: DASHBOARD PICKER ===================== */
+// The first screen after sign-in. One card per step, in order, each opening that
+// step's dashboard. Counts come from the same buckets the dashboards render, so
+// "12 in Working" here is exactly the 12 rows on the other side of the click.
+function StageHomeView({ stageLeads, config, currentUser, onOpen }) {
+  const mine = currentUser.role !== 'admin';
+  return (
+    <div className="max-w-6xl">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        {PIPELINE_STAGES.map((stage, i) => {
+          const list = stageLeads[stage.id] || [];
+          const Icon = STAGE_ICONS[stage.id];
+          const accent = STAGE_ACCENTS[stage.id];
+          const stale = list.filter(l => isLeadStale(l, config.staleness)).length;
+          const urgent = list.filter(l => scoreLead(l, config.scoringRules).tier === 'Urgent').length;
+          const unassigned = list.filter(l => isUnassigned(l)).length;
+          const won = list.filter(l => l.status === WON_STATUS).length;
+          return (
+            <button key={stage.id} type="button" onClick={() => onOpen(stage.view)}
+              className="relative flex flex-col items-stretch text-left bg-white border border-stone-200 rounded-lg overflow-hidden hover:border-stone-400 hover:shadow-md transition-all group focus:outline-none focus:ring-2 focus:ring-brand-500">
+              <div className={`h-1.5 shrink-0 ${accent.bar}`}/>
+              <div className="p-5 flex-1">
+                <div className="flex items-center justify-between">
+                  <div className={`w-10 h-10 rounded-md flex items-center justify-center ${accent.soft}`}>
+                    <Icon size={20} className={accent.text}/>
+                  </div>
+                  <span className="text-[10px] uppercase tracking-widest font-semibold text-stone-500">Step {i + 1}</span>
+                </div>
+                <div className="font-display text-2xl font-bold text-stone-900 mt-4">{stage.label}</div>
+                <div className="text-xs text-stone-500 mt-1 xl:min-h-[3.75rem] leading-relaxed">{stage.blurb}</div>
+                <div className="flex items-end justify-between mt-4">
+                  <div>
+                    <div className="font-display text-5xl font-bold text-stone-900 leading-none">{list.length}</div>
+                    <div className="text-[11px] text-stone-500 mt-1">
+                      {mine
+                        ? (stage.id === STAGE_INCOMING ? 'yours or unassigned' : 'assigned to you')
+                        : (list.length === 1 ? 'lead' : 'leads')}
+                    </div>
+                  </div>
+                  <ArrowRight size={18} className="text-stone-300 group-hover:text-brand-600 transition-colors mb-1"/>
+                </div>
+                <div className="flex flex-wrap gap-1.5 mt-4 min-h-[1.5rem]">
+                  {stage.id === STAGE_COMPLETED ? (
+                    won > 0 && <HomeChip className="bg-emerald-50 text-emerald-700">{won} won</HomeChip>
+                  ) : (
+                    <>
+                      {stale > 0 && <HomeChip className="bg-rose-50 text-rose-700">{stale} stale</HomeChip>}
+                      {urgent > 0 && <HomeChip className="bg-brand-50 text-brand-700">{urgent} urgent</HomeChip>}
+                      {stage.id === STAGE_INCOMING && unassigned > 0 && (
+                        <HomeChip className="bg-stone-100 text-stone-700">{unassigned} unassigned</HomeChip>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      <div className="text-xs text-stone-500 mt-4 leading-relaxed">
+        A lead is in exactly one step at a time. Changing its status moves it to the next step and out of the last one.
+        Completed leads move to Archived after 30 days.
+      </div>
+    </div>
+  );
+}
+
+function HomeChip({ className, children }) {
+  return <span className={`text-[11px] font-semibold px-2 py-0.5 rounded ${className}`}>{children}</span>;
+}
+
+/* ===================== PIPELINE: SALES REQUEST ===================== */
+// Filled in when a rep wins a lead in Working. Submitting moves the lead to the
+// Sales Request step and emails the order desk. Branch sits on the form as well
+// as the lead because the desk cannot act without it — it is written back to the
+// lead, not stored twice. A lead sent back to Working keeps its last request, so
+// re-entering Sales Request starts from what was already filled in.
+function SalesRequestModal({ lead, config, busy, onSubmit, onCancel }) {
+  const [form, setForm] = useState(() => {
+    const prior = lead.salesRequest || {};
+    const init = {};
+    for (const f of SALES_REQUEST_FIELDS) init[f.key] = prior[f.key] ?? '';
+    if (init.quantity === '') init.quantity = '1';
+    return init;
+  });
+  const [branch, setBranch] = useState(lead.branch || '');
+  const [errors, setErrors] = useState({});
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onCancel(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onCancel]);
+
+  const set = (k, v) => {
+    setForm(f => ({ ...f, [k]: v }));
+    if (errors[k]) setErrors(e => ({ ...e, [k]: undefined }));
+  };
+
+  const submit = () => {
+    const errs = validateSalesRequest(form);
+    if (!branch) errs.branch = 'Required';
+    if (Object.keys(errs).length) { setErrors(errs); return; }
+    const clean = {};
+    for (const f of SALES_REQUEST_FIELDS) clean[f.key] = String(form[f.key] ?? '').trim();
+    onSubmit(clean, branch !== lead.branch ? { branch } : {});
+  };
+
+  const inputCls = (k) => `w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:border-brand-500 bg-white ${
+    errors[k] ? 'border-rose-400' : 'border-stone-200'
+  }`;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-start md:items-center justify-center p-4 overflow-y-auto"
+         onClick={onCancel} role="dialog" aria-modal="true" aria-label="Sales request">
+      <div className="bg-white rounded-lg max-w-2xl w-full shadow-xl overflow-hidden my-4"
+           onClick={e => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-stone-200 flex items-start gap-3">
+          <div className={`w-9 h-9 rounded-md flex items-center justify-center shrink-0 ${STAGE_ACCENTS[STAGE_SALES_REQUEST].soft}`}>
+            <ClipboardList size={18} className={STAGE_ACCENTS[STAGE_SALES_REQUEST].text}/>
+          </div>
+          <div className="min-w-0">
+            <div className="font-display text-lg font-bold text-stone-900">Sales Request</div>
+            <div className="text-sm text-stone-500 mt-0.5">
+              Submitting moves <span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'this lead'}</span> to
+              Sales Request and emails the order desk.
+            </div>
+          </div>
+        </div>
+
+        <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto scrollbar-thin">
+          {/* Who it's for — read-only; edit the lead itself to change these. */}
+          <div className="bg-stone-50 border border-stone-200 rounded-md px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-sm">
+            <div><span className="text-stone-500">Customer:</span> <span className="font-medium text-stone-900">{lead.customerName || '—'}</span></div>
+            <div><span className="text-stone-500">Company:</span> <span className="text-stone-900">{lead.companyName || '—'}</span></div>
+            <div><span className="text-stone-500">Phone:</span> <span className="font-mono text-stone-900">{lead.phone || '—'}</span></div>
+            <div className="truncate"><span className="text-stone-500">Email:</span> <span className="text-stone-900">{lead.contactEmail || '—'}</span></div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Field label="Branch" required error={errors.branch}>
+              <select value={branch} onChange={e => { setBranch(e.target.value); if (errors.branch) setErrors(er => ({ ...er, branch: undefined })); }}
+                className={inputCls('branch')}>
+                <option value="">Choose a branch…</option>
+                {(config.branches || []).map(b => <option key={b} value={b}>{b}</option>)}
+              </select>
+            </Field>
+            {SALES_REQUEST_FIELDS.map(f => (
+              <div key={f.key} className={f.type === 'textarea' ? 'md:col-span-2' : ''}>
+                <Field label={f.label} required={f.required} error={errors[f.key]}>
+                  {f.type === 'select' ? (
+                    <select value={form[f.key]} onChange={e => set(f.key, e.target.value)} className={inputCls(f.key)}>
+                      <option value="">—</option>
+                      {f.options.map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  ) : f.type === 'textarea' ? (
+                    <textarea value={form[f.key]} onChange={e => set(f.key, e.target.value)} rows={3}
+                      placeholder={f.placeholder} className={`${inputCls(f.key)} resize-none`}/>
+                  ) : (
+                    <input type={f.type} value={form[f.key]} onChange={e => set(f.key, e.target.value)}
+                      min={f.type === 'number' ? 1 : undefined}
+                      placeholder={f.placeholder} className={inputCls(f.key)}/>
+                  )}
+                </Field>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="px-5 py-3 border-t border-stone-200 bg-stone-50 flex items-center justify-end gap-2">
+          <button onClick={onCancel} disabled={busy}
+            className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium disabled:opacity-50">
+            Cancel
+          </button>
+          <button onClick={submit} disabled={busy}
+            className="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md flex items-center gap-2 disabled:opacity-60">
+            <Send size={14}/> {busy ? 'Sending…' : 'Submit Sales Request'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The submitted request, shown in the lead panel whenever one exists — including
+// after the lead has moved on to Completed, so the record of what was sold stays
+// with the lead.
+function SalesRequestSection({ lead, config }) {
+  const sr = lead.salesRequest;
+  if (!sr) return null;
+  const submitter = (config.users || []).find(u => u.id === sr.submittedBy);
+  const fmt = (f) => {
+    const v = sr[f.key];
+    if (v === undefined || v === null || String(v).trim() === '') return null;
+    if (f.type === 'date') return fmtDate(`${v}T12:00:00`);
+    return String(v);
+  };
+  return (
+    <Section title="Sales Request">
+      {SALES_REQUEST_FIELDS.filter(f => f.type !== 'textarea').map(f => {
+        const v = fmt(f);
+        return v ? <DetailRow key={f.key} icon={FileText} label={f.label} value={v}/> : null;
+      })}
+      {sr.notes && (
+        <div className="text-sm text-stone-700 bg-stone-50 p-3 rounded-md border border-stone-100 whitespace-pre-wrap leading-relaxed mt-1">
+          {sr.notes}
+        </div>
+      )}
+      <div className="text-[11px] text-stone-500 pt-1">
+        Submitted {fmtDateTime(sr.submittedAt)}{submitter ? ` by ${submitter.name}` : ''}
+      </div>
+    </Section>
   );
 }
 

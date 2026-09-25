@@ -205,6 +205,14 @@ divergences from Bobcat of Atlanta, which this repo was taken from:
 | Scoring service area | `46,47` (IN) primary; `60,61,62` (IL), `43,44,45` (OH), `40,41,42` (KY), `48,49` (MI) adjacent | `30,31,35` primary; `36,37,38,29,28,27,32,39` adjacent |
 | Export filenames | `ind-lmt-report`, `ind-lmt-archived`, `ind-leads`, `ind-lmt-import-template`, `ind-routing-overview` | `atl-` equivalents |
 | Temp password prefix | `IND-` | `ATL-` |
+| Lead views | Four-step pipeline — Incoming, Working, Sales Request, Completed — behind a dashboard picker (`src/lib/pipeline.js`) | Leads / My Open / My Closed / All Closed |
+| Statuses | New · Working, Pending, Prospect, Wants · Sales Request · Won, Lost, Unqualified, No Decision, Cancelled · Junk | New, Contacted, Working, Quoted, Won, Lost, Unqualified, No Decision, Junk |
+| Sales request | Form on the lead + `sendSalesRequestEmail` to Settings → Sales Requests | — |
+
+Brand-agnostic fixes made here that Atlanta still needs:
+`buildResubmissionEmailHtml` was called but never defined in `functions/index.js`,
+so the "customer reached out again" email never sent; and email timestamps used
+`America/Chicago`.
 
 Everything else — the `#ff3300` palette and its contrast rules, departments,
 lead sources, equipment keywords, `MODEL_REGEX`, the disabled ZIP router, both

@@ -96,7 +96,8 @@ function fmtDateTime(iso) {
   if (!iso) return '';
   try {
     return new Date(iso).toLocaleString('en-US', {
-      timeZone: 'America/Chicago',
+      // Indianapolis is Eastern. The Atlanta fork inherited Chicago from Houston.
+      timeZone: 'America/Indiana/Indianapolis',
       month: 'short', day: 'numeric', year: 'numeric',
       hour: 'numeric', minute: '2-digit'
     });
@@ -581,6 +582,88 @@ async function newLeadAlertsEnabled() {
  * Digest email for a CSV import. Same shell as the other templates, but a tally
  * rather than a single lead.
  */
+/**
+ * Tells the assigned rep that a customer they already own submitted again.
+ * Called from intake's duplicate path. It was referenced there but never
+ * defined — in this fork and in Atlanta — so the ReferenceError was swallowed
+ * by the surrounding try/catch and the email silently never went out.
+ */
+function buildResubmissionEmailHtml({ rep, lead, newComment, sourceLabel, formTitle, matchedOn, leadUrl }) {
+  const safeName    = escapeHtml(lead?.customerName || 'Unnamed Lead');
+  const safeCompany = escapeHtml(lead?.companyName || '');
+  const safeRep     = escapeHtml(rep?.name || 'there');
+  const safeSource  = escapeHtml(sourceLabel || 'a web form');
+  const safeForm    = escapeHtml(formTitle || '');
+  const safeMatched = escapeHtml((matchedOn || []).join(' and ') || 'contact details');
+  const safeComment = escapeHtml(String(newComment || '').slice(0, 4000));
+  const row = (label, value) => value ? `<tr>
+      <td style="padding: 5px 12px 5px 0; font-size: 13px; color: #78716c; white-space: nowrap;">${label}</td>
+      <td style="padding: 5px 0; font-size: 14px; color: #1c1917; font-weight: 600;">${value}</td>
+    </tr>` : '';
+
+  return `<!DOCTYPE html>
+<html>
+<body style="margin: 0; padding: 0; background-color: #f5f5f4; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #f5f5f4; padding: 24px 0;">
+    <tr><td align="center">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background-color: #1c1917; padding: 20px 28px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="padding-right: 12px;">
+                  <div style="width: 36px; height: 36px; background-color: #ff3300; display: inline-block; text-align: center; line-height: 36px; font-size: 22px; font-weight: 800; color: #ffffff; border-radius: 4px;">B</div>
+                </td>
+                <td>
+                  <div style="color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">BOBCAT OF INDY</div>
+                  <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">LMT Notification</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 28px 28px 16px;">
+            <div style="font-size: 22px; font-weight: 700; color: #1c1917;">${safeName} reached out again</div>
+            <div style="font-size: 14px; color: #57534e; margin-top: 4px;">Hi ${safeRep}, a customer on one of your leads submitted ${safeSource} again. It was matched on ${safeMatched} and added to the existing lead rather than creating a new one.</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 0 28px 16px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #fafaf9; border: 1px solid #e7e5e4; border-radius: 6px;">
+              <tr><td style="padding: 16px 20px;">
+                <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
+                  ${row('Customer', safeName)}
+                  ${row('Company', safeCompany)}
+                  ${row('Form', safeForm)}
+                </table>
+              </td></tr>
+            </table>
+          </td>
+        </tr>
+        ${safeComment ? `<tr>
+          <td style="padding: 0 28px 16px;">
+            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: #78716c; font-weight: 700; padding-bottom: 6px;">New comment</div>
+            <div style="font-size: 14px; color: #1c1917; line-height: 1.5; white-space: pre-wrap; background-color: #fafaf9; border: 1px solid #e7e5e4; border-radius: 6px; padding: 12px 16px;">${safeComment}</div>
+          </td>
+        </tr>` : ''}
+        <tr>
+          <td style="padding: 8px 28px 28px; text-align: center;">
+            <a href="${leadUrl}" style="display: inline-block; background-color: #d62b00; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-size: 14px; font-weight: 700; letter-spacing: 0.3px;">View Lead &rarr;</a>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 0 28px 28px; text-align: center; color: #a8a29e; font-size: 11px;">
+            You received this email because this lead is assigned to you in the Bobcat of Indy LMT.
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 function buildImportSummaryEmailHtml({ total, unassignedCount, importerName, rowsHtml, crmUrl }) {
   return `<!DOCTYPE html>
 <html>
@@ -1420,6 +1503,236 @@ exports.sendImportSummaryEmail = onCall(
     }
   }
 );
+
+/* ===================== SALES REQUEST EMAIL ===================== */
+
+// Copy of SALES_REQUEST_FIELDS in src/lib/pipeline.js (no shared build between
+// the client and functions). Keep the keys and labels in step with it; a field
+// missing here simply doesn't appear in the email.
+const SALES_REQUEST_FIELDS = [
+  { key: 'equipment',    label: 'Equipment / Model' },
+  { key: 'condition',    label: 'New or Used' },
+  { key: 'stockNumber',  label: 'Stock #' },
+  { key: 'serialNumber', label: 'Serial #' },
+  { key: 'quantity',     label: 'Quantity' },
+  { key: 'salePrice',    label: 'Sale Price' },
+  { key: 'tradeIn',      label: 'Trade-In' },
+  { key: 'financing',    label: 'Financing' },
+  { key: 'deliveryDate', label: 'Requested Delivery' },
+  { key: 'poNumber',     label: 'Customer PO #' },
+  { key: 'notes',        label: 'Notes' }
+];
+
+/**
+ * Emails a submitted sales request to the order desk and the rep.
+ *
+ * Called by the client right after it saves the request on the lead and moves
+ * the lead into Sales Request. Only the lead id comes from the browser — the
+ * lead, the request and the recipients are all read here, so a caller cannot
+ * put words in the email or address it anywhere else.
+ *
+ * Allowed for admins and for the lead's own reps (primary or secondary).
+ *
+ *   to:       config/app.notifications.salesRequestEmails  (the order desk)
+ *   cc:       the assigned rep
+ *   reply-to: the assigned rep, so the desk's questions go to whoever sold it
+ *
+ * With no desk recipients configured it still sends to the rep, and says so in
+ * the result (deskRecipients: 0) so the app can warn.
+ */
+exports.sendSalesRequestEmail = onCall(
+  {
+    secrets: [RESEND_API_KEY],
+    region: 'us-south1'
+  },
+  async (request) => {
+    const callerId = request.auth?.uid;
+    if (!callerId) {
+      throw new HttpsError('unauthenticated', 'You must be signed in.');
+    }
+    const leadId = String((request.data || {}).leadId || '');
+    if (!leadId || leadId.length > 200 || leadId.includes('/')) {
+      throw new HttpsError('invalid-argument', 'leadId is required.');
+    }
+
+    const leadSnap = await db.collection('leads').doc(leadId).get();
+    if (!leadSnap.exists) {
+      throw new HttpsError('not-found', 'Lead not found.');
+    }
+    const lead = leadSnap.data();
+    const sr = lead.salesRequest;
+    if (!sr || typeof sr !== 'object') {
+      throw new HttpsError('failed-precondition', 'This lead has no sales request.');
+    }
+
+    const callerDoc = await db.collection('users').doc(callerId).get();
+    const caller = callerDoc.exists ? callerDoc.data() : null;
+    const isAdmin = caller?.role === 'admin';
+    const ownsLead = lead.assignedTo === callerId || lead.secondaryAssignedTo === callerId;
+    if (!isAdmin && !ownsLead) {
+      throw new HttpsError('permission-denied', 'Only the assigned rep or an admin can send this sales request.');
+    }
+
+    // The rep is the lead's owner, not necessarily whoever pressed the button.
+    let rep = null;
+    if (lead.assignedTo && lead.assignedTo !== 'u_1') {
+      try {
+        const repDoc = await db.collection('users').doc(lead.assignedTo).get();
+        if (repDoc.exists) rep = repDoc.data();
+      } catch { /* fall through with no rep */ }
+    }
+    const repEmail = rep?.email && rep.email.includes('@') ? rep.email.trim() : '';
+
+    const desk = await getNotificationRecipients('salesRequestEmails');
+    const repInDesk = repEmail && desk.some(e => normalizeEmail(e) === normalizeEmail(repEmail));
+    const to = desk.length ? desk : (repEmail ? [repEmail] : []);
+    if (to.length === 0) {
+      console.log('[sales-request] No recipients (no desk list, no rep email) — skipping');
+      return { sent: false, reason: 'no-recipients', deskRecipients: 0 };
+    }
+
+    const leadUrl = `${CRM_URL.value()}?lead=${encodeURIComponent(leadId)}`;
+    const html = buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl });
+    const who = lead.customerName || lead.companyName || 'Unnamed lead';
+    const what = sr.equipment ? ` — ${String(sr.equipment).slice(0, 80)}` : '';
+
+    try {
+      const resend = new Resend(RESEND_API_KEY.value());
+      const message = {
+        from: EMAIL_FROM.value(),
+        to,
+        subject: `Sales Request: ${who}${what}`,
+        html
+      };
+      if (desk.length && repEmail && !repInDesk) message.cc = [repEmail];
+      if (repEmail) message.reply_to = repEmail;
+      const result = await resend.emails.send(message);
+      if (result.error) {
+        console.error('[sales-request] Resend error:', result.error);
+        return { sent: false, reason: 'send-failed', deskRecipients: desk.length };
+      }
+      console.log(`[sales-request] Sent for lead ${leadId} to ${to.length} recipient(s)${message.cc ? ' + rep cc' : ''}`);
+      return { sent: true, deskRecipients: desk.length };
+    } catch (err) {
+      console.error('[sales-request] Failed to send:', err);
+      return { sent: false, reason: 'send-failed', deskRecipients: desk.length };
+    }
+  }
+);
+
+// "2026-10-09" -> "Oct 9, 2026". Parsed as a calendar date, not an instant, so no
+// timezone can shift it a day.
+function fmtDateOnly(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
+  if (!m) return v;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${months[Number(m[2]) - 1]} ${Number(m[3])}, ${m[1]}`;
+}
+
+function buildSalesRequestEmailHtml({ lead, sr, rep, leadUrl }) {
+  const row = (label, value) => {
+    const v = value === undefined || value === null ? '' : String(value).trim();
+    if (!v) return '';
+    return `<tr>
+      <td width="150" style="width: 150px; padding: 5px 12px 5px 0; font-size: 13px; color: #78716c; vertical-align: top; white-space: nowrap;">${escapeHtml(label)}</td>
+      <td style="padding: 5px 0; font-size: 14px; color: #1c1917; font-weight: 600;">${escapeHtml(v.slice(0, 500))}</td>
+    </tr>`;
+  };
+  const block = (title, rowsHtml) => rowsHtml ? `<tr>
+    <td style="padding: 0 28px 16px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #fafaf9; border: 1px solid #e7e5e4; border-radius: 6px;">
+        <tr><td style="padding: 16px 20px;">
+          <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: #78716c; font-weight: 700; padding-bottom: 6px;">${title}</div>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">${rowsHtml}</table>
+        </td></tr>
+      </table>
+    </td>
+  </tr>` : '';
+
+  const requestRows = SALES_REQUEST_FIELDS
+    .filter(f => f.key !== 'notes')
+    .map(f => row(f.label, f.key === 'deliveryDate' ? fmtDateOnly(sr[f.key]) : sr[f.key]))
+    .join('');
+  const customerRows = [
+    row('Customer', lead.customerName),
+    row('Company', lead.companyName),
+    row('Phone', lead.phone),
+    row('Email', lead.contactEmail),
+    row('ZIP', lead.zip),
+    row('Branch', lead.branch),
+    row('Department', lead.department)
+  ].join('');
+  const repRows = [
+    row('Rep', rep?.name),
+    row('Rep email', rep?.email),
+    row('Submitted', fmtDateTime(sr.submittedAt))
+  ].join('');
+  const notes = sr.notes ? `<tr>
+    <td style="padding: 0 28px 16px;">
+      <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: #78716c; font-weight: 700; padding-bottom: 6px;">Notes</div>
+      <div style="font-size: 14px; color: #1c1917; line-height: 1.5; white-space: pre-wrap; background-color: #fafaf9; border: 1px solid #e7e5e4; border-radius: 6px; padding: 12px 16px;">${escapeHtml(String(sr.notes).slice(0, 4000))}</div>
+    </td>
+  </tr>` : '';
+
+  const who = escapeHtml(lead.customerName || lead.companyName || 'Unnamed lead');
+
+  return `<!DOCTYPE html>
+<html>
+<body style="margin: 0; padding: 0; background-color: #f5f5f4; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #f5f5f4; padding: 24px 0;">
+    <tr><td align="center">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
+
+        <!-- Header -->
+        <tr>
+          <td style="background-color: #1c1917; padding: 20px 28px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="padding-right: 12px;">
+                  <div style="width: 36px; height: 36px; background-color: #ff3300; display: inline-block; text-align: center; line-height: 36px; font-size: 22px; font-weight: 800; color: #ffffff; border-radius: 4px;">B</div>
+                </td>
+                <td>
+                  <div style="color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">BOBCAT OF INDY</div>
+                  <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">Sales Request</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Headline -->
+        <tr>
+          <td style="padding: 28px 28px 16px;">
+            <div style="font-size: 22px; font-weight: 700; color: #1c1917;">Sales request: ${who}</div>
+            <div style="font-size: 14px; color: #57534e; margin-top: 4px;">${escapeHtml(rep?.name || 'A rep')} has won this lead and submitted a sales request. Reply to this email to reach the rep.</div>
+          </td>
+        </tr>
+
+        ${block('Request', requestRows)}
+        ${notes}
+        ${block('Customer', customerRows)}
+        ${block('Submitted by', repRows)}
+
+        <!-- CTA -->
+        <tr>
+          <td style="padding: 8px 28px 28px; text-align: center;">
+            <a href="${leadUrl}" style="display: inline-block; background-color: #d62b00; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-size: 14px; font-weight: 700; letter-spacing: 0.3px;">View Lead &rarr;</a>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="padding: 0 28px 28px; text-align: center; color: #a8a29e; font-size: 11px;">
+            You received this email because you are on the sales request list for the Bobcat of Indy LMT, or you are the rep on this lead. To change recipients, sign in and visit Settings.
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
 
 exports.sendWelcomeEmail = onCall(
   {
