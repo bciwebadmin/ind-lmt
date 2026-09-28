@@ -1144,16 +1144,49 @@ export default function BobcatIndyCRM() {
 
     setSelectedLead(lead);
     setRequestedLeadId(null);
+    // ?lead= stays in the URL: the lead page is a page, so a refresh or a
+    // shared link reopens it. The sync effect below keeps it current.
+  }, [requestedLeadId, currentUserId, leads]);
 
-    // Strip the ?lead= param so a refresh doesn't re-open the panel
+  // The lead page and the address bar move together: opening a lead adds a
+  // history entry (?lead=<id>), so the browser's Back button returns to the
+  // list; closing removes the param. The list's scroll position is restored.
+  const listScrollRef = useRef(0);
+  const leadsRef = useRef(leads);
+  leadsRef.current = leads;
+  useEffect(() => {
     try {
       const url = new URL(window.location);
-      url.searchParams.delete('lead');
-      window.history.replaceState({}, '', url.toString());
-    } catch {
-      // window.history may be unavailable in some contexts — silently ignore
-    }
-  }, [requestedLeadId, currentUserId, leads]);
+      const inUrl = url.searchParams.get('lead');
+      const id = selectedLead ? selectedLead.id : null;
+      if (id && inUrl !== id) {
+        if (!inUrl) listScrollRef.current = window.scrollY;
+        url.searchParams.set('lead', id);
+        window.history.pushState({ lmtLead: id }, '', url.toString());
+        window.scrollTo(0, 0);
+      } else if (!id && inUrl && !requestedLeadId) {
+        url.searchParams.delete('lead');
+        window.history.replaceState({}, '', url.toString());
+      }
+    } catch { /* history unavailable — the page still works */ }
+  }, [selectedLead && selectedLead.id]);
+  useEffect(() => {
+    const onPop = () => {
+      const id = new URLSearchParams(window.location.search).get('lead');
+      const lead = id ? leadsRef.current.find(l => l.id === id) : null;
+      setSelectedLead(lead || null);
+      if (!lead) { setFocusRecord(null); setTimeout(() => window.scrollTo(0, listScrollRef.current || 0), 0); }
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+  const closeLead = () => {
+    setFocusRecord(null);
+    // Opened in this session: step back, which also restores the list's URL.
+    if (window.history.state && window.history.state.lmtLead) { window.history.back(); return; }
+    setSelectedLead(null);
+    setTimeout(() => window.scrollTo(0, listScrollRef.current || 0), 0);
+  };
 
   // Save helpers — all Firestore-backed now
   const saveConfig = async (patch) => {
@@ -1338,6 +1371,14 @@ export default function BobcatIndyCRM() {
   };
 
   // Where a given lead lives, for "take me to it" navigation after adding one.
+  // "Back to …" on the lead page names the list underneath it.
+  const backLabel = (() => {
+    const st = PIPELINE_STAGES.find(x => x.view === view);
+    if (st) return st.label;
+    return ({ [HOME_VIEW]: 'Dashboards', requests: 'Sales Requests', finance: 'Finance', 'trade-ins': 'Trade-Ins',
+      reports: 'Reports', users: 'Users', settings: 'Settings', add: 'Add Lead' })[view] || 'list';
+  })();
+
   const stageViewOf = (lead) => {
     const st = stageOfLead(lead, getClosedStatuses(config));
     if (st === 'junk') return 'junk';
@@ -1951,6 +1992,7 @@ export default function BobcatIndyCRM() {
   });
   // Follow a retired view id to its new home (e.g. after a role change).
   const goTo = (v) => {
+    if (selectedLead) { setSelectedLead(null); setFocusRecord(null); }
     if (MOVED_VIEWS[v]) {
       const [to, tab] = MOVED_VIEWS[v];
       if (to === 'stage-incoming') setIncomingTab(tab);
@@ -2280,6 +2322,7 @@ export default function BobcatIndyCRM() {
             currentUser={currentUser} onSignOut={signOut}
             onMobileMenuOpen={() => setMobileNavOpen(true)}
             onChipFilter={applyChipFilter}
+            leadOpen={!!selectedLead}
             search={
               <GlobalSearch
                 scope={searchScope}
@@ -2293,6 +2336,41 @@ export default function BobcatIndyCRM() {
           />
 
           <div className="px-4 md:px-8 py-4 md:py-6">
+            {selectedLead && (
+              <LeadDetailPanel
+          /* The live copy from the subscription, so the panel reflects files,
+             records and edits made anywhere — by this user or someone else —
+             while it is open. Falls back to the snapshot for a lead that has
+             just been created and hasn't arrived from Firestore yet. */
+          lead={leads.find(l => l.id === selectedLead.id) || selectedLead} config={configWithUsers} currentUser={currentUser}
+          onClose={closeLead}
+          onUpdate={updateLead}
+          onDelete={(id) => { deleteLead(id); showToast('Lead deleted'); }}
+          onArchive={archiveLead}
+          onUnarchive={unarchiveLead}
+          onMarkJunk={markLeadAsJunk}
+          onRestoreJunk={restoreLeadFromJunk}
+          onStatusChange={requestStatusChange}
+          onExtendWorking={requestWorkingExtend}
+          leadRecords={{
+            requests: records.requests.filter(r => r.leadId === selectedLead.id),
+            tradeIns: records.tradeIns.filter(r => r.leadId === selectedLead.id),
+            finance:  records.finance.filter(r => r.leadId === selectedLead.id)
+          }}
+          onUpdateRequest={updateRequest}
+          onUpdateRecord={updateRecord}
+          onNewRecord={(kind, leadId) => setRecordPrompt({ kind, leadId })}
+          onAddLeadFiles={(id, files) => attachFiles('leads', id, files)}
+          onRemoveLeadFile={(id, att) => detachFile('leads', id, att)}
+          onAddRecordFiles={attachFiles}
+          onRemoveRecordFile={detachFile}
+          focusRecord={focusRecord && focusRecord.leadId === selectedLead.id ? focusRecord : null}
+          backLabel={backLabel}
+        />
+      )}
+            {/* The list stays mounted while a lead page is open, so Back returns
+                to it with its filters, tab and scroll intact. */}
+            <div className={selectedLead ? 'hidden' : undefined}>
             {view === HOME_VIEW && (
               <StageHomeView
                 stageLeads={stageLeads}
@@ -2433,41 +2511,11 @@ export default function BobcatIndyCRM() {
                 )}
               </>
             )}
+            </div>
           </div>
         </main>
       </div>
 
-      {selectedLead && (
-        <LeadDetailPanel
-          /* The live copy from the subscription, so the panel reflects files,
-             records and edits made anywhere — by this user or someone else —
-             while it is open. Falls back to the snapshot for a lead that has
-             just been created and hasn't arrived from Firestore yet. */
-          lead={leads.find(l => l.id === selectedLead.id) || selectedLead} config={configWithUsers} currentUser={currentUser}
-          onClose={() => { setSelectedLead(null); setFocusRecord(null); }}
-          onUpdate={updateLead}
-          onDelete={(id) => { deleteLead(id); showToast('Lead deleted'); }}
-          onArchive={archiveLead}
-          onUnarchive={unarchiveLead}
-          onMarkJunk={markLeadAsJunk}
-          onRestoreJunk={restoreLeadFromJunk}
-          onStatusChange={requestStatusChange}
-          onExtendWorking={requestWorkingExtend}
-          leadRecords={{
-            requests: records.requests.filter(r => r.leadId === selectedLead.id),
-            tradeIns: records.tradeIns.filter(r => r.leadId === selectedLead.id),
-            finance:  records.finance.filter(r => r.leadId === selectedLead.id)
-          }}
-          onUpdateRequest={updateRequest}
-          onUpdateRecord={updateRecord}
-          onNewRecord={(kind, leadId) => setRecordPrompt({ kind, leadId })}
-          onAddLeadFiles={(id, files) => attachFiles('leads', id, files)}
-          onRemoveLeadFile={(id, att) => detachFile('leads', id, att)}
-          onAddRecordFiles={attachFiles}
-          onRemoveRecordFile={detachFile}
-          focusRecord={focusRecord && focusRecord.leadId === selectedLead.id ? focusRecord : null}
-        />
-      )}
 
       {lostPrompt && (() => {
         const lostLead = leads.find(l => l.id === lostPrompt.leadId);
@@ -2956,7 +3004,8 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userR
 }
 
 /* ===================== TOP BAR ===================== */
-function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter, search = null }) {
+function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter, search = null, leadOpen = false }) {
+  const stageForChips = leadOpen ? null : stageForView(view);
   const [menuOpen, setMenuOpen] = useState(false);
   const stage = stageForView(view);
   const titles = {
@@ -3029,7 +3078,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
           {search}
           {/* Stat chips — desktop only; mobile keeps the top bar uncluttered */}
-          {stage && stage.id !== STAGE_COMPLETED && (
+          {stageForChips && stage.id !== STAGE_COMPLETED && (
             <div className="hidden lg:flex gap-2">
               <StatChip label="Total"      value={stats.total}      onClick={() => onChipFilter('all')}        title="Show every lead in this step (clear filters)"/>
               <StatChip label="🚨 Urgent"  value={stats.hot}        accent="brand" onClick={() => onChipFilter('hot')}        title="Filter to Urgent leads"/>
@@ -3039,7 +3088,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
               )}
             </div>
           )}
-          {stage && stage.id === STAGE_COMPLETED && (
+          {stageForChips && stage.id === STAGE_COMPLETED && (
             <div className="hidden lg:flex gap-2">
               <StatChip label="Total" value={stats.total} onClick={() => onChipFilter('all')}  title="Show everything in this step (clear filters)"/>
               <StatChip label={WON_STATUS} value={stats.won}   accent="brand" onClick={() => onChipFilter('won')}  title="Filter to completed sales"/>
@@ -7927,7 +7976,7 @@ function ClosedStatusesEditor({ config, onSave }) {
 }
 
 /* ===================== LEAD DETAIL PANEL ===================== */
-function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelete, onArchive, onUnarchive, onMarkJunk, onRestoreJunk, onStatusChange, onExtendWorking, leadRecords = { requests: [], tradeIns: [], finance: [] }, onUpdateRequest, onUpdateRecord, onNewRecord, onAddLeadFiles, onRemoveLeadFile, onAddRecordFiles, onRemoveRecordFile, focusRecord = null }) {
+function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelete, onArchive, onUnarchive, onMarkJunk, onRestoreJunk, onStatusChange, onExtendWorking, leadRecords = { requests: [], tradeIns: [], finance: [] }, onUpdateRequest, onUpdateRecord, onNewRecord, onAddLeadFiles, onRemoveLeadFile, onAddRecordFiles, onRemoveRecordFile, focusRecord = null, backLabel = 'list' }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(lead);
   const [newComment, setNewComment] = useState('');
@@ -7976,19 +8025,42 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
   const leadStage = stageOfLead(lead, getClosedStatuses(config));
   const stageInfo = getStage(leadStage);
 
+  const isAdmin = currentUser?.role === 'admin';
+  const userMapById = userMap;
+  const nFiles = Array.isArray(lead.attachments) ? lead.attachments.length : 0;
+  const nNotes = (lead.internalComments || []).length;
+  const tabs = [
+    { id: 'overview',  label: 'Overview' },
+    { id: 'submittal', label: 'Sales Submittal', show: !!lead.salesRequest },
+    { id: 'requests',  label: 'Sales Requests', count: leadRecords.requests.length, show: leadStage !== 'junk' || leadRecords.requests.length > 0 },
+    { id: 'tradeIns',  label: 'Trade-Ins', count: leadRecords.tradeIns.length, show: leadStage !== 'junk' || leadRecords.tradeIns.length > 0 },
+    { id: 'finance',   label: 'Finance', count: leadRecords.finance.length,
+      show: leadRecords.finance.length > 0 || leadStage === STAGE_SALES_REQUEST || leadStage === STAGE_COMPLETED },
+    { id: 'files',     label: 'Files', count: nFiles },
+    { id: 'activity',  label: 'Notes & Activity', count: nNotes },
+  ].filter(t => t.show !== false);
+
+  // Opens on Overview; a record picked in search opens its own tab.
+  const [tab, setTab] = useState(() => (focusRecord && focusRecord.kind) || 'overview');
+  useEffect(() => { setTab((focusRecord && focusRecord.kind) || 'overview'); setEditing(false); }, [lead.id]);
+  useEffect(() => { if (focusRecord && focusRecord.kind) setTab(focusRecord.kind); }, [focusRecord && focusRecord.id]);
+  useEffect(() => { if (!tabs.some(t => t.id === tab)) setTab('overview'); }, [tabs.map(t => t.id).join(','), tab]);
+  useEffect(() => { if (editing) setTab('overview'); }, [editing]);
+
+  const card = 'bg-white border border-stone-200 rounded-lg overflow-hidden';
+
   return (
-    <>
-      <div className="fixed inset-0 bg-black/20 z-40 hidden md:block" onClick={onClose}/>
-      {/* overflow-x-hidden prevents any long content inside from pushing the panel
-          wider than the viewport, which was hiding the close button on mobile.
-          Content that would have overflowed horizontally now clips instead. */}
-      <div className="fixed inset-0 md:inset-y-0 md:right-0 md:left-auto md:w-[520px] bg-white shadow-2xl z-50 slide-in flex flex-col overflow-x-hidden">
-        {/* Sticky header so the close X stays visible even if the panel body is
-            scrolled far down. Only applies on mobile where there's no other exit
-            gesture — desktop users can also click the backdrop. */}
-        <div className="sticky top-0 z-10 bg-white px-4 md:px-6 py-3 md:py-4 border-b border-stone-200 flex items-start justify-between gap-2">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1 flex-wrap">
+    <div className="max-w-6xl">
+      <button type="button" onClick={onClose}
+        className="mb-3 text-sm font-medium text-stone-600 hover:text-stone-900 inline-flex items-center gap-1">
+        <ChevronLeft size={16}/> Back to {backLabel}
+      </button>
+
+      {/* Header: who, where they are in the sale, and the actions */}
+      <div className={`${card} mb-4`}>
+        <div className="p-4 md:p-6 flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
               {stageInfo && (
                 <span className={`text-[10px] uppercase tracking-widest font-bold px-2 py-0.5 rounded flex items-center gap-1 ${STAGE_ACCENTS[stageInfo.id].soft} ${STAGE_ACCENTS[stageInfo.id].text}`}>
                   {(() => { const I = STAGE_ICONS[stageInfo.id]; return <I size={10}/>; })()} {stageInfo.label}
@@ -8017,26 +8089,20 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
               })()}
               <span className="font-mono text-[10px] uppercase tracking-widest text-stone-400 truncate">{lead.id}</span>
             </div>
-            <div className="font-display text-xl md:text-2xl font-bold text-stone-900 truncate">{lead.customerName || 'Unnamed Lead'}</div>
-            {lead.companyName && (
-              <div className="text-sm font-medium text-stone-600 truncate">{lead.companyName}</div>
-            )}
-            <div className="text-xs text-stone-500 mt-0.5">Created {fmtDateTime(lead.createdDate)}</div>
-            {/* Staleness chip lives in the header (under Created) rather than in the
-                actions row, so the action buttons stay flush left with the dropdowns. */}
-            <div className="mt-1.5">
+            <h2 className="font-display text-2xl md:text-4xl font-bold text-stone-900 leading-tight break-words">{lead.customerName || 'Unnamed Lead'}</h2>
+            {lead.companyName && <div className="text-base font-medium text-stone-600">{lead.companyName}</div>}
+            <div className="mt-2 flex items-center gap-x-4 gap-y-1 flex-wrap text-sm">
+              {lead.phone && <a href={`tel:${lead.phone}`} className="inline-flex items-center gap-1.5 text-stone-700 hover:text-brand-700 font-mono"><Phone size={13}/>{lead.phone}</a>}
+              {lead.contactEmail && <a href={`mailto:${lead.contactEmail}`} className="inline-flex items-center gap-1.5 text-stone-700 hover:text-brand-700 break-all"><Mail size={13}/>{lead.contactEmail}</a>}
+              {lead.branch && <span className="inline-flex items-center gap-1.5 text-stone-600"><Building size={13}/>{lead.branch}</span>}
+            </div>
+            <div className="mt-2 flex items-center gap-3 flex-wrap text-xs text-stone-500">
+              <span>Created {fmtDateTime(lead.createdDate)}</span>
               <PanelStalenessChip lead={lead} staleness={config.staleness}/>
             </div>
           </div>
-          <button onClick={onClose}
-            className="text-stone-400 hover:text-stone-900 p-2 -mr-1 -mt-1 shrink-0"
-            aria-label="Close panel">
-            <X size={22}/>
-          </button>
-        </div>
-
-        {!editing && (
-          <div className="px-4 md:px-6 py-3 border-b border-stone-200 bg-stone-50 flex items-center gap-2 flex-wrap">
+          {!editing && (
+            <div className="flex items-center gap-2 flex-wrap lg:justify-end lg:max-w-md shrink-0">
             <select value={lead.status} onChange={e => quickStatus(e.target.value)}
               className="text-xs px-2.5 py-1.5 border border-stone-200 rounded bg-white">
               {statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config), { isAdmin: currentUser?.role === 'admin' })
@@ -8125,12 +8191,28 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
                 <X size={12}/>
               </button>
             </div>
-          </div>
-        )}
+            </div>
+          )}
+        </div>
 
-        <div className="flex-1 overflow-y-auto scrollbar-thin">
-          {editing ? (
-            <div className="p-4 md:p-6 space-y-3">
+        {/* Tabs */}
+        <div className="border-t border-stone-200 px-2 md:px-4 overflow-x-auto scrollbar-thin" role="tablist">
+          <div className="flex gap-1 min-w-max">
+            {tabs.map(t => (
+              <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}
+                className={`px-3 py-3 text-sm font-medium border-b-2 -mb-px whitespace-nowrap inline-flex items-center gap-1.5 ${
+                  tab === t.id ? 'border-brand-600 text-stone-900' : 'border-transparent text-stone-500 hover:text-stone-900'}`}>
+                {t.label}
+                {t.count > 0 && <span className={`text-[11px] font-semibold px-1.5 rounded-full ${tab === t.id ? 'bg-brand-100 text-brand-800' : 'bg-stone-100 text-stone-600'}`}>{t.count}</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {tab === 'overview' && (editing ? (
+        <div className={`${card} max-w-2xl`}>
+          <div className="p-4 md:p-6 space-y-3">
               {[
                 ['customerName', 'Customer Name', 'text'],
                 ['companyName',  'Company Name',  'text'],
@@ -8189,48 +8271,20 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
                 <button onClick={save} className="flex-1 px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md">Save Changes</button>
                 <button onClick={() => { setDraft(lead); setEditing(false); }} className="px-3 py-2 text-stone-600 hover:text-stone-900 text-sm">Cancel</button>
               </div>
-            </div>
-          ) : (
-            <>
-              <LeadScoreSection lead={lead} rules={config.scoringRules}/>
-
-              {/* Near the top: once a lead has a sales request, what was sold is
-                  the first thing anyone opening it wants. */}
-              <SalesRequestSection lead={lead} config={config} currentUser={currentUser}
-                onUpdate={onUpdate} onStatusChange={onStatusChange}/>
-
-              {leadStage !== 'junk' && (
-                <LeadRequestsSection lead={lead} requests={leadRecords.requests} currentUser={currentUser}
-                  users={config.users || []} focusId={focusRecord?.kind === 'requests' ? focusRecord.id : null}
-                  onAddFiles={(id, files) => onAddRecordFiles('requests', id, files)}
-                  onRemoveFile={(id, att) => onRemoveRecordFile('requests', id, att)}
-                  onUpdate={onUpdateRequest} onNew={() => onNewRecord('requests', lead.id)}/>
-              )}
-              {leadStage !== 'junk' && (
-                <LeadTradeInsSection tradeIns={leadRecords.tradeIns} currentUser={currentUser}
-                  userMap={Object.fromEntries((config.users || []).map(u => [u.id, u]))}
-                  focusId={focusRecord?.kind === 'tradeIns' ? focusRecord.id : null}
-                  onUpdate={(id, patch, note) => onUpdateRecord('tradeIns', id, patch, note)}
-                  onAddFiles={(id, files) => onAddRecordFiles('tradeIns', id, files)}
-                  onRemoveFile={(id, att) => onRemoveRecordFile('tradeIns', id, att)}
-                  onNew={() => onNewRecord('tradeIns', lead.id)}/>
-              )}
-              {(leadRecords.finance.length > 0 || leadStage === STAGE_SALES_REQUEST || leadStage === STAGE_COMPLETED) && (
-                <LeadFinanceSection deals={leadRecords.finance} currentUser={currentUser}
-                  focusId={focusRecord?.kind === 'finance' ? focusRecord.id : null}
-                  onUpdate={(id, patch, note) => onUpdateRecord('finance', id, patch, note)}
-                  onNew={() => onNewRecord('finance', lead.id)}/>
-              )}
-
-              {leadStage !== 'junk' && <DealSection lead={lead} onUpdate={onUpdate}/>}
-
-              <Section title="Files">
-                <AttachmentList attachments={lead.attachments} currentUser={currentUser}
-                  emptyText="Quotes, photos, spec sheets, signed paperwork."
-                  onAdd={(files) => onAddLeadFiles(lead.id, files)}
-                  onRemove={(att) => onRemoveLeadFile(lead.id, att)}/>
-              </Section>
-
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+          <div className="lg:col-span-2 space-y-4">
+            {lead.comment && (
+              <div className={card}>
+                <Section title="Customer Comment">
+                  <div className="text-sm text-stone-700 whitespace-pre-wrap leading-relaxed">{lead.comment}</div>
+                </Section>
+              </div>
+            )}
+            {leadStage !== 'junk' && <div className={card}><DealSection lead={lead} onUpdate={onUpdate}/></div>}
+            <div className={card}>
               <Section title="Contact">
                 <DetailRow icon={Building2} label="Company" value={lead.companyName}/>
                 <DetailRow icon={Mail}     label="Email"  value={lead.contactEmail} href={lead.contactEmail ? `mailto:${lead.contactEmail}` : undefined}/>
@@ -8239,51 +8293,184 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
                 <DetailRow icon={Building} label="Branch" value={lead.branch}/>
                 <DetailRow icon={LayoutGrid} label="Department" value={lead.department}/>
               </Section>
-
               <Section title="Source">
                 <DetailRow icon={Tag}      label="Lead Source"    value={formatLeadSource(lead)}/>
                 <DetailRow icon={FileText} label="Form Title"     value={lead.formTitle}/>
                 <DetailRow icon={Calendar} label="Date Submitted" value={fmtDateTime(lead.dateSubmitted)} mono/>
                 <DetailRow icon={Calendar} label="Date Created"   value={fmtDateTime(lead.createdDate)}   mono/>
               </Section>
-
+            </div>
+          </div>
+          <div className="space-y-4">
+            <div className={card}><LeadScoreSection lead={lead} rules={config.scoringRules}/></div>
+            <div className={card}>
               <Section title="Status">
                 <StatusDetailRows lead={lead} config={config} onExtendWorking={onExtendWorking}/>
                 <StatusAuditLog lead={lead} config={config} currentUser={currentUser}/>
               </Section>
-
               <Section title="Assignment">
-                <EditableAssignmentRow
-                  lead={lead} config={config}
-                  onAssign={quickAssign}
-                />
-                <SecondaryAssigneeRow
-                  lead={lead} config={config}
-                  onChange={(userId) => onUpdate(lead.id, { secondaryAssignedTo: userId })}
-                />
+                <EditableAssignmentRow lead={lead} config={config} onAssign={quickAssign}/>
+                <SecondaryAssigneeRow lead={lead} config={config}
+                  onChange={(userId) => onUpdate(lead.id, { secondaryAssignedTo: userId })}/>
                 <DetailRow icon={Calendar} label="Date Assigned" value={fmtDateTime(lead.dateAssigned)} mono/>
               </Section>
+            </div>
+            {/* The latest note, so the overview answers "where are we?" */}
+            {nNotes > 0 && (() => {
+              const last = [...lead.internalComments].sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''))[0];
+              return (
+                <div className={card}>
+                  <Section title="Latest Note">
+                    <div className="text-sm text-stone-700 whitespace-pre-wrap line-clamp-6">{last.text}</div>
+                    <div className="text-xs text-stone-500 mt-1">{last.isSystem ? (last.authorName || 'System') : (userMapById[last.author]?.name || 'Unknown')} · {fmtDateTime(last.timestamp)}</div>
+                    <button type="button" onClick={() => setTab('activity')} className="text-xs font-medium text-brand-700 hover:underline mt-1">
+                      All notes &amp; activity{nNotes > 1 ? ` (${nNotes})` : ''}
+                    </button>
+                  </Section>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      ))}
 
-              {lead.comment && (
-                <Section title="Customer Comment">
-                  <div className="text-sm text-stone-700 bg-stone-50 p-3 rounded-md border border-stone-100 whitespace-pre-wrap leading-relaxed">
-                    {lead.comment}
-                  </div>
-                </Section>
-              )}
+      {tab === 'submittal' && (
+        <div className={`${card} max-w-4xl`}>
+          <SalesRequestSection lead={lead} config={config} currentUser={currentUser}
+            onUpdate={onUpdate} onStatusChange={onStatusChange}/>
+        </div>
+      )}
 
-              <ActivityTimeline
-                lead={lead} config={config}
-                newComment={newComment}
-                setNewComment={setNewComment}
-                onAddComment={addComment}
-                onDeleteComment={deleteComment}
-              />
-            </>
+      {tab === 'requests' && (
+        <RecordTab title="Sales Requests" addLabel="Add request" onAdd={() => onNewRecord('requests', lead.id)}
+          empty="Delivery, demo, get ready, parts, pick up or service for this customer."
+          items={[...leadRecords.requests].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))}
+          focusId={focusRecord?.kind === 'requests' ? focusRecord.id : null}
+          header={(r) => ({
+            title: (r.requestTypes || []).join(', ') || 'Request',
+            subtitle: `Needed ${fmtYmd(r.dateNeeded)} · ${r.fromLocation || ''}${r.toLocation ? ` → ${r.toLocation}` : ''}`,
+            status: <RequestStatusControl req={r} isAdmin={isAdmin} onUpdate={onUpdateRequest}/>
+          })}
+          details={(r) => (
+            <RequestDetails r={r} isAdmin={isAdmin} users={config.users || []} currentUser={currentUser} showCheckoffs
+              onUpdate={onUpdateRequest}
+              onAddFiles={(id, files) => onAddRecordFiles('requests', id, files)}
+              onRemoveFile={(id, att) => onRemoveRecordFile('requests', id, att)}/>
+          )}/>
+      )}
+
+      {tab === 'tradeIns' && (
+        <RecordTab title="Trade-Ins" addLabel="Add trade-in" onAdd={() => onNewRecord('tradeIns', lead.id)}
+          empty="Evaluate the customer’s machine for a sales manager’s value."
+          items={[...leadRecords.tradeIns].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))}
+          focusId={focusRecord?.kind === 'tradeIns' ? focusRecord.id : null}
+          header={(t) => {
+            const st = tradeInStatus(t);
+            return {
+              title: [t.year, t.make, t.model].filter(Boolean).join(' ') || 'Trade-in',
+              subtitle: `${t.hours || '—'} hrs · S/N ${t.serial || '—'}${t.manager?.tradeInValue ? ` · Value ${t.manager.tradeInValue}` : ''}`,
+              status: <span className={`text-xs font-medium px-2 py-1 rounded ${TRADE_STATUS_STYLES[st]}`}>{st}</span>
+            };
+          }}
+          details={(t) => (
+            <TradeInDetails t={t} isAdmin={isAdmin} userMap={userMapById} currentUser={currentUser}
+              onUpdate={(id, patch, note) => onUpdateRecord('tradeIns', id, patch, note)}
+              onAddFiles={(id, files) => onAddRecordFiles('tradeIns', id, files)}
+              onRemoveFile={(id, att) => onRemoveRecordFile('tradeIns', id, att)}/>
+          )}/>
+      )}
+
+      {tab === 'finance' && (
+        <RecordTab title="Finance" addLabel={leadRecords.finance.length ? null : 'Add finance deal'} onAdd={() => onNewRecord('finance', lead.id)}
+          empty="Financed submittals create this automatically."
+          items={leadRecords.finance}
+          focusId={focusRecord?.kind === 'finance' ? focusRecord.id : null}
+          header={(d) => {
+            const st = d.admin?.dealStatus || 'Submitted';
+            return {
+              title: d.assetToFinance || 'Finance deal',
+              subtitle: [d.dealType, d.amount, d.admin?.lenderName].filter(Boolean).join(' · '),
+              status: <span className={`text-xs font-medium px-2 py-1 rounded ${FINANCE_STATUS_STYLES[st] || ''}`}>{st}</span>
+            };
+          }}
+          details={(d) => (
+            <FinanceDetails d={d} isAdmin={isAdmin} onUpdate={(id, patch, note) => onUpdateRecord('finance', id, patch, note)}/>
+          )}/>
+      )}
+
+      {tab === 'files' && (
+        <div className={`${card} max-w-3xl`}>
+          <Section title="Files">
+            <AttachmentList attachments={Array.isArray(lead.attachments) ? lead.attachments : []} currentUser={currentUser}
+              emptyText="Quotes, photos, spec sheets, signed paperwork."
+              onAdd={(files) => onAddLeadFiles(lead.id, files)}
+              onRemove={(att) => onRemoveLeadFile(lead.id, att)}/>
+          </Section>
+          {(leadRecords.requests.some(r => Array.isArray(r.attachments) && r.attachments.length) ||
+            leadRecords.tradeIns.some(t => Array.isArray(t.attachments) && t.attachments.length)) && (
+            <div className="px-4 md:px-6 pb-4 text-xs text-stone-500">
+              Files attached to a sales request or trade-in are on that tab.
+            </div>
           )}
         </div>
+      )}
+
+      {tab === 'activity' && (
+        <div className={`${card} max-w-4xl`}>
+          <ActivityTimeline
+            lead={lead} config={config}
+            newComment={newComment}
+            setNewComment={setNewComment}
+            onAddComment={addComment}
+            onDeleteComment={deleteComment}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A lead page tab listing one kind of record as cards. Each card opens to its
+// full details; with one or two records they start open.
+function RecordTab({ title, addLabel, onAdd, empty, items, header, details, focusId }) {
+  const [open, setOpen] = useState(() => new Set(focusId ? [focusId] : items.length <= 2 ? items.map(i => i.id) : []));
+  useEffect(() => { if (focusId) setOpen(o => new Set([...o, focusId])); }, [focusId]);
+  const toggle = (id) => setOpen(o => { const n = new Set(o); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold">{title}</div>
+        {addLabel && (
+          <button type="button" onClick={onAdd}
+            className="text-xs px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-md inline-flex items-center gap-1.5">
+            <Plus size={13}/> {addLabel}
+          </button>
+        )}
       </div>
-    </>
+      {items.length === 0 && (
+        <div className="bg-white border border-stone-200 rounded-lg px-4 py-8 text-center text-sm text-stone-500">{empty}</div>
+      )}
+      {items.map(it => {
+        const h = header(it);
+        const isOpen = open.has(it.id);
+        return (
+          <div key={it.id} id={`rec-${it.id}`} className="bg-white border border-stone-200 rounded-lg overflow-hidden">
+            <div className="flex items-start justify-between gap-3 px-4 md:px-5 py-3">
+              <button type="button" onClick={() => toggle(it.id)} aria-expanded={isOpen}
+                className="min-w-0 flex-1 text-left group flex items-start gap-2">
+                <ChevronRight size={16} className={`mt-0.5 shrink-0 text-stone-400 group-hover:text-brand-700 transition-transform ${isOpen ? 'rotate-90' : ''}`}/>
+                <span className="min-w-0">
+                  <span className="block font-semibold text-stone-900 group-hover:text-brand-700">{h.title}</span>
+                  <span className="block text-xs text-stone-500">{h.subtitle}</span>
+                </span>
+              </button>
+              <div className="shrink-0">{h.status}</div>
+            </div>
+            {isOpen && <div className="border-t border-stone-100 bg-stone-50/60 px-4 md:px-5 py-4">{details(it)}</div>}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -10157,55 +10344,7 @@ function FinanceDetails({ d, isAdmin, onUpdate, stacked = false }) {
   );
 }
 
-// A row in one of the lead panel's record sections. Click to open its details
-// in place; the customer profile shouldn't need a trip to Back Office.
-function LeadRecordRow({ open, onToggle, title, subtitle, status, children }) {
-  return (
-    <div className="border-b border-stone-100 last:border-0">
-      <div className="flex items-start justify-between gap-2 py-1.5">
-        <button type="button" onClick={onToggle} aria-expanded={open}
-          className="min-w-0 flex-1 text-left group flex items-start gap-1.5">
-          <ChevronRight size={14} className={`mt-0.5 shrink-0 text-stone-400 group-hover:text-brand-700 transition-transform ${open ? 'rotate-90' : ''}`}/>
-          <span className="min-w-0">
-            <span className="block text-sm font-medium text-stone-900 group-hover:text-brand-700">{title}</span>
-            <span className="block text-xs text-stone-500">{subtitle}</span>
-            {!open && <span className="block text-[11px] text-brand-700 font-medium mt-0.5">View details</span>}
-          </span>
-        </button>
-        <div className="shrink-0">{status}</div>
-      </div>
-      {open && <div className="pb-4 pt-1 pl-5">{children}</div>}
-    </div>
-  );
-}
 
-function LeadRequestsSection({ requests, currentUser, onUpdate, onNew, users = [], onAddFiles, onRemoveFile, focusId }) {
-  const [openId, setOpenId] = useState(focusId || null);
-  useEffect(() => { if (focusId) setOpenId(focusId); }, [focusId]);
-  const isAdmin = currentUser?.role === 'admin';
-  const list = [...requests].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-  return (
-    <Section title={
-      <span className="flex items-center justify-between w-full">
-        <span>Sales Requests</span>
-        <button onClick={onNew} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
-          <Plus size={11}/> Add request
-        </button>
-      </span>
-    }>
-      {list.length === 0 && <div className="text-xs text-stone-400">Delivery, demo, get ready, parts, pick up or service for this customer.</div>}
-      {list.map(r => (
-        <LeadRecordRow key={r.id} open={openId === r.id} onToggle={() => setOpenId(openId === r.id ? null : r.id)}
-          title={(r.requestTypes || []).join(', ')}
-          subtitle={`Needed ${fmtYmd(r.dateNeeded)} · ${r.fromLocation || ''}${r.toLocation ? ` → ${r.toLocation}` : ''}`}
-          status={<RequestStatusControl req={r} isAdmin={isAdmin} onUpdate={onUpdate}/>}>
-          <RequestDetails r={r} isAdmin={isAdmin} users={users} currentUser={currentUser} stacked showCheckoffs
-            onUpdate={onUpdate} onAddFiles={onAddFiles} onRemoveFile={onRemoveFile}/>
-        </LeadRecordRow>
-      ))}
-    </Section>
-  );
-}
 
 /* ===================== TRADE-IN EVALUATION ===================== */
 // The rep inspects the customer's machine; a sales manager (admin) puts a value
@@ -10459,35 +10598,6 @@ function TradeInDecisionCard({ tradeIn, isAdmin, userMap, onDecide }) {
   );
 }
 
-function LeadTradeInsSection({ tradeIns, onNew, currentUser, userMap = {}, onUpdate, onAddFiles, onRemoveFile, focusId }) {
-  const isAdmin = currentUser?.role === 'admin';
-  const [openId, setOpenId] = useState(focusId || null);
-  useEffect(() => { if (focusId) setOpenId(focusId); }, [focusId]);
-  return (
-    <Section title={
-      <span className="flex items-center justify-between w-full">
-        <span>Trade-Ins</span>
-        <button onClick={onNew} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
-          <Plus size={11}/> Add trade-in
-        </button>
-      </span>
-    }>
-      {tradeIns.length === 0 && <div className="text-xs text-stone-400">Evaluate the customer&rsquo;s machine for a manager&rsquo;s value.</div>}
-      {tradeIns.map(t => {
-        const status = tradeInStatus(t);
-        return (
-          <LeadRecordRow key={t.id} open={openId === t.id} onToggle={() => setOpenId(openId === t.id ? null : t.id)}
-            title={[t.year, t.make, t.model].filter(Boolean).join(' ')}
-            subtitle={`${t.hours} hrs · S/N ${t.serial}${t.manager?.tradeInValue ? ` · Value ${t.manager.tradeInValue}` : ''}`}
-            status={<span className={`text-xs font-medium px-2 py-1 rounded ${TRADE_STATUS_STYLES[status]}`}>{status}</span>}>
-            <TradeInDetails t={t} isAdmin={isAdmin} userMap={userMap} currentUser={currentUser} stacked
-              onUpdate={onUpdate} onAddFiles={onAddFiles} onRemoveFile={onRemoveFile}/>
-          </LeadRecordRow>
-        );
-      })}
-    </Section>
-  );
-}
 
 /* ===================== FINANCE (Sales Tracker) ===================== */
 // The finance team's funding pipeline. The rep's half comes from the Sales
@@ -10631,36 +10741,6 @@ function daysSince(iso) {
   return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86400000));
 }
 
-function LeadFinanceSection({ deals, onNew, currentUser, onUpdate, focusId }) {
-  const isAdmin = currentUser?.role === 'admin';
-  const [openId, setOpenId] = useState(focusId || null);
-  useEffect(() => { if (focusId) setOpenId(focusId); }, [focusId]);
-  return (
-    <Section title={
-      <span className="flex items-center justify-between w-full">
-        <span>Finance</span>
-        {deals.length === 0 && (
-          <button onClick={onNew} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
-            <Plus size={11}/> Add finance deal
-          </button>
-        )}
-      </span>
-    }>
-      {deals.length === 0 && <div className="text-xs text-stone-400">Financed submittals create this automatically.</div>}
-      {deals.map(d => {
-        const st = d.admin?.dealStatus || 'Submitted';
-        return (
-          <LeadRecordRow key={d.id} open={openId === d.id} onToggle={() => setOpenId(openId === d.id ? null : d.id)}
-            title={d.assetToFinance}
-            subtitle={`${d.dealType || ''} · ${d.amount || ''}${d.admin?.lenderName ? ` · ${d.admin.lenderName}` : ''}`}
-            status={<span className={`text-xs font-medium px-2 py-1 rounded ${FINANCE_STATUS_STYLES[st] || ''}`}>{st}</span>}>
-            <FinanceDetails d={d} isAdmin={isAdmin} onUpdate={onUpdate} stacked/>
-          </LeadRecordRow>
-        );
-      })}
-    </Section>
-  );
-}
 
 function EmptyState({ icon: Icon, title, subtitle }) {
   return (

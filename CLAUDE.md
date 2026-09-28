@@ -200,9 +200,17 @@ A record picked in search opens inside its lead's panel (`focusRecord`) when
 that lead is visible, otherwise in its Back Office list (`focusId`). The
 shortcut closes an open lead panel first — the panel covers the box.
 
+**Lead page.** Opening a lead shows a full page (`LeadDetailPanel`, name kept
+for diffing with Atlanta) in the content area, with tabs: Overview, Sales
+Submittal (when there is one), Sales Requests, Trade-Ins, Finance, Files,
+Notes & Activity. The list underneath stays mounted but hidden, so Back returns
+to it with filters and scroll intact. The URL carries `?lead=<id>`: opening
+pushes a history entry (browser Back works), refresh and email links reopen
+it, `closeLead` steps back, and sidebar navigation (`goTo`) closes it.
+
 **Record details** (`RequestDetails`, `TradeInDetails`, `FinanceDetails`) are
-shared by the Back Office lists and the lead panel (`stacked`), so a trade-in
-can be approved, or a request checked off, from the customer's profile.
+shared by the Back Office lists and the lead page tabs (`RecordTab`), so a
+trade-in can be approved, or a request checked off, from the customer's page.
 
 Old views moved rather than removed — `MOVED_VIEWS` maps them, and `goTo` /
 the `?view=` redirect follow the map: Junk → a tab on Incoming, Archived → a
@@ -322,6 +330,16 @@ the export style. Change one, change the other.
 `intake` and `health` deploy to **us-central1**; everything else to
 **us-south1** alongside Firestore. Originally to preserve legacy Zapier URLs;
 kept so the forks stay diffable. Don't "fix" it in one fork only.
+
+## Intake rules (Indy)
+
+`functions/intakeRules.js` is pure and tested: web leads are always `New`
+(`intakeStatus` — the pipeline needs a rep, a submittal or the back office for
+anything later); branch / department / source are matched to Settings ignoring
+case (`canonical`); a missing source is `Internet`. `findDuplicate` with
+`closedStatuses` only joins a repeat to an **open** lead (Junk counts as open,
+so repeat spam stays junk); a match on a closed lead makes a fresh lead with a
+"Returning customer" note and `history[0].previousLeadId`.
 
 ## Intake auth
 
