@@ -16,6 +16,7 @@ const { defineSecret, defineString } = require('firebase-functions/params');
 const admin = require('firebase-admin');
 const { Resend } = require('resend');
 const { nearestBranchForZip } = require('./branchRouting');
+const { canonical, intakeStatus, intakeSource, closedStatusesFrom, canLinkResubmission } = require('./intakeRules');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -68,19 +69,28 @@ function getMatchedOn(existing, candidate) {
   return matches;
 }
 
-async function findDuplicate(candidate, withinDays = 90) {
+// Without `closedStatuses`: the matching lead, or null (the old behaviour).
+// With it: `{ dup, previous }` — `dup` is the open lead a repeat submission
+// joins; a match on a closed lead (sale completed, deal lost) is never joined
+// and the newest one comes back as `previous`, so a fresh lead can point to it.
+async function findDuplicate(candidate, withinDays = 90, closedStatuses = null) {
   const cutoff = new Date(Date.now() - withinDays * 24 * 60 * 60 * 1000).toISOString();
   const snap = await db.collection('leads')
     .where('createdDate', '>=', cutoff)
     .get();
+  let previous = null;
   for (const doc of snap.docs) {
     const data = doc.data();
     const matchedOn = getMatchedOn(data, candidate);
     if (matchedOn.length > 0) {
-      return { id: doc.id, data, matchedOn };
+      if (closedStatuses && !canLinkResubmission(data, closedStatuses)) {
+        if (!previous || String(data.createdDate || '') > String(previous.data.createdDate || '')) previous = { id: doc.id, data, matchedOn };
+        continue;
+      }
+      return closedStatuses ? { dup: { id: doc.id, data, matchedOn }, previous: null } : { id: doc.id, data, matchedOn };
     }
   }
-  return null;
+  return closedStatuses ? { dup: null, previous } : null;
 }
 
 function escapeHtml(s) {
@@ -131,7 +141,14 @@ exports.intake = onRequest(
     }
 
     const now = new Date().toISOString();
-    const sourceLabel = body.leadSource || 'Google Sheet';
+    // Settings, read once: the lists that sent values are matched against.
+    const appConfig = await getAppConfig();
+    // Always sent explicitly by the Zaps; a missing one files as Internet
+    // (Atlanta's "Google Sheet" default is in none of Indy's sources).
+    const sourceLabel = intakeSource(body.leadSource, appConfig.sources);
+    if (body.status && body.status !== 'New') {
+      console.log(`[intake] Ignoring status "${body.status}" — web leads always start as New`);
+    }
 
     const candidate = {
       customerName: (body.customerName || '').toString().trim(),
@@ -141,14 +158,16 @@ exports.intake = onRequest(
       contactEmail: (body.contactEmail || '').toString().trim(),
       phone:        (body.phone        || '').toString().trim(),
       comment:      (body.comment      || '').toString(),
-      branch:       (body.branch       || '').toString().trim(),
-      department:   (body.department   || '').toString().trim(),
+      // Matched to Settings ignoring case and spacing ("indy north" files as
+      // "Indy North"); an unknown value is kept as sent and logged below.
+      branch:       canonical(body.branch, appConfig.branches),
+      department:   canonical(body.department, appConfig.departments),
       zip:          (body.zip          || '').toString().trim(),
       formTitle:    (body.formTitle    || '').toString().trim(),
       dateSubmitted: body.dateSubmitted || now,
       createdDate:   now,
       leadSource:    sourceLabel,
-      status:        body.status || 'New',
+      status:        intakeStatus(),
       statusChangedAt: now,   // when the current status was set; see getStatusChangedAt() in App.jsx
       assignedTo:    'u_1',
       dateAssigned:  null,
@@ -171,7 +190,6 @@ exports.intake = onRequest(
       // deployment has never heard of — the lead is then stored with a branch
       // no routing entry matches, and it silently falls through to Unassigned.
       // App.jsx has always passed config.branches here; intake did not.
-      const appConfig = await getAppConfig();
       const availableBranches = Array.isArray(appConfig.branches) ? appConfig.branches : [];
       // Empty list means "no branch is valid here", NOT "anything goes". On a
       // fresh project config/app does not exist until Settings is first saved,
@@ -226,7 +244,14 @@ exports.intake = onRequest(
     }
 
     try {
-      const dup = await findDuplicate(candidate, 90);
+      if (candidate.branch && Array.isArray(appConfig.branches) && !appConfig.branches.includes(candidate.branch)) {
+        console.warn(`[intake] Branch "${candidate.branch}" is not in Settings — lead will not match a branch filter`);
+      }
+      if (candidate.department && Array.isArray(appConfig.departments) && !appConfig.departments.includes(candidate.department)) {
+        console.warn(`[intake] Department "${candidate.department}" is not in Settings — lead will not match a department filter`);
+      }
+
+      const { dup, previous } = await findDuplicate(candidate, 90, closedStatusesFrom(appConfig));
 
       if (dup) {
         const event = {
@@ -310,8 +335,21 @@ exports.intake = onRequest(
         });
       }
 
+      // A returning customer whose last lead is closed gets a fresh lead in
+      // Incoming, with a note pointing back to the old one.
+      if (previous) {
+        candidate.history[0].previousLeadId = previous.id;
+        candidate.internalComments = [{
+          id: uid('n'),
+          author: 'system',
+          authorName: 'Returning customer',
+          text: `Returning customer: an earlier lead for them is ${previous.data.status || 'closed'} (matched on ${previous.matchedOn.join(' and ')}). Search their name or phone to open it.`,
+          timestamp: now,
+          isSystem: true
+        }];
+      }
       const newRef = await db.collection('leads').add(candidate);
-      return res.json({ ok: true, action: 'created', leadId: newRef.id });
+      return res.json({ ok: true, action: 'created', leadId: newRef.id, ...(previous ? { previousLeadId: previous.id } : {}) });
 
     } catch (err) {
       console.error('intake error:', err);
