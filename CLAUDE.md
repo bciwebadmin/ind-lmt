@@ -143,8 +143,18 @@ Indy works leads through four steps, each its own dashboard, with a picker
 (`home` view) as the landing screen:
 
   **Incoming** (New) → **Working** (Working, Prospect, Pending, Want) →
-  **Sales Request** (Sales Request) → **Completed** (Completed, Lost,
+  **Sales Submittals** (Sales Submittal) → **Completed** (Completed, Lost,
   Unqualified, Dead, Cancelled)
+
+The third step and its status were called **Sales Request** until Oct 2026;
+renamed **Sales Submittals** / **Sales Submittal** so they aren't confused with
+the Back Office **Sales Requests** (deliveries, demos…, standalone or on a
+lead). Internal ids (`STAGE_SALES_REQUEST`, `stage-sales-request`,
+`SALES_REQUEST_STATUS`, `lead.salesRequest`, `sendSalesRequestEmail`) keep the
+old name on purpose. Leads still storing `'Sales Request'` are shown as the new
+name on read (`LEGACY_STATUS_RENAMES` → `normalizeLeadStatus`) and rewritten
+once by the first admin to load the app; Settings and staleness thresholds heal
+in `ensurePipelineStatuses`.
 
 Indy calls a finished sale **Completed** (other forks: Won). `WON_STATUS` holds
 `'Completed'` so shared report code still reads the same. Choosing Completed on
@@ -169,7 +179,7 @@ submittal, `showIf` for conditional questions, `pruneHiddenAnswers` on save) and
   pipeline (stored config replaces defaults — see below). Pipeline statuses
   cannot be removed in Settings; they come back on the next read.
 - Guards live in `updateLead`, so every path (row, bulk, panel) obeys them:
-  entering Working needs an assigned rep, and Sales Request can only be
+  entering Working needs an assigned rep, and Sales Submittal can only be
   entered through `SalesRequestModal`, which supplies `lead.salesRequest`.
 - Visibility: admins see every lead; reps see leads where they are primary or
   secondary, plus unassigned leads in Incoming only.
@@ -281,7 +291,7 @@ The full Smartsheet → LMT map is in the Claude project,
 const closedStatuses = getClosedStatuses(config);   // always use the helper
 ```
 
-- **Open:** New, Working, Prospect, Pending, Want, Sales Request
+- **Open:** New, Working, Prospect, Pending, Want, Sales Submittal
 - **Closed:** Completed, Lost, Unqualified, Dead, Cancelled → the Completed step
 - **Junk:** its own tab, excluded from every dashboard and all report metrics
 

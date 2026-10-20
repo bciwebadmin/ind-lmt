@@ -155,28 +155,45 @@ app, confirm `CRM_URL` matches and redeploy functions.
 
 ## 9. Zapier intake webhook
 
+One Zap per website form. **Trigger:** the form tool's "new submission".
+**Action:** Webhooks by Zapier → **POST**.
+
 ```
-POST https://us-central1-ind-lmt.cloudfunctions.net/intake
-Authorization: Bearer <the INTAKE_SECRET from step 3>
-Content-Type: application/json
+URL:           https://us-central1-ind-lmt.cloudfunctions.net/intake
+Payload Type:  json
+Header:        Authorization = Bearer <the INTAKE_SECRET from step 3>
 ```
 
 **Not** `X-Intake-Secret` — that returns a bare 401 with nothing in the logs.
+Lost the secret? `firebase functions:secrets:access INTAKE_SECRET`.
 
-Payload fields the function reads:
+| Key | From the form | Notes |
+|---|---|---|
+| `customerName` | Name (first + last) | |
+| `companyName` | Company | also accepts `company`, `businessName`, `organization` |
+| `contactEmail` | Email | |
+| `phone` | Phone | any format |
+| `zip` | ZIP | |
+| `comment` | Message / comments | |
+| `department` | Typed per form (`Sales`, `Rental`, `Parts`, `Service`, `Supplies`) or a form dropdown | matched to Settings ignoring case |
+| `branch` | A location dropdown, if the form has one; otherwise leave out | matched to Settings ignoring case |
+| `formTitle` | The form's name, typed | shows on the lead |
+| `leadSource` | Typed: `Gravity Forms` (or whatever Settings → Lead Sources calls it) | missing → `Internet` |
+| `dateSubmitted` | Entry date (optional) | defaults to now |
 
-```
-customerName, companyName, contactEmail, phone, zip, comment,
-department, formTitle, leadSource, dateSubmitted, branch, status
-```
+What the endpoint does:
 
-- Always send `leadSource` explicitly — it otherwise defaults to `"Google Sheet"`,
-  which is not in `config.sources`.
-- `department` must match the configured list exactly.
-- `branch` stays empty unless sent — ZIP inference is disabled.
-- `companyName` also accepts `company`, `businessName` or `organization`.
-
----
+- Needs a customer name, company, email or phone, or it answers 400.
+- Every lead starts **New** in Incoming, unassigned — a `status` field is
+  ignored. The Settings **New Leads** list is emailed.
+- Branch, department and source are matched to Settings ignoring case and
+  spacing. An unknown value is kept as sent and logged
+  (`firebase functions:log --only intake`), and won't match a filter.
+- **Repeat submissions** (same email, or same last 10 phone digits, within 90
+  days) join the customer's **open** lead with a note instead of making a
+  second one. If their last lead is closed (Completed, Lost, Dead…), a fresh
+  lead is created in Incoming with a note pointing back to the old one.
+- Answers `{"ok":true,"action":"created"|"linked","leadId":…}`.
 
 ## 10. Post-launch checklist
 
@@ -208,8 +225,8 @@ divergences from Bobcat of Atlanta, which this repo was taken from:
 | Scoring service area | `46,47` (IN) primary; `60,61,62` (IL), `43,44,45` (OH), `40,41,42` (KY), `48,49` (MI) adjacent | `30,31,35` primary; `36,37,38,29,28,27,32,39` adjacent |
 | Export filenames | `ind-lmt-report`, `ind-lmt-archived`, `ind-leads`, `ind-lmt-import-template`, `ind-routing-overview` | `atl-` equivalents |
 | Temp password prefix | `IND-` | `ATL-` |
-| Lead views | Four-step pipeline — Incoming, Working, Sales Request, Completed — behind a dashboard picker (`src/lib/pipeline.js`) | Leads / My Open / My Closed / All Closed |
-| Statuses | New · Working, Prospect, Pending, Want · Sales Request · Completed, Lost, Unqualified, Cancelled · Junk | New, Contacted, Working, Quoted, Won, Lost, Unqualified, No Decision, Junk |
+| Lead views | Four-step pipeline — Incoming, Working, Sales Submittals, Completed — behind a dashboard picker (`src/lib/pipeline.js`) | Leads / My Open / My Closed / All Closed |
+| Statuses | New · Working, Prospect, Pending, Want · Sales Submittal · Completed, Lost, Unqualified, Cancelled · Junk | New, Contacted, Working, Quoted, Won, Lost, Unqualified, No Decision, Junk |
 | Sales Submittal | Rep form on the lead + back-office fields (admins) + `sendSalesRequestEmail` to Settings → Sales Submittals | — |
 | Deal details | `lead.deal` — machine, model, new/used, temperature, quoted date, location, competitor, lost reason | — |
 | Sales Requests | `requests` collection — delivery / get ready / demo / parts / pick up / service, per-department check-offs | — |

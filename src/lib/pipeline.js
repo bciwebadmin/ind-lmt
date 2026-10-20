@@ -28,7 +28,9 @@ export const STAGE_JUNK          = 'junk';   // not a step; Junk keeps its own t
 
 export const NEW_STATUS           = 'New';
 export const WORKING_STATUS       = 'Working';
-export const SALES_REQUEST_STATUS = 'Sales Request';
+// Was 'Sales Request' until Oct 2026 — renamed so it isn't confused with the
+// Back Office Sales Requests (deliveries, demos…). See LEGACY_STATUS_RENAMES.
+export const SALES_REQUEST_STATUS = 'Sales Submittal';
 // The status a finished sale ends in. Named WON_STATUS so the shared report
 // code reads the same across forks; Indy's value is 'Completed'.
 export const WON_STATUS           = 'Completed';
@@ -56,7 +58,7 @@ export const PIPELINE_STAGES = [
   },
   {
     id: STAGE_SALES_REQUEST,
-    label: 'Sales Request',
+    label: 'Sales Submittals',
     view: 'stage-sales-request',
     blurb: 'Sold by the rep. The sales submittal is with the back office.',
     statuses: [SALES_REQUEST_STATUS]
@@ -89,8 +91,20 @@ export const LEGACY_STATUS_STAGE = {
   Quoted:        STAGE_WORKING,
   Wants:         STAGE_WORKING,     // Indy's first draft of the pipeline
   Won:           STAGE_COMPLETED,   // what every other fork calls Completed
-  'No Decision': STAGE_COMPLETED
+  'No Decision': STAGE_COMPLETED,
+  'Sales Request': STAGE_SALES_REQUEST   // renamed Sales Submittal, Oct 2026
 };
+
+// Statuses that were renamed. Leads still storing the old name are shown under
+// the new one on read and rewritten once by an admin (App.jsx); Settings and
+// staleness thresholds heal in ensurePipelineStatuses.
+export const LEGACY_STATUS_RENAMES = {
+  Qualified: WORKING_STATUS,
+  'Sales Request': SALES_REQUEST_STATUS
+};
+export function renamedStatus(status) {
+  return Object.prototype.hasOwnProperty.call(LEGACY_STATUS_RENAMES, status) ? LEGACY_STATUS_RENAMES[status] : status;
+}
 
 const STAGE_BY_ID = Object.fromEntries(PIPELINE_STAGES.map(s => [s.id, s]));
 
@@ -233,6 +247,13 @@ export function ensurePipelineStatuses(config, defaultThresholds = {}) {
   if (out.staleness && out.staleness.thresholds) {
     const th = { ...out.staleness.thresholds };
     let added = false;
+    // A renamed status keeps the threshold someone set under its old name.
+    for (const [oldName, newName] of Object.entries(LEGACY_STATUS_RENAMES)) {
+      if (Object.prototype.hasOwnProperty.call(th, oldName)) {
+        if (!Object.prototype.hasOwnProperty.call(th, newName)) th[newName] = th[oldName];
+        delete th[oldName]; added = true;
+      }
+    }
     for (const [k, v] of Object.entries(defaultThresholds)) {
       if (!Object.prototype.hasOwnProperty.call(th, k)) { th[k] = v; added = true; }
     }

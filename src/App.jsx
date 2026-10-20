@@ -41,7 +41,7 @@ import { nearestBranchForZip } from './lib/branchRouting';
 import {
   PIPELINE_STAGES, PIPELINE_STATUSES, PIPELINE_CLOSED_STATUSES,
   STAGE_INCOMING, STAGE_WORKING, STAGE_SALES_REQUEST, STAGE_COMPLETED,
-  SALES_REQUEST_STATUS, WON_STATUS, LOST_STATUS,
+  SALES_REQUEST_STATUS, WON_STATUS, LOST_STATUS, renamedStatus,
   getStage, stageForView, stageOfStatus, stageOfLead, statusOptionsFor, bulkStatusOptionsFor,
   ensurePipelineStatuses, isLeadVisibleInStage, isUnassigned, completesViaSalesRequest, canCloseSalesRequest,
   DEAL_FIELDS, LOST_FIELDS, SALES_REQUEST_FIELDS, SALES_REQUEST_SECTIONS, BACK_OFFICE_FIELDS,
@@ -356,7 +356,7 @@ const STATUS_COLORS = {
   Prospect:       { bg: 'bg-sky-50',    text: 'text-sky-700',    dot: 'bg-sky-500'    },
   Want:           { bg: 'bg-cyan-50',   text: 'text-cyan-700',   dot: 'bg-cyan-500'   },
   Completed:      { bg: 'bg-emerald-50',text: 'text-emerald-700',dot: 'bg-emerald-500'},
-  'Sales Request':{ bg: 'bg-orange-50', text: 'text-orange-700', dot: 'bg-orange-500' },
+  'Sales Submittal':{ bg: 'bg-orange-50', text: 'text-orange-700', dot: 'bg-orange-500' },
   Cancelled:      { bg: 'bg-stone-100', text: 'text-stone-600',  dot: 'bg-stone-400'  },
   Dead:           { bg: 'bg-stone-200', text: 'text-stone-700',  dot: 'bg-stone-600'  },
   Won:            { bg: 'bg-emerald-50',text: 'text-emerald-700',dot: 'bg-emerald-500'},
@@ -403,9 +403,12 @@ function getWorkingDeadline(lead) {
 // Presents a legacy 'Qualified' lead as 'Working' everywhere in the app, and
 // flags it so the one-time migration can find it. `_`-prefixed fields are
 // local-only by convention here (see _score, _staleness) and never written back.
+// Same for 'Sales Request', renamed 'Sales Submittal' (LEGACY_STATUS_RENAMES).
 function normalizeLeadStatus(lead) {
-  if (!lead || lead.status !== LEGACY_WORKING_STATUS) return lead;
-  return { ...lead, status: WORKING_STATUS, _migratedFrom: LEGACY_WORKING_STATUS };
+  if (!lead) return lead;
+  const to = renamedStatus(lead.status);
+  if (to === lead.status) return lead;
+  return { ...lead, status: to, _migratedFrom: lead.status };
 }
 
 // Stored config replaces the defaults rather than merging with them, so a rename
@@ -864,7 +867,7 @@ const DEFAULT_STALENESS = {
     Prospect: 336,     // 14 days
     Pending: 168,      // 7 days
     Want: 336,         // 14 days
-    'Sales Request': 72, // 3 days for the back office to complete the submittal
+    'Sales Submittal': 72, // 3 days for the back office to complete the submittal
     Completed: null,
     Lost: null,
     Unqualified: null,
@@ -874,7 +877,7 @@ const DEFAULT_STALENESS = {
 };
 // Thresholds ensurePipelineStatuses adds to a stored config that predates them.
 const PIPELINE_STALENESS_DEFAULTS = {
-  Prospect: 336, Pending: 168, Want: 336, 'Sales Request': 72, Completed: null, Dead: null, Cancelled: null
+  Prospect: 336, Pending: 168, Want: 336, 'Sales Submittal': 72, Completed: null, Dead: null, Cancelled: null
 };
 
 function getLastActivityAt(lead) {
@@ -1232,7 +1235,7 @@ export default function BobcatIndyCRM() {
     if (currentUser?.role !== 'admin') return;
     if (migrationRan.current) return;
 
-    const stragglers = leads.filter(l => l._migratedFrom === LEGACY_WORKING_STATUS);
+    const stragglers = leads.filter(l => l._migratedFrom);
     if (stragglers.length === 0) return;
 
     migrationRan.current = true;
@@ -1241,7 +1244,7 @@ export default function BobcatIndyCRM() {
       for (const lead of stragglers) {
         try {
           await updateLeadDoc(lead.id, {
-            status: WORKING_STATUS,
+            status: lead.status,
             history: [
               ...(lead.history || []),
               {
@@ -1249,8 +1252,8 @@ export default function BobcatIndyCRM() {
                 type: 'status_change',
                 timestamp: new Date().toISOString(),
                 actor: null,
-                from: LEGACY_WORKING_STATUS,
-                to: WORKING_STATUS,
+                from: lead._migratedFrom,
+                to: lead.status,
                 systemNote: 'Status renamed'
               }
             ]
@@ -1261,7 +1264,8 @@ export default function BobcatIndyCRM() {
         }
       }
       if (done > 0) {
-        showToast(`Renamed Qualified to Working on ${done} lead${done === 1 ? '' : 's'}`, 'success');
+        const names = [...new Set(stragglers.map(l => `${l._migratedFrom} to ${l.status}`))].join(', ');
+        showToast(`Renamed ${names} on ${done} lead${done === 1 ? '' : 's'}`, 'success');
       }
     })();
   }, [currentUser?.role, leads]);
@@ -1837,11 +1841,11 @@ export default function BobcatIndyCRM() {
     if (res?.sent && res.deskRecipients > 0) {
       showToast(`Sales Submittal sent to ${res.deskRecipients} recipient${res.deskRecipients === 1 ? '' : 's'}`);
     } else if (res?.sent) {
-      showToast('Moved to Sales Request — no back-office recipients set in Settings, so only the rep was emailed', 'error');
+      showToast('Moved to Sales Submittals — no back-office recipients set in Settings, so only the rep was emailed', 'error');
     } else if (res?.reason === 'no-recipients') {
-      showToast('Moved to Sales Request — but no one was emailed. Add recipients in Settings.', 'error');
+      showToast('Moved to Sales Submittals — but no one was emailed. Add recipients in Settings.', 'error');
     } else {
-      showToast('Moved to Sales Request — but the email failed to send', 'error');
+      showToast('Moved to Sales Submittals — but the email failed to send', 'error');
     }
   };
 
@@ -6905,7 +6909,7 @@ function statusBarColor(status) {
   const map = {
     New: '#3b82f6', Contacted: '#f59e0b', Working: '#8b5cf6', Qualified: '#8b5cf6', Quoted: '#06b6d4',
     Won: '#10b981', Completed: '#10b981', Lost: '#f43f5e', Unqualified: '#a8a29e',
-    Prospect: '#0ea5e9', Pending: '#f59e0b', Want: '#06b6d4', 'Sales Request': '#f97316', Cancelled: '#a8a29e', Dead: '#57534e'
+    Prospect: '#0ea5e9', Pending: '#f59e0b', Want: '#06b6d4', 'Sales Submittal': '#f97316', Cancelled: '#a8a29e', Dead: '#57534e'
   };
   return map[status] || '#a8a29e';
 }
@@ -9374,8 +9378,8 @@ function SalesRequestModal({ lead, config, busy, onSubmit, onCancel, newLead = f
     <ModalShell label="Sales submittal" icon={ClipboardList} accent={accent} onCancel={() => { if (!busy) onCancel(); }}
       title={newLead ? 'New Sales Submittal' : 'Sales Submittal'}
       subtitle={newLead
-        ? <>For a sale that didn&rsquo;t come through the LMT. Creates the lead in Sales Request and emails the back office.</>
-        : <>Submitting moves <span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'this lead'}</span> to Sales Request and emails the back office.</>}
+        ? <>For a sale that didn&rsquo;t come through the LMT. Creates the lead in Sales Submittals and emails the back office.</>
+        : <>Submitting moves <span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'this lead'}</span> to Sales Submittals and emails the back office.</>}
       footer={<>
         <button onClick={onCancel} disabled={busy}
           className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium disabled:opacity-50">Cancel</button>

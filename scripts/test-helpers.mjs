@@ -165,27 +165,27 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('a missing status -> incoming', st(undefined) === 'incoming');
 
   // The flow only goes forward through the dropdowns.
-  const inc = opts('New'), wrk = opts('Prospect'), sr = opts('Sales Request'), done = opts('Completed');
-  check('Incoming cannot jump to Sales Request or Completed', !inc.includes('Sales Request') && !inc.includes('Completed'), inc.join(','));
+  const inc = opts('New'), wrk = opts('Prospect'), sr = opts('Sales Submittal'), done = opts('Completed');
+  check('Incoming cannot jump to Sales Request or Completed', !inc.includes('Sales Submittal') && !inc.includes('Completed'), inc.join(','));
   check('Incoming can reach Working and fall through', ['Working', 'Prospect', 'Pending', 'Want', 'Lost', 'Unqualified'].every(s => inc.includes(s)), inc.join(','));
   check('Working offers exactly Erin\'s list (+ Working, Dead, Junk)',
     JSON.stringify(wrk) === JSON.stringify(['Working', 'Prospect', 'Pending', 'Want', 'Completed', 'Lost', 'Unqualified', 'Dead', 'Junk']), wrk.join(','));
   check('Working does not go back to New', !wrk.includes('New'), wrk.join(','));
   check('Completed from Working goes via the Sales Submittal', P.completesViaSalesRequest('Pending', 'Completed'));
-  check('Completed from Sales Request is the back office closing it', !P.completesViaSalesRequest('Sales Request', 'Completed'));
+  check('Completed from Sales Request is the back office closing it', !P.completesViaSalesRequest('Sales Submittal', 'Completed'));
   check('Lost from Working is not a sale', !P.completesViaSalesRequest('Working', 'Lost'));
   check('a rep cannot close a submittal from the menu',
-    JSON.stringify(opts('Sales Request', undefined, undefined, { isAdmin: false })) === JSON.stringify(['Sales Request', 'Working', 'Cancelled']));
-  check('a rep cannot close a submittal via a direct write', !P.canCloseSalesRequest('Sales Request', 'Completed', false));
-  check('an admin can close a submittal', P.canCloseSalesRequest('Sales Request', 'Completed', true));
+    JSON.stringify(opts('Sales Submittal', undefined, undefined, { isAdmin: false })) === JSON.stringify(['Sales Submittal', 'Working', 'Cancelled']));
+  check('a rep cannot close a submittal via a direct write', !P.canCloseSalesRequest('Sales Submittal', 'Completed', false));
+  check('an admin can close a submittal', P.canCloseSalesRequest('Sales Submittal', 'Completed', true));
   check('a rep bulk menu on Sales Request has no Completed', !bulk('sales-request', undefined, undefined, { isAdmin: false }).includes('Completed'));
   check('Sales Request offers exactly Completed / Working / Cancelled',
-    JSON.stringify(sr) === JSON.stringify(['Sales Request', 'Completed', 'Working', 'Cancelled']), sr.join(','));
-  check('Completed can reopen to Working, not Sales Request', done.includes('Working') && !done.includes('Sales Request'), done.join(','));
+    JSON.stringify(sr) === JSON.stringify(['Sales Submittal', 'Completed', 'Working', 'Cancelled']), sr.join(','));
+  check('Completed can reopen to Working, not Sales Request', done.includes('Working') && !done.includes('Sales Submittal'), done.join(','));
   check('current status always offered', opts('On Hold').includes('On Hold'));
   check('custom statuses stay reachable', opts('New', [...P.PIPELINE_STATUSES, 'On Hold']).includes('On Hold'));
   for (const s of P.PIPELINE_STAGES) {
-    check(`bulk menu for ${s.id} never offers Sales Request`, !bulk(s.id).includes('Sales Request'), bulk(s.id).join(','));
+    check(`bulk menu for ${s.id} never offers Sales Request`, !bulk(s.id).includes('Sales Submittal'), bulk(s.id).join(','));
   }
   check('bulk menu for working cannot complete a sale', !bulk('working').includes('Completed'), bulk('working').join(','));
   check('bulk menu for completed can still set Completed', bulk('completed').includes('Completed'), bulk('completed').join(','));
@@ -367,6 +367,21 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('no form field is keyed `attachments`', clash.length === 0, clash.join(', '));
 }
 
+// ---- Sales Request -> Sales Submittal rename (Oct 2026) --------------------
+{
+  const P = await import('../src/lib/pipeline.js');
+  check('rename: status is Sales Submittal', P.SALES_REQUEST_STATUS === 'Sales Submittal');
+  check('rename: step is labelled Sales Submittals', P.getStage(P.STAGE_SALES_REQUEST).label === 'Sales Submittals');
+  check('rename: old status still lands in the submittal step', P.stageOfStatus('Sales Request') === P.STAGE_SALES_REQUEST);
+  check('rename: old name maps to new', P.renamedStatus('Sales Request') === 'Sales Submittal' && P.renamedStatus('Qualified') === 'Working' && P.renamedStatus('Working') === 'Working');
+  const healed = P.ensurePipelineStatuses({ statuses: ['New', 'Sales Request', 'Custom'], closedStatuses: [], staleness: { thresholds: { 'Sales Request': 48 } } });
+  check('rename: Settings drops the old status, keeps custom ones', !healed.statuses.includes('Sales Request') && healed.statuses.includes('Sales Submittal') && healed.statuses.includes('Custom'), healed.statuses.join(','));
+  check('rename: a threshold set under the old name carries over', healed.staleness.thresholds['Sales Submittal'] === 48 && !('Sales Request' in healed.staleness.thresholds));
+  const kept = P.ensurePipelineStatuses({ statuses: [], staleness: { thresholds: { 'Sales Request': 48, 'Sales Submittal': 24 } } });
+  check('rename: an explicit new-name threshold wins', kept.staleness.thresholds['Sales Submittal'] === 24);
+  check('rename: Back Office Sales Requests keep their name', !P.PIPELINE_STATUSES.includes('Sales Request'));
+}
+
 // ---- Global search ---------------------------------------------------------
 {
   const G = await import('../src/lib/search.js');
@@ -387,6 +402,29 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('search: request by customer', G.searchRequests([{ id: 'r', customerName: 'Greenfield Street Dept', requestTypes: ['Delivery'] }], 'greenfield').length === 1);
   check('search: finance by lender', G.searchFinance([{ id: 'f', customerName: 'X', admin: { lenderName: 'Wells Fargo' } }], 'wells').length === 1);
   check('search: caps results', G.searchLeads(Array.from({ length: 20 }, (_, i) => ({ id: String(i), customerName: 'Pat ' + i })), 'pat').length === 8);
+}
+
+// ---- Zapier intake rules ---------------------------------------------------
+{
+  const { createRequire } = await import('node:module');
+  const R = createRequire(import.meta.url)('../functions/intakeRules.js');
+  const branches = ['Anderson', 'Columbus', 'Ellettsville', 'Indy', 'Indy North'];
+  check('intake: branch matched ignoring case/space', R.canonical('indy  north', branches) === 'Indy North' && R.canonical('INDY', branches) === 'Indy');
+  check('intake: "Indy" does not become "Indy North"', R.canonical('Indy', branches) === 'Indy');
+  check('intake: unknown branch kept as sent', R.canonical(' Fishers ', branches) === 'Fishers');
+  check('intake: empty stays empty', R.canonical(undefined, branches) === '');
+  check('intake: status is always New', R.intakeStatus() === 'New');
+  check('intake: missing source files as Internet', R.intakeSource('', ['Internet']) === 'Internet' && R.intakeSource(undefined, []) === 'Internet');
+  check('intake: source matched to Settings spelling', R.intakeSource('gravity forms', ['Gravity Forms']) === 'Gravity Forms');
+  check('intake: default source is one of the app defaults', ['Internet'].every(x => R.DEFAULT_SOURCE === x));
+  const closed = R.closedStatusesFrom({ closedStatuses: ['Lost'] });
+  check('intake: closed list covers the pipeline even with old Settings', ['Completed', 'Lost', 'Dead', 'Unqualified', 'Cancelled'].every(x => closed.includes(x)));
+  check('intake: repeat joins an open lead', R.canLinkResubmission({ status: 'Working' }, closed) && R.canLinkResubmission({ status: 'Sales Request' }, closed));
+  check('intake: repeat never joins a closed lead', !R.canLinkResubmission({ status: 'Completed' }, closed) && !R.canLinkResubmission({ status: 'Dead' }, closed));
+  check('intake: repeat spam stays in Junk', R.canLinkResubmission({ status: 'Junk' }, closed));
+  check('intake: every pipeline closed status is covered', ['Completed', 'Lost', 'Unqualified', 'Dead', 'Cancelled'].every(x => R.CLOSED_STATUSES.includes(x)));
+  const fnSrc = readFileSync(join(root, 'functions/index.js'), 'utf8');
+  check('intake: the endpoint uses the rules', /intakeStatus\(\)/.test(fnSrc) && /closedStatusesFrom\(appConfig\)/.test(fnSrc) && !/'Google Sheet'/.test(fnSrc));
 }
 
 console.log('');
