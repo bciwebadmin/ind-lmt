@@ -1614,7 +1614,8 @@ export default function BobcatIndyCRM() {
       // admin can pass them on rather than losing them.
       console.error('Welcome email failed:', emailErr);
       window.alert(
-        `User created, but the welcome email could not be sent.\n\n` +
+        `User created, but the welcome email could not be sent.\n` +
+        `Reason: ${welcomeEmailReason(emailErr)}\n\n` +
         `Share these with ${name} manually:\n\n` +
         `Email:    ${email}\n` +
         `Password: ${password}`
@@ -3005,6 +3006,17 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userR
       </aside>
     </>
   );
+}
+
+// Why a welcome email failed, in words an admin can act on. The callable's
+// message carries Resend's own error (e.g. an unverified sending domain).
+function welcomeEmailReason(err) {
+  const code = String((err && err.code) || '').replace(/^functions\//, '');
+  const msg = (err && err.message) || '';
+  if (code === 'not-found') return 'the sendWelcomeEmail function is not deployed.';
+  if (code === 'permission-denied') return 'only admins can send welcome emails.';
+  if (code === 'unauthenticated') return 'you are signed out — sign in again.';
+  return msg ? `${msg} (check: firebase functions:log --only sendWelcomeEmail)` : 'unknown — check: firebase functions:log --only sendWelcomeEmail';
 }
 
 /* ===================== TOP BAR ===================== */
@@ -5259,7 +5271,8 @@ function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, cur
         // admin can share manually, then carry on.
         console.error('Welcome email failed:', emailErr);
         window.alert(
-          `User created successfully, but the welcome email could not be sent.\n\n` +
+          `User created successfully, but the welcome email could not be sent.\n` +
+          `Reason: ${welcomeEmailReason(emailErr)}\n\n` +
           `Share these credentials with ${trimmedName} manually:\n\n` +
           `Email:    ${trimmedEmail}\n` +
           `Password: ${password}\n\n` +
