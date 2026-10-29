@@ -3604,6 +3604,9 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
   // A rep sees leads they entered even after handing them off; those rows are
   // watch-only (no bulk select, no inline assign/status).
   const rowReadOnly = (l) => readOnly || (watchOnly ? watchOnly(l) : false);
+  // Temperature only matters while a lead is being worked: New and Working.
+  // Prospect, Wanted and Completed have no temperature column, filter or chips.
+  const showTemp = stage === STAGE_INCOMING || stage === STAGE_WORKING;
   // Falls back to a plain write if a caller didn't pass the gate, so a missing
   // prop degrades to the old behaviour rather than throwing on first click.
   const changeStatus = onStatusChange || ((id, status) => onUpdate(id, { status }));
@@ -3796,7 +3799,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
         const type = PROSPECT_TYPES.find(t => t.id === prospectType);
         if (type && l.status !== type.status) return false;
       }
-      if (filterTemp !== 'All' && (filterTemp === 'Not set' ? l._temp !== '' : l._temp !== filterTemp)) return false;
+      if (showTemp && filterTemp !== 'All' && (filterTemp === 'Not set' ? l._temp !== '' : l._temp !== filterTemp)) return false;
       if (filterStale === 'Stale' && !l._staleness.stale) return false;
       if (filterStale === 'Fresh' && l._staleness.stale) return false;
       if (search.trim()) {
@@ -3821,7 +3824,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
       return 0;
     });
     return result;
-  }, [scored, search, filterStatus, filterAssigned, filterSource, filterSubmitter, filterBranch, filterTemp, filterStale, sortBy, myUserId, stage, prospectType]);
+  }, [scored, search, filterStatus, filterAssigned, filterSource, filterSubmitter, filterBranch, filterTemp, filterStale, sortBy, myUserId, stage, prospectType, showTemp]);
 
   // Pagination derivations. When filters change, the current page may no longer
   // exist (e.g. was on page 5, filter narrows to only 2 pages). Clamp back to 1
@@ -3911,7 +3914,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
         </div>
       )}
       {/* Quick links: temperature first (set by the rep), then age and owner. */}
-      {stage && (() => {
+      {showTemp && (() => {
         const base = stage === STAGE_PROSPECT
           ? scored.filter(l => l.status === (PROSPECT_TYPES.find(t => t.id === prospectType) || {}).status)
           : scored;
@@ -3948,7 +3951,9 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
           {stage !== STAGE_PROSPECT && (
             <FilterSelect value={filterStatus}   onChange={setFilterStatus}   options={statusFilterOptions} label="Status" />
           )}
-          <FilterSelect value={filterTemp}     onChange={setFilterTemp}     options={['All', ...TEMPERATURES, 'Not set']} label="Temperature" />
+          {showTemp && (
+            <FilterSelect value={filterTemp}     onChange={setFilterTemp}     options={['All', ...TEMPERATURES, 'Not set']} label="Temperature" />
+          )}
           <FilterSelect value={filterStale}    onChange={setFilterStale}    options={['All', 'Stale', 'Fresh']} label="Age" />
           {!myUserId && (
             <FilterSelect
@@ -4079,6 +4084,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
                 config={config}
                 readOnly={rowReadOnly(lead)}
                 watchOnly={!readOnly && rowReadOnly(lead)}
+                showTemp={showTemp}
                 isAdmin={isAdmin}
                 onStatusChange={changeStatus}
                 isSelected={selected.has(lead.id)}
@@ -4102,7 +4108,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
                       </th>
                     )}
                     <SortHeader label="Customer"  field="customerName"  sortBy={sortBy} onClick={toggleSort} />
-                    <SortHeader label="Temp"      field="temperature"   sortBy={sortBy} onClick={toggleSort} />
+                    {showTemp && <SortHeader label="Temp" field="temperature" sortBy={sortBy} onClick={toggleSort} />}
                     <SortHeader label="Contact"   field="contactEmail"  sortBy={sortBy} onClick={toggleSort} />
                     <SortHeader label="Source"    field="leadSource"    sortBy={sortBy} onClick={toggleSort} />
                     <SortHeader label="Branch"    field="branch"        sortBy={sortBy} onClick={toggleSort} />
@@ -4158,11 +4164,13 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
                           </div>
                         )}
                       </td>
-                      <td className="px-3 py-3" onClick={e => e.stopPropagation()}>
-                        {rowReadOnly(lead)
-                          ? <TemperatureBadge value={lead._temp}/>
-                          : <InlineTemperatureSelect value={lead._temp} onChange={t => onUpdate(lead.id, { temperature: t })}/>}
-                      </td>
+                      {showTemp && (
+                        <td className="px-3 py-3" onClick={e => e.stopPropagation()}>
+                          {rowReadOnly(lead)
+                            ? <TemperatureBadge value={lead._temp}/>
+                            : <InlineTemperatureSelect value={lead._temp} onChange={t => onUpdate(lead.id, { temperature: t })}/>}
+                        </td>
+                      )}
                       <td className="px-3 py-3 cursor-pointer" onClick={() => onSelect(lead)}>
                         {lead.contactEmail && <div className="text-stone-700 truncate max-w-[200px]">{lead.contactEmail}</div>}
                         {lead.phone && <div className="text-xs text-stone-500 font-mono mt-0.5">{lead.phone}</div>}
@@ -4342,7 +4350,7 @@ function PaginationControls({ page, totalPages, pageSize, totalCount, onPageChan
 }
 
 /* ===================== MOBILE LEAD CARD ===================== */
-function MobileLeadCard({ lead, config, isSelected, onSelect, onToggleSelect, onUpdate, onStatusChange, readOnly, watchOnly = false, isAdmin = false }) {
+function MobileLeadCard({ lead, config, isSelected, onSelect, onToggleSelect, onUpdate, onStatusChange, readOnly, watchOnly = false, isAdmin = false, showTemp = true }) {
   return (
     <div
       onClick={onSelect}
@@ -4383,11 +4391,13 @@ function MobileLeadCard({ lead, config, isSelected, onSelect, onToggleSelect, on
                 );
               })()}
             </div>
-            <div onClick={(e) => e.stopPropagation()} className="shrink-0">
-              {readOnly
-                ? <TemperatureBadge value={lead._temp}/>
-                : <InlineTemperatureSelect value={lead._temp} onChange={t => onUpdate(lead.id, { temperature: t })}/>}
-            </div>
+            {showTemp && (
+              <div onClick={(e) => e.stopPropagation()} className="shrink-0">
+                {readOnly
+                  ? <TemperatureBadge value={lead._temp}/>
+                  : <InlineTemperatureSelect value={lead._temp} onChange={t => onUpdate(lead.id, { temperature: t })}/>}
+              </div>
+            )}
           </div>
           {lead.companyName && (
             <div className="text-xs text-stone-500 truncate">{lead.companyName}</div>
@@ -9121,7 +9131,7 @@ function StageHomeView({ stageLeads, config, currentUser, onOpen, openRequestCou
                   <ArrowRight size={18} className="text-stone-300 group-hover:text-brand-600 transition-colors mb-1"/>
                 </div>
                 <div className="flex flex-wrap gap-1.5 mt-3 min-h-[1.5rem]">
-                  {hot > 0 && stage.id !== STAGE_COMPLETED && <HomeChip className="bg-rose-50 text-rose-700">{hot} hot</HomeChip>}
+                  {hot > 0 && (stage.id === STAGE_INCOMING || stage.id === STAGE_WORKING) && <HomeChip className="bg-rose-50 text-rose-700">{hot} hot</HomeChip>}
                   {stale > 0 && <HomeChip className="bg-amber-50 text-amber-700">{stale} stale</HomeChip>}
                   {stage.id === STAGE_INCOMING && unassigned > 0 && (
                     <HomeChip className="bg-stone-100 text-stone-700">{unassigned} unassigned</HomeChip>
