@@ -44,6 +44,7 @@ import {
   SALES_REQUEST_STATUS, WON_STATUS, LOST_STATUS, renamedStatus,
   NEW_STATUS, PENDING_STATUS, PROSPECT_STATUS, WANTED_STATUS, PROSPECT_TYPES, PROSPECT_GROUP_STATUSES, entersProspectGroup,
   TEMPERATURES, leadTemperature, SUBMITTAL_OPEN, SUBMITTAL_COMPLETE, submittalStatus, prospectKeywordList,
+  prospectTags, hasAllTags, toggleKeyword, tagKey, TAG_SUGGESTIONS,
   getStage, stageForView, stageOfStatus, stageOfLead, statusOptionsFor, bulkStatusOptionsFor,
   ensurePipelineStatuses, isLeadVisibleInStage, isUnassigned, completesViaSalesRequest, canCloseSalesRequest,
   DEAL_FIELDS, LOST_FIELDS, SALES_REQUEST_FIELDS, SALES_REQUEST_SECTIONS, BACK_OFFICE_FIELDS,
@@ -3621,6 +3622,9 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
   const [filterTemp, setFilterTemp] = useState('All');
   // The Prospect tab's type buttons (Prospect is the default view).
   const [prospectType, setProspectType] = useState('prospect');
+  // Prospect tab tag filter: show only leads carrying every selected tag.
+  const [tagFilter, setTagFilter] = useState([]);
+  const toggleTagFilter = (t) => setTagFilter(f => f.some(x => tagKey(x) === tagKey(t)) ? f.filter(x => tagKey(x) !== tagKey(t)) : [...f, t]);
   const [filterStale, setFilterStale] = useState('All');
   const [sortBy, setSortBy] = useState(
     { field: 'createdDate', dir: 'desc' }
@@ -3798,6 +3802,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
       if (stage === STAGE_PROSPECT) {
         const type = PROSPECT_TYPES.find(t => t.id === prospectType);
         if (type && l.status !== type.status) return false;
+        if (!hasAllTags(l, tagFilter)) return false;
       }
       if (showTemp && filterTemp !== 'All' && (filterTemp === 'Not set' ? l._temp !== '' : l._temp !== filterTemp)) return false;
       if (filterStale === 'Stale' && !l._staleness.stale) return false;
@@ -3824,7 +3829,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
       return 0;
     });
     return result;
-  }, [scored, search, filterStatus, filterAssigned, filterSource, filterSubmitter, filterBranch, filterTemp, filterStale, sortBy, myUserId, stage, prospectType, showTemp]);
+  }, [scored, search, filterStatus, filterAssigned, filterSource, filterSubmitter, filterBranch, filterTemp, filterStale, sortBy, myUserId, stage, prospectType, showTemp, tagFilter]);
 
   // Pagination derivations. When filters change, the current page may no longer
   // exist (e.g. was on page 5, filter narrows to only 2 pages). Clamp back to 1
@@ -3913,6 +3918,42 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
           })}
         </div>
       )}
+      {/* Prospect tags: "show me every prospect interested in a CTL". Counts are
+          within the selected type; tags come from keywords and Deal machines. */}
+      {stage === STAGE_PROSPECT && (() => {
+        const typeStatus = (PROSPECT_TYPES.find(t => t.id === prospectType) || {}).status;
+        const counts = new Map();
+        for (const l of visibleLeads) {
+          if (l.status !== typeStatus) continue;
+          for (const t of prospectTags(l)) {
+            const k = tagKey(t);
+            const cur = counts.get(k) || { label: t, n: 0 };
+            cur.n++; counts.set(k, cur);
+          }
+        }
+        for (const t of tagFilter) if (!counts.has(tagKey(t))) counts.set(tagKey(t), { label: t, n: 0 });
+        const tags = [...counts.entries()].sort((a, b) => b[1].n - a[1].n || a[1].label.localeCompare(b[1].label));
+        if (!tags.length) return (
+          <div className="text-xs text-stone-500 mb-3">No tags yet. Tag prospects with what they&rsquo;re interested in (CTL, Mini Ex…) to filter by it here.</div>
+        );
+        return (
+          <div className="flex items-center gap-2 flex-wrap mb-3" aria-label="Filter by tag">
+            <span className="text-[11px] uppercase tracking-widest font-semibold text-stone-500 mr-1">Interested in</span>
+            {tags.map(([k, { label, n }]) => {
+              const on = tagFilter.some(x => tagKey(x) === k);
+              return (
+                <button key={k} type="button" aria-pressed={on} onClick={() => toggleTagFilter(label)}
+                  className={`px-3 py-1.5 rounded-full border text-xs font-medium inline-flex items-center gap-1.5 ${on ? 'bg-sky-700 border-sky-700 text-white' : 'bg-white border-sky-200 text-sky-800 hover:border-sky-400'}`}>
+                  {label}<span className={`font-mono ${on ? 'text-sky-100' : 'text-sky-600'}`}>{n}</span>
+                </button>
+              );
+            })}
+            {tagFilter.length > 0 && (
+              <button type="button" onClick={() => setTagFilter([])} className="text-xs text-stone-600 hover:text-stone-900 underline ml-1">Clear</button>
+            )}
+          </div>
+        );
+      })()}
       {/* Quick links: temperature first (set by the rep), then age and owner. */}
       {showTemp && (() => {
         const base = stage === STAGE_PROSPECT
@@ -4151,10 +4192,11 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
                           <div className="text-xs text-stone-500 truncate max-w-[220px]">{lead.companyName}</div>
                         )}
                         {lead.zip && <div className="text-xs text-stone-500 font-mono mt-0.5">ZIP {lead.zip}</div>}
-                        {prospectKeywordList(lead).length > 0 && (
-                          <div className="flex flex-wrap gap-1 mt-1">
-                            {prospectKeywordList(lead).map(k => (
-                              <span key={k} className="text-[11px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-100">{k}</span>
+                        {stage === STAGE_PROSPECT && prospectTags(lead).length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1" onClick={e => e.stopPropagation()}>
+                            {prospectTags(lead).map(k => (
+                              <button key={k} type="button" onClick={() => toggleTagFilter(k)} title={`Show prospects tagged ${k}`}
+                                className="text-[11px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-100 hover:border-sky-400">{k}</button>
                             ))}
                           </div>
                         )}
@@ -5025,11 +5067,8 @@ function AddLeadView({ config, onAdd, currentUser, preset = null }) {
 
         {PROSPECT_GROUP_STATUSES.includes(form.status) && (
           <div className="mt-4">
-            <Field label="Keywords">
-              <input type="text" value={form.prospectKeywords} onChange={e => update('prospectKeywords', e.target.value)}
-                placeholder="e.g. Cat, CTL, needs trailer"
-                className="w-full px-3 py-2 border border-stone-200 rounded-md focus:outline-none focus:border-brand-500 text-sm"/>
-              <div className="text-[11px] text-stone-500 mt-1">Separate with commas. Search and the Prospect tab find prospects by these.</div>
+            <Field label="Interested in (tags)">
+              <TagInput value={form.prospectKeywords} onChange={v => update('prospectKeywords', v)}/>
             </Field>
           </div>
         )}
@@ -8288,7 +8327,7 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
                 </Section>
               </div>
             )}
-            {(PROSPECT_GROUP_STATUSES.includes(lead.status) || lead.prospectKeywords) && (
+            {(PROSPECT_GROUP_STATUSES.includes(lead.status) || lead.status === WANTED_STATUS || lead.prospectKeywords) && (
               <div className={card}><ProspectKeywordsSection lead={lead} onUpdate={onUpdate}/></div>
             )}
             {leadStage !== 'junk' && <div className={card}><DealSection lead={lead} onUpdate={onUpdate}/></div>}
@@ -9429,11 +9468,8 @@ function LostDealModal({ lead, status = LOST_STATUS, onSubmit, onCancel }) {
         <button onClick={onCancel} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium">Cancel</button>
         <button onClick={submit} className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white text-sm font-semibold rounded-md">Mark {status}</button>
       </>}>
-      <Field label="Keywords">
-        <input value={form.prospectKeywords} onChange={e => setForm(x => ({ ...x, prospectKeywords: e.target.value }))}
-          placeholder="e.g. Cat, CTL, needs trailer" aria-label="Keywords"
-          className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:border-brand-500"/>
-        <div className="text-[11px] text-stone-500 mt-1">Separate with commas. Search and the Prospect tab find leads by these.</div>
+      <Field label="Interested in (tags)">
+        <TagInput value={form.prospectKeywords} onChange={v => setForm(x => ({ ...x, prospectKeywords: v }))}/>
       </Field>
       {isLost && LOST_FIELDS.map(f => (
         <Field key={f.key} label={f.label} required={f.required} error={errors[f.key]}>
@@ -9450,36 +9486,64 @@ function ProspectKeywordsSection({ lead, onUpdate }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(lead.prospectKeywords || '');
   useEffect(() => { setDraft(lead.prospectKeywords || ''); setEditing(false); }, [lead.id, lead.prospectKeywords]);
-  const words = prospectKeywordList(lead);
+  const typed = new Set(prospectKeywordList(lead).map(tagKey));
+  const tags = prospectTags(lead);
   return (
     <Section title={
       <span className="flex items-center justify-between w-full">
-        <span>Keywords</span>
+        <span>Interested in</span>
         {!editing && (
           <button onClick={() => setEditing(true)} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
-            <Edit3 size={11}/> {words.length ? 'Edit' : 'Add keywords'}
+            <Edit3 size={11}/> {tags.length ? 'Edit tags' : 'Add tags'}
           </button>
         )}
       </span>
     }>
       {editing ? (
-        <div className="flex gap-2">
-          <input value={draft} onChange={e => setDraft(e.target.value)} autoFocus aria-label="Keywords"
-            placeholder="e.g. Cat, CTL, needs trailer"
-            className="flex-1 px-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:border-brand-500"/>
-          <button onClick={() => { onUpdate(lead.id, { prospectKeywords: draft.trim() }); setEditing(false); }}
-            className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-md">Save</button>
-          <button onClick={() => { setDraft(lead.prospectKeywords || ''); setEditing(false); }}
-            className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-xs">Cancel</button>
+        <div className="space-y-2">
+          <TagInput value={draft} onChange={setDraft} autoFocus/>
+          <div className="flex gap-2">
+            <button onClick={() => { onUpdate(lead.id, { prospectKeywords: draft.trim() }); setEditing(false); }}
+              className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-md">Save</button>
+            <button onClick={() => { setDraft(lead.prospectKeywords || ''); setEditing(false); }}
+              className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-xs">Cancel</button>
+          </div>
         </div>
-      ) : words.length ? (
+      ) : tags.length ? (
         <div className="flex flex-wrap gap-1.5">
-          {words.map(k => <span key={k} className="text-xs px-2 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-100">{k}</span>)}
+          {tags.map(k => (
+            <span key={k} title={typed.has(tagKey(k)) ? undefined : 'From Machine to Purchase in the Deal section'}
+              className={`text-xs px-2 py-0.5 rounded border ${typed.has(tagKey(k)) ? 'bg-sky-50 text-sky-700 border-sky-100' : 'bg-white text-sky-700 border-sky-200 border-dashed'}`}>{k}</span>
+          ))}
         </div>
       ) : (
-        <div className="text-xs text-stone-500">What this prospect is after — makes them easy to find later.</div>
+        <div className="text-xs text-stone-500">Tag what they&rsquo;re interested in (CTL, Mini Ex…) so they&rsquo;re easy to find on the Prospect tab.</div>
       )}
     </Section>
+  );
+}
+
+// Comma-separated tags with one-tap suggestions, so everyone tags the same way.
+function TagInput({ value, onChange, autoFocus = false }) {
+  const have = new Set(String(value || '').split(/[,;\n]+/).map(tagKey).filter(Boolean));
+  return (
+    <div>
+      <input value={value || ''} onChange={e => onChange(e.target.value)} autoFocus={autoFocus} aria-label="Tags"
+        placeholder="e.g. CTL, Cat, needs trailer"
+        className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:border-brand-500"/>
+      <div className="flex flex-wrap gap-1.5 mt-2">
+        {TAG_SUGGESTIONS.map(t => {
+          const on = have.has(tagKey(t));
+          return (
+            <button key={t} type="button" aria-pressed={on} onClick={() => onChange(toggleKeyword(value, t))}
+              className={`text-xs px-2 py-1 rounded-full border ${on ? 'bg-sky-700 border-sky-700 text-white' : 'bg-white border-stone-200 text-stone-700 hover:border-sky-400'}`}>
+              {on ? '✓ ' : '+ '}{t}
+            </button>
+          );
+        })}
+      </div>
+      <div className="text-[11px] text-stone-500 mt-1">Tap a suggestion or type your own, separated by commas.</div>
+    </div>
   );
 }
 

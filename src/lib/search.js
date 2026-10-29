@@ -1,6 +1,8 @@
 // Global search (the box in the top bar). Pure, so scripts/test-helpers.mjs
 // can import it. The caller passes only what the user may see.
 
+import { prospectTags } from './pipeline.js';
+
 const norm = (s) => String(s ?? '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '');
 const digits = (s) => String(s ?? '').replace(/\D/g, '');
 
@@ -40,7 +42,7 @@ function run(items, q, fieldsOf, primaryOf, dateOf, limit) {
 
 export function searchLeads(leads, q, limit = 8) {
   return run(leads, q,
-    (l) => [l.customerName, l.companyName, l.contactEmail, l.phone, l.zip, l.branch, l.prospectKeywords,
+    (l) => [l.customerName, l.companyName, l.contactEmail, l.phone, l.zip, l.branch, prospectTags(l).join(' '),
             l.deal && l.deal.model, l.salesRequest && l.salesRequest.customerName],
     (l) => l.customerName || l.companyName,
     (l) => l.createdDate || l.dateSubmitted,

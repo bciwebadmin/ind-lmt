@@ -512,6 +512,18 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('reminders: scheduled weekdays 8am Indianapolis', /schedule: '0 8 \* \* 1-5'/.test(fn) && /timeZone: 'America\/Indiana\/Indianapolis'/.test(fn));
 }
 
+// ---- Prospect tags -------------------------------------------------------------
+{
+  const P = await import('../src/lib/pipeline.js');
+  const G = await import('../src/lib/search.js');
+  const l = { prospectKeywords: 'ctl, cat, needs trailer', deal: { machines: ['Compact Track Loader', 'Mini Excavator', 'Other'] } };
+  check('tags: typed + Deal machines, deduped, standard spelling', JSON.stringify(P.prospectTags(l)) === JSON.stringify(['CTL', 'Cat', 'needs trailer', 'Mini Ex']), JSON.stringify(P.prospectTags(l)));
+  check('tags: a Deal machine alone files under its tag', JSON.stringify(P.prospectTags({ deal: { machines: ['Skid Steer Loader'] } })) === JSON.stringify(['SSL']));
+  check('tags: filter needs every selected tag, any case', P.hasAllTags(l, ['ctl', 'MINI EX']) && !P.hasAllTags(l, ['CTL', 'SSL']) && P.hasAllTags(l, []));
+  check('tags: suggestion chip toggles on and off', P.toggleKeyword('Cat', 'CTL') === 'Cat, CTL' && P.toggleKeyword('Cat, ctl', 'CTL') === 'Cat');
+  check('tags: search finds a prospect by machine tag', G.searchLeads([{ id: 'x', customerName: 'Zed', deal: { machines: ['Compact Track Loader'] } }], 'ctl').length === 1);
+}
+
 // ---- To Do hub ------------------------------------------------------------------
 {
   const T = await import('../src/lib/todo.js');

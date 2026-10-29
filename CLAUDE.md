@@ -158,9 +158,14 @@ three separate processes that can be tied together.** Leads live in five tabs:
   submittal; that never changes the lead's status.
 - **Prospect** holds manual prospects plus leads set to Dead, Unqualified or
   Lost, with type buttons (`PROSPECT_TYPES`, Prospect is default). Moving into
-  that group asks for **keywords** (`lead.prospectKeywords`, `LostDealModal`,
-  which also asks Lost's reason). Keywords are searchable in the tab and in
-  global search.
+  that group asks for **tags** — what they're interested in
+  (`lead.prospectKeywords`, comma-separated; `TagInput` offers
+  `TAG_SUGGESTIONS` as one-tap chips; `LostDealModal` also asks Lost's
+  reason). `prospectTags()` = typed tags + Deal "Machine to Purchase"
+  (`MACHINE_TAGS`: Compact Track Loader → CTL…), case-insensitive, standard
+  spelling. The Prospect tab has an **Interested in** tag bar (counts per
+  type; selecting tags shows leads carrying all of them) and row tags are
+  clickable filters. Global search matches tags too.
 - Only Completed and Junk are "closed" (`PIPELINE_CLOSED_STATUSES`): archived
   after 30 days, never stale. Dead / Unqualified / Lost stay live in Prospect.
 - Status moves are free between tabs (`statusOptionsFor`); entering Working

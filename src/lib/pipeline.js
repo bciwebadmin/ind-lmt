@@ -299,6 +299,52 @@ export function prospectKeywordList(lead) {
   return String(raw).split(/[,;\n]+/).map(s => s.trim()).filter(Boolean);
 }
 
+// Tags a prospect is filed under: the keywords a rep typed, plus the machines
+// picked in the Deal section ("Compact Track Loader" files as CTL), so a
+// prospect marked CTL there shows under CTL even if nobody typed it. Matching
+// ignores case; the first spelling seen is the one shown.
+export const MACHINE_TAGS = {
+  'Compact Track Loader': 'CTL', 'Mini Excavator': 'Mini Ex', 'Skid Steer Loader': 'SSL',
+  'Mini Track Loader': 'MTL', 'Zero-Turn Mower': 'Zero-Turn', 'Compact Tractor': 'Compact Tractor',
+  'Attachment': 'Attachment'
+};
+// One-tap suggestions wherever tags are entered, so reps tag the same way.
+export const TAG_SUGGESTIONS = ['CTL', 'Mini Ex', 'SSL', 'MTL', 'Zero-Turn', 'Compact Tractor', 'Attachment', 'Trailer', 'Used', 'Rental', 'Cat', 'Kubota', 'Deere'];
+
+export function tagKey(t) {
+  return String(t || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+export function prospectTags(lead) {
+  const out = [];
+  const seen = new Set();
+  const add = (t) => {
+    const k = tagKey(t);
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    out.push(TAG_SUGGESTIONS.find(x => tagKey(x) === k) || String(t).trim());
+  };
+  prospectKeywordList(lead).forEach(add);
+  const machines = (lead && lead.deal && Array.isArray(lead.deal.machines)) ? lead.deal.machines : [];
+  machines.forEach(m => { if (MACHINE_TAGS[m]) add(MACHINE_TAGS[m]); });
+  return out;
+}
+
+// Does the lead carry every one of these tags?
+export function hasAllTags(lead, tags) {
+  if (!tags || !tags.length) return true;
+  const mine = new Set(prospectTags(lead).map(tagKey));
+  return tags.every(t => mine.has(tagKey(t)));
+}
+
+// Toggle a tag in a comma-separated keyword string (for suggestion chips).
+export function toggleKeyword(raw, tag) {
+  const list = String(raw || '').split(/[,;\n]+/).map(s => s.trim()).filter(Boolean);
+  const k = tagKey(tag);
+  const has = list.some(x => tagKey(x) === k);
+  return (has ? list.filter(x => tagKey(x) !== k) : [...list, tag]).join(', ');
+}
+
 /* ===================== DEAL DETAILS ===================== */
 // What the rep records while working a lead. Taken from the columns Indy's deal
 // tracker shares across its Want / Prospect / Pending / Completed / Lost views
