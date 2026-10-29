@@ -44,6 +44,18 @@ function daysSince(iso, now = Date.now()) {
   return t === null ? null : Math.floor((now - t) / DAY);
 }
 
+// A follow-up date the rep set on a lead (lead.followUp.date, YYYY-MM-DD) is
+// due on that day and every day after until they mark it done.
+function followUpDateDue(lead, todayYmd) {
+  const f = lead && lead.followUp;
+  return !!(f && f.date && f.date <= todayYmd && isAssigned(lead) && lead.status !== 'Junk');
+}
+
+// Today's date in Indianapolis, as YYYY-MM-DD.
+function indyToday(now = Date.now()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Indiana/Indianapolis', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
+}
+
 // [{id, ...lead}] -> { [assigneeId]: [lead, …] }
 function groupByAssignee(leads) {
   const out = {};
@@ -51,4 +63,4 @@ function groupByAssignee(leads) {
   return out;
 }
 
-module.exports = { needsContactReminder, needsFollowUpReminder, completedAtOf, daysSince, groupByAssignee };
+module.exports = { needsContactReminder, needsFollowUpReminder, followUpDateDue, indyToday, completedAtOf, daysSince, groupByAssignee };

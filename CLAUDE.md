@@ -190,6 +190,27 @@ three separate processes that can be tied together.** Leads live in five tabs:
   Trade-Ins, Finance, **Quotes** (the lead's files — renamed from Files),
   Notes & Activity.
 
+## To Do hub (Oct 2026)
+
+`src/lib/todo.js` (pure, tested) builds the list; `TodoView` shows it, first
+item in the sidebar with a count. A rep sees items on leads they own (primary):
+**follow-ups due** (`lead.followUp = { date, note }`, set on the lead page —
+Done clears it, Tomorrow / Next week snooze it), **make contact** (in New,
+assigned 12h+), **missing paperwork** (open submittals), **working deadline
+passed**, **30-day check-in** (Completed 30–90 days, until
+`postSaleFollowUpDoneAt`). Admins add a **Back Office** section (open
+submittals, trade-ins awaiting approval, requests due/overdue, finance audit
+flags) and a rep filter (me / every rep / one rep).
+
+Sales deal paperwork: `SUBMITTAL_DOCS` — signed purchase agreement, credit
+application (financed deals only), customer ID / tax exemption, delivery /
+warranty forms. Received = a lead attachment with that `docType` (uploaded from
+the checklist on the Sales Submittal tab) or a paper-copy tick
+(`salesRequest.docs[key].receivedAt`).
+
+The morning email (`dailyLeadReminders`) also lists follow-up dates due
+(toggle `notifications.followUpDateRemindersEnabled`).
+
 ## Routing and reminders (Oct 2026)
 
 `functions/routingRules.js` (pure, tested) decides; `resolveLeadRouting` in

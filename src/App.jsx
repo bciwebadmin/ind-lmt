@@ -56,6 +56,7 @@ import {
   ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_FILES, ATTACHMENT_ACCEPT, checkAttachment, formatBytes
 } from './lib/pipeline';
 import { searchAll } from './lib/search';
+import { buildTodos, TODO_SECTIONS, submittalDocStatus, SUBMITTAL_DOCS, ymd as todayLocalYmd, dueLabel } from './lib/todo';
 import { uploadAttachments, attachmentUrl, deleteAttachmentFile } from './lib/attachments';
 
 const DEFAULT_CONFIG = {
@@ -1020,7 +1021,7 @@ export default function BobcatIndyCRM() {
     // Allow ?view=users or ?view=leads etc. via URL — used by email notifications
     try {
       const requested = new URLSearchParams(window.location.search).get('view');
-      const valid = [HOME_VIEW, ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings'];
+      const valid = [HOME_VIEW, 'todo', ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings'];
       if (requested && valid.includes(requested)) return requested;
       if (requested && MOVED_VIEWS[requested]) return MOVED_VIEWS[requested][0];
     } catch { /* ignore */ }
@@ -1392,12 +1393,34 @@ export default function BobcatIndyCRM() {
     goTo(kind === 'tradeIns' ? 'trade-ins' : kind);
   };
 
+  // To Do: the viewer's own items (+ back office for admins), for the sidebar
+  // count. The page itself recomputes with its rep filter.
+  const todoCount = useMemo(() => {
+    if (!currentUser) return 0;
+    return buildTodos({ leads: searchScope.leads, records: visibleRecords, repId: currentUser.id,
+      backOffice: currentUser.role === 'admin', today: todayLocalYmd(), now: Date.now() }).length;
+  }, [searchScope, visibleRecords, currentUser]);
+
+  // Open what a To Do item is about: a lead (on the right tab) or a record.
+  const openTodo = (item) => {
+    if (item.recordKind) {
+      const rec = (records[item.recordKind] || []).find(r => r.id === item.recordId);
+      if (rec) openRecordFromSearch(item.recordKind, rec);
+      return;
+    }
+    const lead = leads.find(l => l.id === item.leadId);
+    if (!lead) return;
+    const tab = ['paperwork', 'submittal'].includes(item.section) ? 'submittal' : null;
+    setFocusRecord(tab ? { kind: tab, id: lead.id, leadId: lead.id } : null);
+    setSelectedLead(lead);
+  };
+
   // Where a given lead lives, for "take me to it" navigation after adding one.
   // "Back to …" on the lead page names the list underneath it.
   const backLabel = (() => {
     const st = PIPELINE_STAGES.find(x => x.view === view);
     if (st) return st.label;
-    return ({ [HOME_VIEW]: 'Dashboards', requests: 'Sales Requests', finance: 'Finance', 'trade-ins': 'Trade-Ins',
+    return ({ [HOME_VIEW]: 'Dashboard', todo: 'To Do', requests: 'Sales Requests', finance: 'Finance', 'trade-ins': 'Trade-Ins',
       reports: 'Reports', users: 'Users', settings: 'Settings', add: 'Add Lead' })[view] || 'list';
   })();
 
@@ -1891,9 +1914,13 @@ export default function BobcatIndyCRM() {
   // ------------- ATTACHMENTS -------------
   // Upload files for a lead ('leads'), request or trade-in and record them on
   // that document. category tags lead files that belong to the Sales Submittal.
-  const attachFiles = async (collectionName, id, files, category) => {
+  // `extra` is merged into each file record — e.g. { docType } for a
+  // paperwork upload, so the Sales Submittal checklist can tick it off.
+  const attachFiles = async (collectionName, id, files, category, extra = null) => {
     if (!files || !files.length || !currentUser) return true;
-    const { done, failed } = await uploadAttachments(`${collectionName}/${id}`, files, { uploadedBy: currentUser.id, category });
+    const up = await uploadAttachments(`${collectionName}/${id}`, files, { uploadedBy: currentUser.id, category });
+    const failed = up.failed;
+    const done = extra ? up.done.map(r => ({ ...r, ...extra })) : up.done;
     try {
       await addAttachmentRecords(collectionName, id, done);
     } catch (e) {
@@ -2339,6 +2366,7 @@ export default function BobcatIndyCRM() {
         <Sidebar
           view={view} setView={goTo}
           stageCounts={Object.fromEntries(PIPELINE_STAGES.map(s => [s.id, stageLeads[s.id].length]))}
+          todoCount={todoCount}
           backOfficeCounts={{ submittals: openSubmittalCount, requests: openRequestCount, finance: openFinanceCount, tradeIns: pendingTradeInCount }}
           userRole={currentUser.role}
           pendingCount={accessRequests.length}
@@ -2392,7 +2420,7 @@ export default function BobcatIndyCRM() {
           onUpdateRequest={updateRequest}
           onUpdateRecord={updateRecord}
           onNewRecord={(kind, leadId) => setRecordPrompt({ kind, leadId })}
-          onAddLeadFiles={(id, files) => attachFiles('leads', id, files)}
+          onAddLeadFiles={(id, files, category, extra) => attachFiles('leads', id, files, category, extra)}
           onRemoveLeadFile={(id, att) => detachFile('leads', id, att)}
           onAddRecordFiles={attachFiles}
           onRemoveRecordFile={detachFile}
@@ -2466,6 +2494,11 @@ export default function BobcatIndyCRM() {
                 leads={visibleArchivedLeads} config={configWithUsers}
                 onSelect={setSelectedLead}
               />
+            )}
+
+            {view === 'todo' && (
+              <TodoView leads={searchScope.leads} records={visibleRecords} config={configWithUsers} currentUser={currentUser}
+                onOpen={openTodo} onUpdateLead={updateLead}/>
             )}
 
             {/* Back office */}
@@ -2901,11 +2934,14 @@ const NEW_MENU = [
   { kind: 'finance',     label: 'Finance Deal',    hint: 'For the finance team’s tracker',     icon: Briefcase }
 ];
 
-function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userRole, pendingCount, mobileOpen, onMobileClose, onNew }) {
+function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userRole, pendingCount, mobileOpen, onMobileClose, onNew, todoCount = 0 }) {
   const [newOpen, setNewOpen] = useState(false);
   // Groups, in order. Access is still decided centrally by canAccessView, and a
   // group whose items are all filtered out disappears with them.
   const groups = [
+    { title: null, items: [
+      { id: 'todo', label: 'To Do', icon: CheckCircle2, badge: todoCount, badgeAccent: todoCount > 0 }
+    ] },
     { title: 'Lead Management', items: [
       { id: HOME_VIEW, label: 'Dashboard', icon: LayoutDashboard },
       ...PIPELINE_STAGES.map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id], indent: true }))
@@ -3050,6 +3086,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
   const stage = stageForView(view);
   const titles = {
     [HOME_VIEW]: 'Dashboard',
+    todo: 'To Do',
     ...Object.fromEntries(PIPELINE_STAGES.map(s => [s.view, s.label])),
     submittals: 'Sales Submittals',
     requests: 'Sales Requests',
@@ -3099,6 +3136,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
             <div className="text-[11px] md:text-xs text-stone-500 mt-0.5 truncate hidden sm:block">
               {view === HOME_VIEW && (mine ? 'Your leads, and the back office work tied to them' : 'Every lead, plus the back office queues')}
               {stage && `${stats.total} lead${stats.total === 1 ? '' : 's'}${mine ? (stage.id === STAGE_INCOMING ? ' assigned to you or unassigned' : ' assigned to you') : ''} · ${stage.blurb}`}
+              {view === 'todo' && (mine ? 'What needs doing on your leads today' : 'Your leads and the back office — what needs doing today')}
               {view === 'submittals' && (mine ? 'Sales submittals on your deals and where the back office is with them' : 'Done deals waiting on the back office')}
               {view === 'requests' && (mine ? 'Deliveries, get-readies, demos, parts, pick-ups and service you\'ve requested' : 'Operations requests, checked off by Rental, Service and Parts')}
               {view === 'finance' && (mine ? 'Your financed deals and where they are in funding' : 'Financed deals from submittal to funding')}
@@ -7664,7 +7702,8 @@ function NotificationsConfigCard({ config, onSave }) {
         <div className="text-xs text-stone-500 mb-3">
           Weekday mornings at 8:00, each rep gets one email covering both of these. Nothing is sent to someone with nothing to do.
         </div>
-        {[['contactRemindersEnabled', 'Make contact', 'Leads assigned to the rep and still in New, every weekday until they move out of New.'],
+        {[['followUpDateRemindersEnabled', 'Follow-up dates', 'Follow-up dates reps set on their leads, on the day and until marked done.'],
+          ['contactRemindersEnabled', 'Make contact', 'Leads assigned to the rep and still in New, every weekday until they move out of New.'],
           ['followUpRemindersEnabled', '30-day follow-up', 'Once, 30 days after a deal is Completed: a nudge to send the customer a follow-up email.']]
           .map(([key, label, hint]) => {
             const on = config.notifications?.[key] !== false;
@@ -8261,6 +8300,9 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
             </div>
           </div>
           <div className="space-y-4">
+            {leadStage !== 'junk' && (
+              <div className={card}><FollowUpSection lead={lead} currentUser={currentUser} onUpdate={onUpdate}/></div>
+            )}
             <div className={card}>
               <Section title="Status">
                 <StatusDetailRows lead={lead} config={config} onExtendWorking={onExtendWorking}/>
@@ -8295,7 +8337,8 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
       {tab === 'submittal' && (
         <div className={`${card} max-w-4xl`}>
           <SalesRequestSection lead={lead} config={config} currentUser={currentUser}
-            onUpdate={onUpdate} onStatusChange={onStatusChange}/>
+            onUpdate={onUpdate} onStatusChange={onStatusChange}
+            onUploadDoc={(files, docType) => onAddLeadFiles(lead.id, files, 'submittal', { docType })}/>
         </div>
       )}
 
@@ -9489,7 +9532,7 @@ function DealSection({ lead, onUpdate }) {
 // The submittal on the lead: what the rep sent, and the back office's fields.
 // Shown from Sales Request onwards so the record of the sale stays with the lead.
 // Admins (the back office) edit their fields here and close the submittal out.
-function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChange }) {
+function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChange, onUploadDoc }) {
   const sr = lead.salesRequest;
   const isAdmin = currentUser?.role === 'admin';
   const [editing, setEditing] = useState(false);
@@ -9531,6 +9574,8 @@ function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChan
       <div className="text-[11px] text-stone-500 pt-1">
         Submitted {fmtDateTime(sr.submittedAt)}{submitter ? ` by ${submitter.name}` : ''}
       </div>
+
+      <PaperworkChecklist lead={lead} currentUser={currentUser} onUpdate={onUpdate} onUploadDoc={onUploadDoc}/>
 
       {/* ---- Back office ---- */}
       <div className="mt-3 pt-3 border-t border-stone-100">
@@ -9605,6 +9650,242 @@ function SubmittalStatusChip({ status }) {
   if (!status) return null;
   const cls = status === SUBMITTAL_COMPLETE ? 'bg-emerald-50 text-emerald-700' : 'bg-orange-50 text-orange-700';
   return <span className={`text-xs font-medium px-2 py-0.5 rounded ${cls}`}>{status === SUBMITTAL_COMPLETE ? 'Complete' : 'Open'}</span>;
+}
+
+/* ===================== TO DO ===================== */
+// Everything that needs someone's attention, worked out by src/lib/todo.js.
+// Reps see their own leads; admins can switch rep and see the back office.
+const TODO_ICONS = {
+  followup: Calendar, contact: Phone, paperwork: FileText, deadline: Clock, postsale: Mail,
+  submittal: ClipboardList, tradein: RefreshCw, request: Send, finance: Briefcase
+};
+function addDaysYmd(base, n) {
+  const d = new Date(base + 'T12:00:00'); d.setDate(d.getDate() + n);
+  return todayLocalYmd(d);
+}
+function TodoView({ leads, records, config, currentUser, onOpen, onUpdateLead }) {
+  const isAdmin = currentUser.role === 'admin';
+  const [who, setWho] = useState(currentUser.id);
+  const [showBackOffice, setShowBackOffice] = useState(isAdmin);
+  const today = todayLocalYmd();
+  const users = config.users || [];
+  const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
+  const reps = useMemo(() => sortUsersByName(users.filter(u => !u.isSystem)), [users]);
+  const items = useMemo(() => buildTodos({
+    leads, records, repId: isAdmin ? who : currentUser.id, backOffice: isAdmin && showBackOffice, today, now: Date.now()
+  }), [leads, records, who, showBackOffice, isAdmin, currentUser.id, today]);
+  const leadById = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
+  const showOwner = isAdmin && who !== currentUser.id;
+
+  const setFollowUp = (lead, date) => onUpdateLead(lead.id, { followUp: { ...(lead.followUp || {}), date, setBy: currentUser.id, setAt: new Date().toISOString() } });
+  const clearFollowUp = (lead) => onUpdateLead(lead.id, { followUp: null, followUpDoneAt: new Date().toISOString() });
+
+  const sections = TODO_SECTIONS.map(s => ({ ...s, items: items.filter(i => i.section === s.id) })).filter(s => s.items.length);
+  const btn = 'text-xs px-2.5 py-1.5 rounded border border-stone-200 bg-white hover:border-stone-400 text-stone-700 font-medium whitespace-nowrap';
+
+  return (
+    <div className="max-w-5xl">
+      {isAdmin && (
+        <div className="flex items-center gap-3 flex-wrap mb-4">
+          <label className="text-xs text-stone-600 flex items-center gap-2">
+            Showing
+            <select value={who} onChange={e => setWho(e.target.value)} aria-label="Whose to-dos"
+              className="text-sm px-2.5 py-1.5 border border-stone-200 rounded bg-white">
+              <option value={currentUser.id}>My leads</option>
+              <option value="*">Every rep</option>
+              {reps.filter(u => u.id !== currentUser.id).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </label>
+          <label className="text-xs text-stone-600 flex items-center gap-2 cursor-pointer select-none">
+            <input type="checkbox" className="accent-brand-500" checked={showBackOffice} onChange={e => setShowBackOffice(e.target.checked)}/>
+            Back office
+          </label>
+        </div>
+      )}
+
+      {sections.length === 0 ? (
+        <EmptyState icon={CheckCircle2} title="All caught up" subtitle="Nothing needs doing right now. Follow-up dates you set on a lead show up here on the day."/>
+      ) : (
+        <div className="space-y-5">
+          {sections.map(sec => {
+            const Icon = TODO_ICONS[sec.id] || CheckCircle2;
+            return (
+              <div key={sec.id}>
+                <div className="flex items-center gap-2 mb-2">
+                  <Icon size={14} className="text-stone-500"/>
+                  <div className="text-[11px] uppercase tracking-widest font-semibold text-stone-600">{sec.label}</div>
+                  <span className="text-[11px] font-mono text-stone-500">{sec.items.length}</span>
+                  {sec.backOffice && <span className="text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">Back office</span>}
+                </div>
+                <div className="bg-white border border-stone-200 rounded-lg divide-y divide-stone-100">
+                  {sec.items.map(item => {
+                    const lead = item.leadId ? leadById[item.leadId] : null;
+                    return (
+                      <div key={item.id} className="px-4 py-3 flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
+                        <button type="button" onClick={() => onOpen(item)} className="min-w-0 flex-1 text-left group">
+                          <div className="font-medium text-stone-900 group-hover:text-brand-700 truncate">{item.title}</div>
+                          <div className="text-xs text-stone-500 truncate">{item.subtitle}</div>
+                          {showOwner && item.assignedTo && userMap[item.assignedTo] && (
+                            <div className="text-[11px] text-stone-400">{userMap[item.assignedTo].name}</div>
+                          )}
+                        </button>
+                        {item.due && (
+                          <span className={`text-xs font-medium px-2 py-0.5 rounded shrink-0 ${item.overdue ? 'bg-rose-50 text-rose-700' : 'bg-stone-100 text-stone-600'}`}>{item.due}</span>
+                        )}
+                        <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                          {item.section === 'followup' && lead && (<>
+                            <button type="button" className={btn} onClick={() => clearFollowUp(lead)}><Check size={12} className="inline -mt-0.5"/> Done</button>
+                            <button type="button" className={btn} onClick={() => setFollowUp(lead, addDaysYmd(today, 1))}>Tomorrow</button>
+                            <button type="button" className={btn} onClick={() => setFollowUp(lead, addDaysYmd(today, 7))}>Next week</button>
+                          </>)}
+                          {item.section === 'postsale' && lead && (
+                            <button type="button" className={btn} onClick={() => onUpdateLead(lead.id, { postSaleFollowUpDoneAt: new Date().toISOString() })}>
+                              <Check size={12} className="inline -mt-0.5"/> Checked in
+                            </button>
+                          )}
+                          <button type="button" className={btn} onClick={() => onOpen(item)}>
+                            {item.section === 'paperwork' ? 'Add paperwork' : item.section === 'submittal' ? 'Open submittal' : 'Open'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ===================== FOLLOW-UP DATE (lead page) ===================== */
+// "Call back Tuesday": a date and a note. It shows in To Do on the day and in
+// that morning's reminder email; Done clears it.
+function FollowUpSection({ lead, currentUser, onUpdate }) {
+  const f = lead.followUp || null;
+  const today = todayLocalYmd();
+  const [editing, setEditing] = useState(false);
+  const [date, setDate] = useState(f?.date || addDaysYmd(today, 1));
+  const [note, setNote] = useState(f?.note || '');
+  useEffect(() => { setEditing(false); setDate(lead.followUp?.date || addDaysYmd(today, 1)); setNote(lead.followUp?.note || ''); }, [lead.id, lead.followUp?.date, lead.followUp?.note]);
+  const save = () => {
+    if (!date) return;
+    onUpdate(lead.id, { followUp: { date, note: note.trim(), setBy: currentUser?.id || null, setAt: new Date().toISOString() } });
+    setEditing(false);
+  };
+  const due = f && f.date && f.date <= today;
+  return (
+    <Section title={
+      <span className="flex items-center justify-between w-full">
+        <span>Follow-up</span>
+        {!editing && (
+          <button onClick={() => setEditing(true)} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+            <Calendar size={11}/> {f ? 'Change' : 'Set a follow-up'}
+          </button>
+        )}
+      </span>
+    }>
+      {editing ? (
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-1.5">
+            {[['Tomorrow', 1], ['In 3 days', 3], ['Next week', 7], ['In 2 weeks', 14]].map(([lab, n]) => (
+              <button key={lab} type="button" onClick={() => setDate(addDaysYmd(today, n))}
+                className={`text-xs px-2 py-1 rounded border ${date === addDaysYmd(today, n) ? 'bg-stone-900 border-stone-900 text-white' : 'bg-white border-stone-200 text-stone-700 hover:border-stone-400'}`}>{lab}</button>
+            ))}
+          </div>
+          <input type="date" value={date} min={today} onChange={e => setDate(e.target.value)} aria-label="Follow-up date"
+            className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm"/>
+          <input value={note} onChange={e => setNote(e.target.value)} placeholder="What to follow up on (optional)" aria-label="Follow-up note"
+            className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm"/>
+          <div className="flex gap-2">
+            <button onClick={save} className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-md">Save</button>
+            <button onClick={() => setEditing(false)} className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-xs">Cancel</button>
+          </div>
+        </div>
+      ) : f && f.date ? (
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <div className={`text-sm font-semibold ${due ? 'text-rose-700' : 'text-stone-900'}`}>
+              {new Date(f.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+              <span className="font-normal text-xs ml-1.5">{dueLabel(f.date, today)}</span>
+            </div>
+            {f.note && <div className="text-sm text-stone-700 mt-0.5">{f.note}</div>}
+          </div>
+          <button onClick={() => onUpdate(lead.id, { followUp: null, followUpDoneAt: new Date().toISOString() })}
+            className="text-xs px-2.5 py-1.5 rounded border border-stone-200 hover:border-stone-400 text-stone-700 font-medium shrink-0">
+            <Check size={12} className="inline -mt-0.5"/> Done
+          </button>
+        </div>
+      ) : (
+        <div className="text-xs text-stone-500">No follow-up set. It shows in To Do on the day you pick.</div>
+      )}
+    </Section>
+  );
+}
+
+/* ===================== SALES DEAL PAPERWORK ===================== */
+// The submittal's document checklist (src/lib/todo.js SUBMITTAL_DOCS). Upload
+// the file as that document, or tick it off when a paper copy is on file.
+function PaperworkChecklist({ lead, currentUser, onUpdate, onUploadDoc }) {
+  const docs = submittalDocStatus(lead);
+  const sr = lead.salesRequest;
+  const [busy, setBusy] = useState(null);
+  const inputs = useRef({});
+  if (!sr || !docs.length) return null;
+  const missing = docs.filter(d => !d.received).length;
+  const tick = (key, on) => onUpdate(lead.id, {
+    salesRequest: { ...sr, docs: { ...(sr.docs || {}), [key]: on ? { receivedAt: new Date().toISOString(), by: currentUser?.id || null } : null } },
+    _salesRequestEdit: true
+  });
+  return (
+    <div className="mt-3 pt-3 border-t border-stone-100">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold">Paperwork</div>
+        <span className={`text-xs font-medium px-2 py-0.5 rounded ${missing ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+          {missing ? `${missing} missing` : 'All on file'}
+        </span>
+      </div>
+      <div className="divide-y divide-stone-100">
+        {docs.map(d => (
+          <div key={d.key} className="py-2 flex items-center gap-3">
+            {d.received
+              ? <CheckCircle2 size={16} className="text-emerald-600 shrink-0"/>
+              : <AlertTriangle size={16} className="text-amber-600 shrink-0"/>}
+            <div className="min-w-0 flex-1">
+              <div className="text-sm text-stone-900">{d.label}</div>
+              <div className="text-[11px] text-stone-500 truncate">
+                {d.file ? `File: ${d.file.name}` : d.tick ? `Paper copy on file · ${fmtDateTime(d.tick.receivedAt)}` : 'Missing'}
+              </div>
+            </div>
+            {!d.file && (
+              <label className="text-[11px] text-stone-600 flex items-center gap-1 cursor-pointer select-none shrink-0">
+                <input type="checkbox" className="accent-brand-500" checked={!!d.tick} onChange={e => tick(d.key, e.target.checked)}/>
+                Paper copy
+              </label>
+            )}
+            {!d.received && onUploadDoc && (
+              <>
+                <button type="button" disabled={busy === d.key} onClick={() => inputs.current[d.key] && inputs.current[d.key].click()}
+                  className="text-xs px-2.5 py-1.5 rounded border border-stone-200 hover:border-stone-400 text-stone-700 font-medium inline-flex items-center gap-1 shrink-0">
+                  <Upload size={11}/> {busy === d.key ? 'Uploading…' : 'Upload'}
+                </button>
+                <input ref={el => { inputs.current[d.key] = el; }} type="file" accept={ATTACHMENT_ACCEPT} className="hidden" aria-label={`Upload ${d.label}`}
+                  onChange={async e => {
+                    const files = [...(e.target.files || [])].filter(f => !checkAttachment(f));
+                    e.target.value = '';
+                    if (!files.length) return;
+                    setBusy(d.key);
+                    try { await onUploadDoc(files, d.key); } finally { setBusy(null); }
+                  }}/>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 /* ===================== SALES SUBMITTALS QUEUE ===================== */
@@ -9964,7 +10245,9 @@ function AttachmentList({ attachments = [], currentUser, onAdd, onRemove, emptyT
             </button>
             <span className="flex items-center gap-2 shrink-0">
               {att.category === 'submittal' && !compact && (
-                <span className="text-[10px] uppercase tracking-wider font-semibold text-orange-700 bg-orange-50 px-1.5 py-0.5 rounded">Submittal</span>
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-orange-700 bg-orange-50 px-1.5 py-0.5 rounded">
+                  {(att.docType && (SUBMITTAL_DOCS.find(d => d.key === att.docType) || {}).label) || 'Submittal'}
+                </span>
               )}
               <span className="text-[11px] text-stone-400">{formatBytes(att.size)}</span>
               {onRemove && (isAdmin || att.uploadedBy === currentUser?.id) && (

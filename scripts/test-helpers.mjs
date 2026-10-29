@@ -512,6 +512,60 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('reminders: scheduled weekdays 8am Indianapolis', /schedule: '0 8 \* \* 1-5'/.test(fn) && /timeZone: 'America\/Indiana\/Indianapolis'/.test(fn));
 }
 
+// ---- To Do hub ------------------------------------------------------------------
+{
+  const T = await import('../src/lib/todo.js');
+  const today = '2026-10-29', now = Date.parse('2026-10-29T14:00:00');
+  const ago = (d) => new Date(now - d * 86400e3).toISOString();
+  const sr = (o = {}) => ({ model: 'T76', payment: 'Cash', submittedAt: ago(2), status: 'Open', ...o });
+  const leads = [
+    { id: 'f1', status: 'Working', assignedTo: 'r1', customerName: 'Due Today', followUp: { date: today, note: 'call back' } },
+    { id: 'f2', status: 'Prospect', assignedTo: 'r1', customerName: 'Overdue', followUp: { date: '2026-10-20' } },
+    { id: 'f3', status: 'Working', assignedTo: 'r1', customerName: 'Future', followUp: { date: '2026-11-05' } },
+    { id: 'c1', status: 'New', assignedTo: 'r1', customerName: 'Uncontacted', dateAssigned: ago(2) },
+    { id: 'c2', status: 'New', assignedTo: 'r1', customerName: 'Just assigned', dateAssigned: ago(0.1) },
+    { id: 'w1', status: 'Working', assignedTo: 'r1', customerName: 'Past deadline', workingUntil: ago(1) },
+    { id: 'p1', status: 'Completed', assignedTo: 'r1', customerName: 'Cash deal', salesRequest: sr(), attachments: [{ docType: 'purchaseAgreement', name: 'pa.pdf' }] },
+    { id: 'p2', status: 'Completed', assignedTo: 'r1', customerName: 'Loan deal', salesRequest: sr({ payment: 'Loan', docs: { customerId: { receivedAt: ago(1) } } }) },
+    { id: 'p3', status: 'Completed', assignedTo: 'r1', customerName: 'Done paperwork', salesRequest: sr({ status: 'Complete' }) },
+    { id: 's1', status: 'Completed', assignedTo: 'r1', customerName: 'Month ago', completedAt: ago(35) },
+    { id: 's2', status: 'Completed', assignedTo: 'r1', customerName: 'Checked in', completedAt: ago(35), postSaleFollowUpDoneAt: ago(1) },
+    { id: 'o1', status: 'New', assignedTo: 'r2', customerName: 'Other rep', dateAssigned: ago(3) },
+    { id: 'j1', status: 'Junk', assignedTo: 'r1', customerName: 'Junk', followUp: { date: today } }
+  ];
+  const records = {
+    tradeIns: [{ id: 't1', make: 'Kubota', salesPerson: 'r1' }, { id: 't2', make: 'Cat', manager: { approved: 'Yes' } }],
+    requests: [{ id: 'q1', status: 'Open', dateNeeded: '2026-10-28', requestTypes: ['Delivery'] }, { id: 'q2', status: 'Open', dateNeeded: '2026-11-10' }, { id: 'q3', status: 'Completed', dateNeeded: '2026-10-01' }],
+    finance: [{ id: 'fn1', admin: { dealStatus: 'Ready to Invoice' }, dealStatusChangedAt: ago(6) }]
+  };
+  const mine = T.buildTodos({ leads, records, repId: 'r1', backOffice: false, today, now });
+  const ids = (sec) => mine.filter(i => i.section === sec).map(i => i.leadId || i.recordId).join(',');
+  check('todo: follow-ups due today and overdue, not future or junk', ids('followup') === 'f2,f1', ids('followup'));
+  check('todo: overdue follow-up is flagged', mine.find(i => i.id === 'followup:f2').overdue && !mine.find(i => i.id === 'followup:f1').overdue);
+  check('todo: make contact skips the day of assignment', ids('contact') === 'c1', ids('contact'));
+  check('todo: working deadline passed', ids('deadline') === 'w1');
+  check('todo: missing paperwork on open submittals only', ids('paperwork') === 'p1,p2' || ids('paperwork') === 'p2,p1', ids('paperwork'));
+  const p1 = mine.find(i => i.id === 'paperwork:p1'), p2 = mine.find(i => i.id === 'paperwork:p2');
+  check('todo: cash deal needs no credit app; uploaded doc counts', JSON.stringify(p1.missing) === JSON.stringify(['customerId', 'delivery']), JSON.stringify(p1.missing));
+  check('todo: financed deal needs credit app; paper tick counts', JSON.stringify(p2.missing) === JSON.stringify(['purchaseAgreement', 'creditApp', 'delivery']), JSON.stringify(p2.missing));
+  check('todo: 30-day check-in until marked done', ids('postsale') === 's1');
+  check('todo: a rep never sees back office or other reps', !mine.some(i => ['submittal', 'tradein', 'request', 'finance'].includes(i.section)) && !mine.some(i => i.leadId === 'o1'));
+  const admin = T.buildTodos({ leads, records, repId: 'admin', backOffice: true, today, now });
+  const aids = (sec) => admin.filter(i => i.section === sec).map(i => i.leadId || i.recordId).sort().join(',');
+  check('todo: back office open submittals', aids('submittal') === 'p1,p2', aids('submittal'));
+  check('todo: trade-ins awaiting approval', aids('tradein') === 't1');
+  check('todo: requests due or overdue, open only', aids('request') === 'q1');
+  check('todo: finance audit flags', aids('finance') === 'fn1');
+  const every = T.buildTodos({ leads, records, repId: '*', today, now });
+  check('todo: every rep includes others', every.some(i => i.leadId === 'o1'));
+  check('todo: sections in order', JSON.stringify([...new Set(mine.map(i => i.section))]) === JSON.stringify(['followup', 'contact', 'paperwork', 'deadline', 'postsale']));
+  check('todo: due labels', T.dueLabel(today, today) === 'Today' && T.dueLabel('2026-10-28', today) === 'Yesterday' && T.dueLabel('2026-10-26', today) === '3 days overdue' && T.dueLabel('2026-10-30', today) === 'Tomorrow');
+  const { createRequire } = await import('node:module');
+  const M = createRequire(import.meta.url)('../functions/reminderRules.js');
+  check('email: follow-up date due today or earlier', M.followUpDateDue({ status: 'Working', assignedTo: 'r1', followUp: { date: '2026-10-29' } }, '2026-10-29') && !M.followUpDateDue({ status: 'Working', assignedTo: 'r1', followUp: { date: '2026-10-30' } }, '2026-10-29'));
+  check('email: Indianapolis date', M.indyToday(Date.parse('2026-10-30T02:00:00Z')) === '2026-10-29');
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

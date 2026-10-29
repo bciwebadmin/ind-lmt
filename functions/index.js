@@ -18,7 +18,7 @@ const { Resend } = require('resend');
 const { nearestBranchForZip } = require('./branchRouting');
 const { canonical, intakeStatus, intakeSource, closedStatusesFrom, canLinkResubmission } = require('./intakeRules');
 const { planRouting } = require('./routingRules');
-const { needsContactReminder, needsFollowUpReminder, completedAtOf, daysSince, groupByAssignee } = require('./reminderRules');
+const { needsContactReminder, needsFollowUpReminder, followUpDateDue, indyToday, completedAtOf, daysSince, groupByAssignee } = require('./reminderRules');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 
 admin.initializeApp();
@@ -2839,16 +2839,22 @@ exports.dailyLeadReminders = onSchedule(
     const notif = config.notifications || {};
     const contactOn = notif.contactRemindersEnabled !== false;
     const followOn = notif.followUpRemindersEnabled !== false;
-    if (!contactOn && !followOn) { console.log('[reminders] Both reminders switched off in Settings'); return; }
+    const datesOn = notif.followUpDateRemindersEnabled !== false;
+    if (!contactOn && !followOn && !datesOn) { console.log('[reminders] All reminders switched off in Settings'); return; }
+    const today = indyToday(now);
 
     const load = async (status) => (await db.collection('leads').where('status', '==', status).get())
       .docs.map(d => ({ id: d.id, ...d.data() }));
     const uncontacted = contactOn ? (await load('New')).filter(l => needsContactReminder(l, now)) : [];
     const followUps = followOn ? (await load('Completed')).filter(l => needsFollowUpReminder(l, now)) : [];
+    // Follow-up dates reps set on leads ("call back Tuesday"), due today or earlier.
+    const datesDue = datesOn ? (await db.collection('leads').where('followUp.date', '<=', today).get())
+      .docs.map(d => ({ id: d.id, ...d.data() })).filter(l => followUpDateDue(l, today)) : [];
 
     const contactBy = groupByAssignee(uncontacted);
     const followBy = groupByAssignee(followUps);
-    const reps = [...new Set([...Object.keys(contactBy), ...Object.keys(followBy)])];
+    const datesBy = groupByAssignee(datesDue);
+    const reps = [...new Set([...Object.keys(datesBy), ...Object.keys(contactBy), ...Object.keys(followBy)])];
     if (!reps.length) { console.log('[reminders] Nothing to remind anyone about'); return; }
 
     const crm = CRM_URL.value();
@@ -2864,6 +2870,16 @@ exports.dailyLeadReminders = onSchedule(
       if (!rep || !rep.email || rep.onLeaveOfAbsence) { console.log(`[reminders] Skipping ${repId} — no email or on leave`); continue; }
 
       const sections = [];
+      const fd = datesBy[repId] || [];
+      if (fd.length) sections.push({
+        title: `Follow-ups due (${fd.length})`,
+        intro: 'Follow-up dates you set on these leads.',
+        rows: fd.map(l => ({
+          name: l.customerName || l.companyName || 'Unnamed lead',
+          sub: [l.followUp.note, l.phone, l.followUp.date < today ? `was due ${l.followUp.date}` : 'due today'].filter(Boolean).join(' · '),
+          url: link(l.id)
+        }))
+      });
       const c = contactBy[repId] || [];
       if (c.length) sections.push({
         title: `Make contact (${c.length})`,
@@ -2877,7 +2893,7 @@ exports.dailyLeadReminders = onSchedule(
       });
       const f = followBy[repId] || [];
       if (f.length) sections.push({
-        title: `Send a follow-up (${f.length})`,
+        title: `30-day check-in (${f.length})`,
         intro: 'These deals were completed about 30 days ago — a good time to check in with the customer.',
         rows: f.map(l => ({
           name: l.customerName || l.companyName || 'Unnamed lead',
@@ -2886,7 +2902,7 @@ exports.dailyLeadReminders = onSchedule(
           url: link(l.id)
         }))
       });
-      const subject = [c.length ? `${c.length} lead${c.length === 1 ? '' : 's'} to contact` : '', f.length ? `${f.length} follow-up${f.length === 1 ? '' : 's'}` : '']
+      const subject = [fd.length ? `${fd.length} follow-up date${fd.length === 1 ? '' : 's'}` : '', c.length ? `${c.length} lead${c.length === 1 ? '' : 's'} to contact` : '', f.length ? `${f.length} 30-day check-in${f.length === 1 ? '' : 's'}` : '']
         .filter(Boolean).join(' · ');
       try {
         const result = await resend.emails.send({
@@ -2903,7 +2919,7 @@ exports.dailyLeadReminders = onSchedule(
         console.error(`[reminders] Failed for ${rep.email}:`, err);
       }
     }
-    console.log(`[reminders] Sent ${sent} reminder email(s): ${uncontacted.length} uncontacted lead(s), ${followUps.length} follow-up(s)`);
+    console.log(`[reminders] Sent ${sent} reminder email(s): ${datesDue.length} follow-up date(s), ${uncontacted.length} uncontacted lead(s), ${followUps.length} 30-day follow-up(s)`);
   }
 );
 
