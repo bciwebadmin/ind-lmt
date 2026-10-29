@@ -117,6 +117,9 @@ const ADMIN_ONLY_VIEWS = ['reports', 'users', 'settings'];
 // user can open all five; what they SEE inside is narrowed by
 // isLeadVisibleInStage (reps get their own leads, plus unowned ones in Incoming).
 const HOME_VIEW = 'home';
+// Where everyone lands after signing in, and the fallback for a view they
+// can't open: the New tab (Erin, Oct 2026). The dashboard is one click away.
+const DEFAULT_VIEW = 'stage-incoming';
 const STAGE_VIEWS = PIPELINE_STAGES.map(s => s.view);
 // View ids the older forks used. Indy replaced them with the step dashboards, so
 // an old bookmark or email link carrying one lands on the picker instead.
@@ -199,7 +202,7 @@ function canAccessView(view, role) {
 // Landing page and safety-redirect fallback. Admins see the full pipeline;
 // sales reps land on their own open leads.
 function getDefaultView(role) {
-  return HOME_VIEW;
+  return DEFAULT_VIEW;
 }
 
 // Auto-archival rule: leads closed for this many consecutive days (no reopen in between)
@@ -1026,7 +1029,7 @@ export default function BobcatIndyCRM() {
       if (requested && valid.includes(requested)) return requested;
       if (requested && MOVED_VIEWS[requested]) return MOVED_VIEWS[requested][0];
     } catch { /* ignore */ }
-    return HOME_VIEW;
+    return DEFAULT_VIEW;
   });
   const [leads, setLeads] = useState([]);
   // Indy's records that hang off leads but can also stand alone (see
@@ -1061,7 +1064,7 @@ export default function BobcatIndyCRM() {
   const applyChipFilter = (preset) => {
     // Chips only render on the step dashboards, so the table the
     // chip filters is already on screen — stay on it.
-    if (!STAGE_VIEWS.includes(view)) setView(HOME_VIEW);
+    if (!STAGE_VIEWS.includes(view)) setView(DEFAULT_VIEW);
     setLeadsPrefilter(preset);
   };
 
@@ -1446,7 +1449,7 @@ export default function BobcatIndyCRM() {
     if (!currentUser) return;
     const adminOnly = ADMIN_ONLY_VIEWS;
     if (currentUser.role !== 'admin' && adminOnly.includes(view)) {
-      setView(HOME_VIEW);
+      setView(DEFAULT_VIEW);
     }
   }, [currentUser, view]);
 
@@ -1474,7 +1477,7 @@ export default function BobcatIndyCRM() {
 
   const signOut = async () => {
     await signOutCurrent();
-    setView(HOME_VIEW);
+    setView(DEFAULT_VIEW);
     setSelectedLead(null);
   };
 
