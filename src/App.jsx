@@ -40,8 +40,10 @@ import {
 import { nearestBranchForZip } from './lib/branchRouting';
 import {
   PIPELINE_STAGES, PIPELINE_STATUSES, PIPELINE_CLOSED_STATUSES,
-  STAGE_INCOMING, STAGE_WORKING, STAGE_SALES_REQUEST, STAGE_COMPLETED,
+  STAGE_INCOMING, STAGE_WORKING, STAGE_SALES_REQUEST, STAGE_COMPLETED, STAGE_PROSPECT, STAGE_WANTED,
   SALES_REQUEST_STATUS, WON_STATUS, LOST_STATUS, renamedStatus,
+  NEW_STATUS, PENDING_STATUS, PROSPECT_STATUS, WANTED_STATUS, PROSPECT_TYPES, PROSPECT_GROUP_STATUSES, entersProspectGroup,
+  TEMPERATURES, leadTemperature, SUBMITTAL_OPEN, SUBMITTAL_COMPLETE, submittalStatus, prospectKeywordList,
   getStage, stageForView, stageOfStatus, stageOfLead, statusOptionsFor, bulkStatusOptionsFor,
   ensurePipelineStatuses, isLeadVisibleInStage, isUnassigned, completesViaSalesRequest, canCloseSalesRequest,
   DEAL_FIELDS, LOST_FIELDS, SALES_REQUEST_FIELDS, SALES_REQUEST_SECTIONS, BACK_OFFICE_FIELDS,
@@ -125,45 +127,54 @@ const MOVED_VIEWS = {
   junk:           ['stage-incoming', 'junk'],
   archived:       ['stage-completed', 'archived'],
   import:         ['settings', 'import'],
-  scoring:        ['settings', 'scoring'],
-  'lead-routing': ['settings', 'routing']
+  // Heat scoring was removed (Oct 2026) — temperature is set by hand now.
+  scoring:        ['settings', 'general'],
+  'lead-routing': ['settings', 'routing'],
+  // The old third step: submittals are their own Back Office queue now.
+  'stage-sales-request': ['submittals', null]
 };
 
 const SETTINGS_TABS = [
   ['general',       'General'],
   ['notifications', 'Notifications'],
   ['routing',       'Lead Routing'],
-  ['scoring',       'Scoring'],
   ['import',        'Import CSV']
 ];
 
 // Empty-state copy for each step dashboard.
 const STAGE_EMPTY = {
   [STAGE_INCOMING]: {
-    title: 'Nothing waiting in Incoming',
-    admin: 'New leads from the web forms, CSV imports and Add Lead land here first.',
+    title: 'No new leads',
+    admin: 'Leads from the web forms, imports and Add Lead land here first.',
     rep:   'New leads assigned to you, and unassigned ones you can pick up, land here first.'
   },
   [STAGE_WORKING]: {
     title: 'No leads being worked',
-    admin: 'Assign a lead in Incoming and set it to Working, Prospect, Pending or Want to move it here.',
-    rep:   'Assign yourself a lead in Incoming and set it to Working, Prospect, Pending or Want to move it here.'
+    admin: 'Assign a new lead and set it to Working or Pending to move it here.',
+    rep:   'Set one of your new leads to Working or Pending to move it here.'
   },
-  [STAGE_SALES_REQUEST]: {
-    title: 'No open sales submittals',
-    admin: 'When a rep sets a Working lead to Completed, they fill in the Sales Submittal and it lands here for the back office.',
-    rep:   'When you set a Working lead to Completed, you fill in the Sales Submittal and it waits here for the back office.'
+  [STAGE_PROSPECT]: {
+    title: 'Nothing here',
+    admin: 'Prospects added with + New, and leads set to Prospect, Dead, Unqualified or Lost.',
+    rep:   'Your prospects, and your leads that went dead, unqualified or lost.'
+  },
+  [STAGE_WANTED]: {
+    title: 'No wanted units',
+    admin: 'Customers waiting on a unit that isn\u2019t available yet. Add one with + New \u2192 Want.',
+    rep:   'Your customers waiting on a unit. Add one with + New \u2192 Want.'
   },
   [STAGE_COMPLETED]: {
-    title: 'Nothing completed yet',
-    admin: 'Completed sales, lost, unqualified and cancelled leads end up here. After 30 days they move to Archived.',
-    rep:   'Your completed sales, lost, unqualified and cancelled leads end up here for 30 days.'
+    title: 'No done deals yet',
+    admin: 'Done deals land here when their Sales Submittal is sent. After 30 days they move to Archived.',
+    rep:   'Your done deals, for 30 days. Then they move to Archived.'
   }
 };
 
 const STAGE_ICONS = {
   [STAGE_INCOMING]:      Inbox,
   [STAGE_WORKING]:       Briefcase,
+  [STAGE_PROSPECT]:      Tag,
+  [STAGE_WANTED]:        Clock,
   [STAGE_SALES_REQUEST]: ClipboardList,
   [STAGE_COMPLETED]:     CheckCircle2
 };
@@ -172,6 +183,8 @@ const STAGE_ICONS = {
 const STAGE_ACCENTS = {
   [STAGE_INCOMING]:      { bar: 'bg-blue-500',    soft: 'bg-blue-50',    text: 'text-blue-700'    },
   [STAGE_WORKING]:       { bar: 'bg-violet-500',  soft: 'bg-violet-50',  text: 'text-violet-700'  },
+  [STAGE_PROSPECT]:      { bar: 'bg-sky-500',     soft: 'bg-sky-50',     text: 'text-sky-700'     },
+  [STAGE_WANTED]:        { bar: 'bg-cyan-500',    soft: 'bg-cyan-50',    text: 'text-cyan-700'    },
   [STAGE_SALES_REQUEST]: { bar: 'bg-orange-500',  soft: 'bg-orange-50',  text: 'text-orange-700'  },
   [STAGE_COMPLETED]:     { bar: 'bg-emerald-500', soft: 'bg-emerald-50', text: 'text-emerald-700' }
 };
@@ -354,6 +367,7 @@ const STATUS_COLORS = {
   Quoted:         { bg: 'bg-cyan-50',   text: 'text-cyan-700',   dot: 'bg-cyan-500'   },
   Pending:        { bg: 'bg-amber-50',  text: 'text-amber-700',  dot: 'bg-amber-500'  },
   Prospect:       { bg: 'bg-sky-50',    text: 'text-sky-700',    dot: 'bg-sky-500'    },
+  Wanted:         { bg: 'bg-cyan-50',   text: 'text-cyan-700',   dot: 'bg-cyan-500'   },
   Want:           { bg: 'bg-cyan-50',   text: 'text-cyan-700',   dot: 'bg-cyan-500'   },
   Completed:      { bg: 'bg-emerald-50',text: 'text-emerald-700',dot: 'bg-emerald-500'},
   'Sales Submittal':{ bg: 'bg-orange-50', text: 'text-orange-700', dot: 'bg-orange-500' },
@@ -864,10 +878,9 @@ const DEFAULT_STALENESS = {
     // null/0 = never goes stale.
     New: 24,           // 1 day to review, fill in and assign
     Working: 168,      // fallback only — a Working lead with a deadline ignores this
-    Prospect: 336,     // 14 days
     Pending: 168,      // 7 days
-    Want: 336,         // 14 days
-    'Sales Submittal': 72, // 3 days for the back office to complete the submittal
+    Wanted: 336,       // 14 days
+    Prospect: null,    // prospects are long-term — never stale
     Completed: null,
     Lost: null,
     Unqualified: null,
@@ -877,7 +890,7 @@ const DEFAULT_STALENESS = {
 };
 // Thresholds ensurePipelineStatuses adds to a stored config that predates them.
 const PIPELINE_STALENESS_DEFAULTS = {
-  Prospect: 336, Pending: 168, Want: 336, 'Sales Submittal': 72, Completed: null, Dead: null, Cancelled: null
+  Prospect: null, Pending: 168, Wanted: 336, Completed: null, Dead: null, Lost: null, Unqualified: null
 };
 
 function getLastActivityAt(lead) {
@@ -1001,31 +1014,13 @@ function findDuplicates(candidate, leads, config = DEFAULT_DUPLICATE_DETECTION) 
 }
 
 
-function HeatBadge({ score, tier, compact = false }) {
-  const s = TIER_STYLES[tier];
-  if (compact) {
-    return (
-      <div className="inline-flex items-center gap-2">
-        <span className={`font-mono font-bold text-sm ${s.text} w-7 text-right`}>{score}</span>
-        <div className="w-12 h-1.5 bg-stone-100 rounded-full overflow-hidden">
-          <div className={`h-full ${s.bar} transition-all`} style={{ width: `${score}%` }}/>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs font-semibold ${s.bg} ${s.text}`}>
-      <span>{s.icon}</span>{tier} · {score}
-    </span>
-  );
-}
 
 export default function BobcatIndyCRM() {
   const [view, setView] = useState(() => {
     // Allow ?view=users or ?view=leads etc. via URL — used by email notifications
     try {
       const requested = new URLSearchParams(window.location.search).get('view');
-      const valid = [HOME_VIEW, ...STAGE_VIEWS, 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings'];
+      const valid = [HOME_VIEW, ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings'];
       if (requested && valid.includes(requested)) return requested;
       if (requested && MOVED_VIEWS[requested]) return MOVED_VIEWS[requested][0];
     } catch { /* ignore */ }
@@ -1243,8 +1238,19 @@ export default function BobcatIndyCRM() {
       let done = 0;
       for (const lead of stragglers) {
         try {
+          // A lead that was waiting as a submittal becomes a done deal whose
+          // submittal is still open in the back office queue. It counts as
+          // completed from now, so it gets its 30 days in Completed.
+          const extra = {};
+          if (lead.status === WON_STATUS) {
+            const nowIso = new Date().toISOString();
+            extra.statusChangedAt = nowIso;
+            extra.completedAt = nowIso;
+            if (lead.salesRequest && !lead.salesRequest.status) extra.salesRequest = { ...lead.salesRequest, status: SUBMITTAL_OPEN };
+          }
           await updateLeadDoc(lead.id, {
             status: lead.status,
+            ...extra,
             history: [
               ...(lead.history || []),
               {
@@ -1338,6 +1344,18 @@ export default function BobcatIndyCRM() {
   const openRequestCount = visibleRequests.filter(r => OPEN_REQUEST_STATUSES.includes(r.status)).length;
   const openFinanceCount = visibleRecords.finance.filter(f => !FINANCE_CLOSED_STATUSES.includes(f.admin?.dealStatus)).length;
   const pendingTradeInCount = visibleRecords.tradeIns.filter(t => tradeInStatus(t) === 'Awaiting Approval').length;
+
+  // The Sales Submittals queue: every lead with a submittal, whatever its
+  // status or age (an archived lead's submittal can still be open). Admins see
+  // all; reps the ones on their leads or that they submitted.
+  const submittalLeads = useMemo(() => {
+    if (!currentUser) return [];
+    return leads.filter(l => l.salesRequest && l.status !== JUNK_STATUS && (
+      currentUser.role === 'admin'
+      || l.assignedTo === currentUser.id || l.secondaryAssignedTo === currentUser.id
+      || l.salesRequest.submittedBy === currentUser.id));
+  }, [leads, currentUser]);
+  const openSubmittalCount = submittalLeads.filter(l => submittalStatus(l) === SUBMITTAL_OPEN).length;
 
   // The Archived tab on Completed: admins see every archived lead, reps the ones
   // that were theirs (as on the Completed dashboard).
@@ -1640,15 +1658,10 @@ export default function BobcatIndyCRM() {
         showToast('Assign a rep before moving this lead to Working', 'error');
         return false;
       }
-      if (!canCloseSalesRequest(lead.status, patch.status, currentUser?.role === 'admin', closed)) {
-        showToast('Only the back office (an admin) can mark a submittal Completed', 'error');
-        return false;
-      }
-      // A sale made while the lead is being worked goes through the Sales
-      // Submittal, which is what supplies patch.salesRequest.
-      if ((patch.status === SALES_REQUEST_STATUS || completesViaSalesRequest(lead.status, patch.status, closed))
-          && !patch.salesRequest) {
-        showToast('Completing a sale opens the Sales Submittal — change one lead at a time', 'error');
+      // A done deal goes through the Sales Submittal, which is what supplies
+      // patch.salesRequest. (A lead that already has one can be re-completed.)
+      if (completesViaSalesRequest(lead.status, patch.status, closed) && !patch.salesRequest && !lead.salesRequest) {
+        showToast('Completing a deal opens the Sales Submittal — change one lead at a time', 'error');
         return false;
       }
     }
@@ -1666,11 +1679,14 @@ export default function BobcatIndyCRM() {
         from: lead.status, to: patch.status
       });
       patch = { ...patch, statusChangedAt: now, statusChangedBy: actor || null };
+      // When a deal is done — the 30-day follow-up reminder counts from here.
+      if (patch.status === WON_STATUS && !patch.completedAt) patch.completedAt = now;
+      if (patch.status === WON_STATUS) patch.followUpReminderSentAt = null;
     }
 
     // A submitted sales request gets its own timeline entry alongside the status
     // change. Back-office edits to it later come through with _salesRequestEdit.
-    if (patch.salesRequest && patch.status === SALES_REQUEST_STATUS) {
+    if (patch.salesRequest && patch.status === WON_STATUS && !lead.salesRequest) {
       events.push({
         id: uid('h'), type: 'sales_request', timestamp: now, actor,
         equipment: patch.salesRequest.model || ''
@@ -1753,16 +1769,17 @@ export default function BobcatIndyCRM() {
       showToast('Assign a rep before moving this lead to Working', 'error');
       return;
     }
-    // Completed on a lead still being worked = the rep made the sale. That opens
-    // the Sales Submittal and the lead goes to Sales Request, per Indy's process.
-    if (completesViaSalesRequest(lead.status, status, closed)
-        || (status === SALES_REQUEST_STATUS && lead.status !== SALES_REQUEST_STATUS)) {
+    // Completed = a done deal. That opens the Sales Submittal; on submit the
+    // lead is Completed and the submittal joins the back office's queue.
+    if (completesViaSalesRequest(lead.status, status, closed)) {
+      if (lead.salesRequest) { updateLead(id, { status, completedAt: new Date().toISOString() }); return; }
       setSalesRequestPrompt({ leadId: id });
       return;
     }
-    // Lost asks why (and who won it) before the lead goes to Completed.
-    if (status === LOST_STATUS && lead.status !== LOST_STATUS) {
-      setLostPrompt({ leadId: id });
+    // Into the Prospect group (Prospect, Dead, Unqualified, Lost): ask for
+    // keywords so the prospect list stays searchable — and, for Lost, why.
+    if (PROSPECT_GROUP_STATUSES.includes(status) && status !== lead.status) {
+      setLostPrompt({ leadId: id, status });
       return;
     }
     if (status === WORKING_STATUS && lead.status !== WORKING_STATUS) {
@@ -1804,15 +1821,17 @@ export default function BobcatIndyCRM() {
 
   // Lost reason and competitor are kept on the deal record, next to what the
   // customer wanted, so the Completed step shows why it was lost.
-  const submitLost = async ({ lostReason, competitor }) => {
+  const submitLost = async ({ lostReason, competitor, prospectKeywords }) => {
     if (!lostPrompt) return;
     const lead = leads.find(l => l.id === lostPrompt.leadId);
+    const status = lostPrompt.status || LOST_STATUS;
     setLostPrompt(null);
     if (!lead) return;
-    await updateLead(lead.id, {
-      status: LOST_STATUS,
-      deal: { ...(lead.deal || {}), lostReason, competitor: competitor || (lead.deal && lead.deal.competitor) || '' }
-    });
+    const patch = { status, prospectKeywords: prospectKeywords || '' };
+    if (status === LOST_STATUS) {
+      patch.deal = { ...(lead.deal || {}), lostReason, competitor: competitor || (lead.deal && lead.deal.competitor) || '' };
+    }
+    await updateLead(lead.id, patch);
   };
   const [salesRequestBusy, setSalesRequestBusy] = useState(false);
 
@@ -1824,10 +1843,11 @@ export default function BobcatIndyCRM() {
     setSalesRequestBusy(true);
     const salesRequest = {
       ...form,
+      status: SUBMITTAL_OPEN,
       submittedAt: new Date().toISOString(),
       submittedBy: currentUser?.id || null
     };
-    const saved = await updateLead(leadId, { ...extraPatch, status: SALES_REQUEST_STATUS, salesRequest });
+    const saved = await updateLead(leadId, { ...extraPatch, status: WON_STATUS, completedAt: new Date().toISOString(), salesRequest });
     if (!saved) { setSalesRequestBusy(false); return; }   // updateLead already said why
     if (files.length) await attachFiles('leads', leadId, files, 'submittal');
     const res = await sendSalesRequestEmailViaFunction({ leadId });
@@ -1842,11 +1862,11 @@ export default function BobcatIndyCRM() {
     if (res?.sent && res.deskRecipients > 0) {
       showToast(`Sales Submittal sent to ${res.deskRecipients} recipient${res.deskRecipients === 1 ? '' : 's'}`);
     } else if (res?.sent) {
-      showToast('Moved to Sales Submittals — no back-office recipients set in Settings, so only the rep was emailed', 'error');
+      showToast('Completed — submittal sent, but no back-office recipients set in Settings, so only the rep was emailed', 'error');
     } else if (res?.reason === 'no-recipients') {
-      showToast('Moved to Sales Submittals — but no one was emailed. Add recipients in Settings.', 'error');
+      showToast('Completed — but no one was emailed about the submittal. Add recipients in Settings.', 'error');
     } else {
-      showToast('Moved to Sales Submittals — but the email failed to send', 'error');
+      showToast('Completed — but the submittal email failed to send', 'error');
     }
   };
 
@@ -2009,9 +2029,14 @@ export default function BobcatIndyCRM() {
     setView(v);
   };
 
+  // + New → Prospect / Want open Add Lead preset to that status.
+  const [addPreset, setAddPreset] = useState(null);
   // The + New menu.
   const handleNew = (kind) => {
-    if (kind === 'lead') { setView('add'); return; }
+    if (selectedLead) { setSelectedLead(null); setFocusRecord(null); }
+    if (kind === 'lead')     { setAddPreset(null); setView('add'); return; }
+    if (kind === 'prospect') { setAddPreset(PROSPECT_STATUS); setView('add'); return; }
+    if (kind === 'want')     { setAddPreset(WANTED_STATUS); setView('add'); return; }
     if (kind === 'submittal') { setNewSubmittalOpen(true); return; }
     setRecordPrompt({ kind, leadId: null });
   };
@@ -2030,10 +2055,11 @@ export default function BobcatIndyCRM() {
       submittedBy: currentUser.name || '',
       assignedTo: newLead.assignedTo,
       dateAssigned: now,
-      status: SALES_REQUEST_STATUS,
+      status: WON_STATUS,
+      completedAt: now,
       statusChangedAt: now,
       statusChangedBy: currentUser.id,
-      salesRequest: { ...form, submittedAt: now, submittedBy: currentUser.id },
+      salesRequest: { ...form, status: SUBMITTAL_OPEN, submittedAt: now, submittedBy: currentUser.id },
       history: [
         { id: uid('h'), type: 'created', timestamp: now, actor: currentUser.id, source: MANUAL_SOURCE },
         { id: uid('h'), type: 'sales_request', timestamp: now, actor: currentUser.id, equipment: form.model || '' }
@@ -2313,7 +2339,7 @@ export default function BobcatIndyCRM() {
         <Sidebar
           view={view} setView={goTo}
           stageCounts={Object.fromEntries(PIPELINE_STAGES.map(s => [s.id, stageLeads[s.id].length]))}
-          backOfficeCounts={{ requests: openRequestCount, finance: openFinanceCount, tradeIns: pendingTradeInCount }}
+          backOfficeCounts={{ submittals: openSubmittalCount, requests: openRequestCount, finance: openFinanceCount, tradeIns: pendingTradeInCount }}
           userRole={currentUser.role}
           pendingCount={accessRequests.length}
           mobileOpen={mobileNavOpen}
@@ -2328,6 +2354,7 @@ export default function BobcatIndyCRM() {
             onMobileMenuOpen={() => setMobileNavOpen(true)}
             onChipFilter={applyChipFilter}
             leadOpen={!!selectedLead}
+            addPreset={addPreset}
             search={
               <GlobalSearch
                 scope={searchScope}
@@ -2381,6 +2408,8 @@ export default function BobcatIndyCRM() {
                 stageLeads={stageLeads}
                 openRequestCount={openRequestCount}
                 onOpenRequests={() => setView('requests')}
+                openSubmittalCount={openSubmittalCount}
+                onOpenSubmittals={() => setView('submittals')}
                 openFinanceCount={openFinanceCount}
                 onOpenFinance={() => setView('finance')}
                 config={configWithUsers}
@@ -2392,20 +2421,11 @@ export default function BobcatIndyCRM() {
             {/* Tabs on the two dashboards that absorbed old sidebar items. */}
             {view === getStage(STAGE_INCOMING).view && (
               <SubTabs value={incomingTab} onChange={setIncomingTab}
-                tabs={[['incoming', 'Incoming', stageLeads[STAGE_INCOMING].length], ['junk', 'Junk', junkLeads.length]]}/>
+                tabs={[['incoming', 'New', stageLeads[STAGE_INCOMING].length], ['junk', 'Junk', junkLeads.length]]}/>
             )}
             {view === getStage(STAGE_COMPLETED).view && (
               <SubTabs value={completedTab} onChange={setCompletedTab}
                 tabs={[['completed', 'Completed', stageLeads[STAGE_COMPLETED].length], ['archived', 'Archived', visibleArchivedLeads.length]]}/>
-            )}
-            {view === getStage(STAGE_SALES_REQUEST).view && (
-              <div className="flex justify-end mb-3">
-                <button onClick={() => setNewSubmittalOpen(true)}
-                  className="text-xs px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-md inline-flex items-center gap-1.5"
-                  title="Enter a sale that didn't come through the LMT">
-                  <Plus size={13}/> New Sales Submittal
-                </button>
-              </div>
             )}
 
             {PIPELINE_STAGES.map(stage => view === stage.view
@@ -2449,6 +2469,11 @@ export default function BobcatIndyCRM() {
             )}
 
             {/* Back office */}
+            {view === 'submittals' && (
+              <SubmittalsView leads={submittalLeads} config={configWithUsers} currentUser={currentUser}
+                onOpen={(l) => { setFocusRecord({ kind: 'submittal', id: l.id, leadId: l.id }); setSelectedLead(l); }}
+                onNew={() => setNewSubmittalOpen(true)}/>
+            )}
             {view === 'requests' && (
               <RequestsView
                 requests={visibleRequests} leads={leads} config={configWithUsers} currentUser={currentUser}
@@ -2482,7 +2507,7 @@ export default function BobcatIndyCRM() {
             )}
 
             {view === 'add' && (
-              <AddLeadView config={configWithUsers} currentUser={currentUser} onAdd={(d) => submitNewLead(d, 'Manual Entry')} />
+              <AddLeadView key={addPreset || 'lead'} preset={addPreset} config={configWithUsers} currentUser={currentUser} onAdd={(d) => submitNewLead(d, 'Manual Entry')} />
             )}
             {view === 'reports' && canAccessView('reports', currentUser.role) && (
               <ReportsView leads={pipelineLeads} config={configWithUsers}/>
@@ -2508,9 +2533,6 @@ export default function BobcatIndyCRM() {
                 {settingsTab === 'routing' && (
                   <LeadRoutingView config={configWithUsers} onSave={saveConfig} onCreateUser={createFullUser} canEdit/>
                 )}
-                {settingsTab === 'scoring' && (
-                  <ScoringRulesView config={configWithUsers} onSave={saveConfig} />
-                )}
                 {settingsTab === 'import' && (
                   <ImportView config={configWithUsers} onImport={importLeads} leads={pipelineLeads}/>
                 )}
@@ -2527,7 +2549,7 @@ export default function BobcatIndyCRM() {
         if (!lostLead) return null;
         return (
           <LostDealModal
-            lead={lostLead}
+            lead={lostLead} status={lostPrompt.status || LOST_STATUS}
             onSubmit={submitLost}
             onCancel={() => setLostPrompt(null)}
           />
@@ -2871,9 +2893,11 @@ function AuthField({ label, children }) {
 // The + New menu: every form in one place, the way each Smartsheet had its own.
 const NEW_MENU = [
   { kind: 'lead',        label: 'Lead',            hint: 'A new sales opportunity',            icon: UserPlus },
+  { kind: 'prospect',    label: 'Prospect',        hint: 'Someone to come back to, with keywords', icon: Tag },
+  { kind: 'want',        label: 'Want',            hint: 'A customer waiting on a unit',       icon: Clock },
+  { kind: 'submittal',   label: 'Sales Submittal', hint: 'A sale that didn’t start as a lead', icon: ClipboardList },
   { kind: 'requests',    label: 'Sales Request',   hint: 'Delivery, get ready, demo, parts…',  icon: Send },
   { kind: 'tradeIns',    label: 'Trade-In',        hint: 'Evaluate a customer’s machine',      icon: RefreshCw },
-  { kind: 'submittal',   label: 'Sales Submittal', hint: 'A sale that didn’t start as a lead', icon: ClipboardList },
   { kind: 'finance',     label: 'Finance Deal',    hint: 'For the finance team’s tracker',     icon: Briefcase }
 ];
 
@@ -2882,11 +2906,12 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userR
   // Groups, in order. Access is still decided centrally by canAccessView, and a
   // group whose items are all filtered out disappears with them.
   const groups = [
-    { title: 'Pipeline', items: [
-      { id: HOME_VIEW, label: 'Dashboards', icon: LayoutDashboard },
+    { title: 'Lead Management', items: [
+      { id: HOME_VIEW, label: 'Dashboard', icon: LayoutDashboard },
       ...PIPELINE_STAGES.map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id], indent: true }))
     ] },
     { title: 'Back Office', items: [
+      { id: 'submittals', label: 'Sales Submittals',  icon: ClipboardList, badge: backOfficeCounts.submittals },
       { id: 'requests',  label: 'Sales Requests',     icon: Send,          badge: backOfficeCounts.requests },
       { id: 'finance',   label: 'Finance',            icon: Briefcase,     badge: backOfficeCounts.finance },
       { id: 'trade-ins', label: userRole === 'admin' ? 'Trade-In Approvals' : 'Trade-Ins', icon: RefreshCw,     badge: backOfficeCounts.tradeIns }
@@ -3020,19 +3045,19 @@ function welcomeEmailReason(err) {
 }
 
 /* ===================== TOP BAR ===================== */
-function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter, search = null, leadOpen = false }) {
-  const stageForChips = leadOpen ? null : stageForView(view);
+function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter, search = null, leadOpen = false, addPreset = null }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const stage = stageForView(view);
   const titles = {
-    [HOME_VIEW]: 'Dashboards',
+    [HOME_VIEW]: 'Dashboard',
     ...Object.fromEntries(PIPELINE_STAGES.map(s => [s.view, s.label])),
+    submittals: 'Sales Submittals',
     requests: 'Sales Requests',
     finance: 'Finance',
     'trade-ins': 'Trade-In Evaluations',
     archived: 'Archived Leads',
     junk: 'Junk',
-    add: 'Add Lead', import: 'Import Leads',
+    add: addPreset === PROSPECT_STATUS ? 'Add Prospect' : addPreset === WANTED_STATUS ? 'Add a Want' : 'Add Lead', import: 'Import Leads',
     reports: 'Reports',
     users: 'Users', scoring: 'Scoring Rules', settings: 'Settings',
     'lead-routing': 'Lead Routing'
@@ -3047,14 +3072,13 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
 
     return {
       total:      lst.length,
-      hot:        lst.filter(l => scoreLead(l, config.scoringRules).tier === 'Urgent').length,
       stale:      lst.filter(l => isLeadStale(l, config.staleness)).length,
       unassigned: lst.filter(l => isUnassigned(l)).length,
       open:       lst.filter(l => !closedStatuses.includes(l.status)).length,
       won:        lst.filter(l => l.status === WON_STATUS).length,
       lost:       lst.filter(l => l.status === 'Lost').length
     };
-  }, [stageLeads, stage, config.scoringRules, config.staleness, config.closedStatuses]);
+  }, [stageLeads, stage, config.staleness, config.closedStatuses]);
 
   const initials = currentUser.name.split(' ').map(s => s[0]).join('').slice(0,2).toUpperCase();
   const mine = currentUser.role !== 'admin';
@@ -3073,14 +3097,15 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
           <div className="min-w-0">
             <h1 className="font-display text-xl md:text-3xl font-bold text-stone-900 leading-tight truncate">{titles[view]}</h1>
             <div className="text-[11px] md:text-xs text-stone-500 mt-0.5 truncate hidden sm:block">
-              {view === HOME_VIEW && (mine ? 'Your leads at each step of the sale' : 'Every lead, at each step of the sale')}
+              {view === HOME_VIEW && (mine ? 'Your leads, and the back office work tied to them' : 'Every lead, plus the back office queues')}
               {stage && `${stats.total} lead${stats.total === 1 ? '' : 's'}${mine ? (stage.id === STAGE_INCOMING ? ' assigned to you or unassigned' : ' assigned to you') : ''} · ${stage.blurb}`}
+              {view === 'submittals' && (mine ? 'Sales submittals on your deals and where the back office is with them' : 'Done deals waiting on the back office')}
               {view === 'requests' && (mine ? 'Deliveries, get-readies, demos, parts, pick-ups and service you\'ve requested' : 'Operations requests, checked off by Rental, Service and Parts')}
               {view === 'finance' && (mine ? 'Your financed deals and where they are in funding' : 'Financed deals from submittal to funding')}
               {view === 'trade-ins' && (mine ? 'Your trade-in evaluations and their approval status' : 'Trade-in evaluations waiting for a value and approval')}
               {view === 'archived' && 'Leads closed for 30+ days — exported or cleared from here'}
               {view === 'junk' && 'Spam and non-leads, kept out of every dashboard and report'}
-              {view === 'add' && 'Manually enter a new lead'}
+              {view === 'add' && (addPreset === PROSPECT_STATUS ? 'Someone to come back to — add keywords so they\'re easy to find' : addPreset === WANTED_STATUS ? 'A customer waiting on a unit that isn\'t available yet' : 'Manually enter a new lead')}
               {view === 'import' && 'Upload a CSV file with leads'}
               {view === 'reports' && 'Pipeline health, conversion, and team performance'}
               {view === 'users' && 'Manage sales team members and access requests'}
@@ -3093,25 +3118,6 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
 
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
           {search}
-          {/* Stat chips — desktop only; mobile keeps the top bar uncluttered */}
-          {stageForChips && stage.id !== STAGE_COMPLETED && (
-            <div className="hidden lg:flex gap-2">
-              <StatChip label="Total"      value={stats.total}      onClick={() => onChipFilter('all')}        title="Show every lead in this step (clear filters)"/>
-              <StatChip label="🚨 Urgent"  value={stats.hot}        accent="brand" onClick={() => onChipFilter('hot')}        title="Filter to Urgent leads"/>
-              <StatChip label="Stale"      value={stats.stale}      accent={stats.stale > 0 ? 'rose' : undefined} onClick={() => onChipFilter('stale')}      title="Filter to stale leads"/>
-              {stage.id === STAGE_INCOMING && (
-                <StatChip label="Unassigned" value={stats.unassigned} onClick={() => onChipFilter('unassigned')} title="Filter to unassigned leads"/>
-              )}
-            </div>
-          )}
-          {stageForChips && stage.id === STAGE_COMPLETED && (
-            <div className="hidden lg:flex gap-2">
-              <StatChip label="Total" value={stats.total} onClick={() => onChipFilter('all')}  title="Show everything in this step (clear filters)"/>
-              <StatChip label={WON_STATUS} value={stats.won}   accent="brand" onClick={() => onChipFilter('won')}  title="Filter to completed sales"/>
-              <StatChip label="Lost"      value={stats.lost}  accent={stats.lost > 0 ? 'rose' : undefined} onClick={() => onChipFilter('lost')} title="Filter to lost deals"/>
-            </div>
-          )}
-
           {/* User menu — compact on mobile (avatar only), expanded on desktop */}
           <div className="relative">
             <button onClick={() => setMenuOpen(o => !o)}
@@ -3571,10 +3577,12 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
   const [filterSubmitter, setFilterSubmitter] = useState('All');
   const [filterBranch, setFilterBranch] = useState('All');
   const [filterDepartment, setFilterDepartment] = useState('All');
-  const [filterHeat, setFilterHeat] = useState('All');
+  const [filterTemp, setFilterTemp] = useState('All');
+  // The Prospect tab's type buttons (Prospect is the default view).
+  const [prospectType, setProspectType] = useState('prospect');
   const [filterStale, setFilterStale] = useState('All');
   const [sortBy, setSortBy] = useState(
-    myUserId ? { field: 'heat', dir: 'desc' } : { field: 'createdDate', dir: 'desc' }
+    { field: 'createdDate', dir: 'desc' }
   );
   const [selected, setSelected] = useState(new Set());
 
@@ -3600,7 +3608,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
     // Reset all chip-controlled filters first so each preset starts clean
     const clear = () => {
       setFilterStatus('All');
-      setFilterHeat('All');
+      setFilterTemp('All');
       setFilterStale('All');
       setFilterAssigned('All');
     };
@@ -3614,9 +3622,10 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
         setFilterDepartment('All');
         break;
       case 'hot':
+      case 'warm':
+      case 'cold':
         clear();
-        // Chip preset key stays 'hot' (internal identifier); tier value uses 'Urgent'
-        setFilterHeat('Urgent');
+        setFilterTemp(prefilter[0].toUpperCase() + prefilter.slice(1));
         break;
       case 'stale':
         clear();
@@ -3712,9 +3721,9 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
   // Pre-compute scores and staleness once per leads change
   const scored = useMemo(() => visibleLeads.map(l => ({
     ...l,
-    _score: scoreLead(l, config.scoringRules),
+    _temp: leadTemperature(l),
     _staleness: getStaleness(l, config.staleness)
-  })), [visibleLeads, config.scoringRules, config.staleness]);
+  })), [visibleLeads, config.staleness]);
 
   // For the "Assigned" filter dropdown: only show users who actually have leads
   // in the current scope. Reduces clutter (admins don't see every rep listed when
@@ -3745,20 +3754,25 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
       }
       if (filterBranch !== 'All' && l.branch !== filterBranch) return false;
       if (filterDepartment !== 'All' && l.department !== filterDepartment) return false;
-      if (filterHeat !== 'All' && l._score.tier !== filterHeat) return false;
+      if (stage === STAGE_PROSPECT) {
+        const type = PROSPECT_TYPES.find(t => t.id === prospectType);
+        if (type && l.status !== type.status) return false;
+      }
+      if (filterTemp !== 'All' && (filterTemp === 'Not set' ? l._temp !== '' : l._temp !== filterTemp)) return false;
       if (filterStale === 'Stale' && !l._staleness.stale) return false;
       if (filterStale === 'Fresh' && l._staleness.stale) return false;
       if (search.trim()) {
         const s = search.toLowerCase();
-        return [l.customerName, l.companyName, l.contactEmail, l.phone, l.zip, l.comment, l.formTitle]
+        return [l.customerName, l.companyName, l.contactEmail, l.phone, l.zip, l.comment, l.formTitle, l.prospectKeywords]
           .filter(Boolean).some(v => v.toLowerCase().includes(s));
       }
       return true;
     });
     result.sort((a, b) => {
       let av, bv;
-      if (sortBy.field === 'heat') {
-        av = a._score.total; bv = b._score.total;
+      if (sortBy.field === 'temperature') {
+        const rank = { Hot: 3, Warm: 2, Cold: 1 };
+        av = rank[a._temp] || 0; bv = rank[b._temp] || 0;
       } else if (sortBy.field === 'age') {
         av = a._staleness.hours; bv = b._staleness.hours;
       } else {
@@ -3769,7 +3783,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
       return 0;
     });
     return result;
-  }, [scored, search, filterStatus, filterAssigned, filterSource, filterSubmitter, filterBranch, filterHeat, filterStale, sortBy, myUserId]);
+  }, [scored, search, filterStatus, filterAssigned, filterSource, filterSubmitter, filterBranch, filterTemp, filterStale, sortBy, myUserId, stage, prospectType]);
 
   // Pagination derivations. When filters change, the current page may no longer
   // exist (e.g. was on page 5, filter narrows to only 2 pages). Clamp back to 1
@@ -3830,8 +3844,8 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
       'Assigned To': userMap[l.assignedTo]?.name || '',
       'Internal Comments': l.internalComments.map(c => `[${fmtDateTime(c.timestamp)}] ${c.text}`).join(' | '),
       'Status': l.status,
-      'Heat Score': l._score.total,
-      'Heat Tier': l._score.tier
+      'Temperature': l._temp,
+      'Keywords': l.prospectKeywords || ''
     }));
     const csv = Papa.unparse(rows);
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -3843,16 +3857,60 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
 
   return (
     <div>
+      {stage === STAGE_PROSPECT && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3" role="tablist" aria-label="Prospect type">
+          {PROSPECT_TYPES.map(t => {
+            const n = visibleLeads.filter(l => l.status === t.status).length;
+            const on = prospectType === t.id;
+            return (
+              <button key={t.id} type="button" role="tab" aria-selected={on} onClick={() => { setProspectType(t.id); setSelected(new Set()); }}
+                className={`px-4 py-3 rounded-lg border text-left transition-colors ${on ? 'bg-stone-900 border-stone-900 text-white' : 'bg-white border-stone-200 text-stone-700 hover:border-stone-400'}`}>
+                <div className="text-sm font-semibold">{t.label}</div>
+                <div className={`text-2xl font-display font-bold leading-tight ${on ? 'text-white' : 'text-stone-900'}`}>{n}</div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {/* Quick links: temperature first (set by the rep), then age and owner. */}
+      {stage && (() => {
+        const base = stage === STAGE_PROSPECT
+          ? scored.filter(l => l.status === (PROSPECT_TYPES.find(t => t.id === prospectType) || {}).status)
+          : scored;
+        const n = (fn) => base.filter(fn).length;
+        const chip = (key, label, count, on, onClick, dot) => (
+          <button key={key} type="button" onClick={onClick} aria-pressed={on}
+            className={`px-3 py-1.5 rounded-full border text-xs font-medium inline-flex items-center gap-1.5 ${on ? 'bg-stone-900 border-stone-900 text-white' : 'bg-white border-stone-200 text-stone-700 hover:border-stone-400'}`}>
+            {dot && <span className={`w-2 h-2 rounded-full ${dot}`}/>}{label}
+            <span className={`font-mono ${on ? 'text-stone-300' : 'text-stone-500'}`}>{count}</span>
+          </button>
+        );
+        return (
+          <div className="flex items-center gap-2 flex-wrap mb-3">
+            {chip('all', 'All', base.length, filterTemp === 'All' && filterStale === 'All' && filterAssigned === 'All',
+              () => { setFilterTemp('All'); setFilterStale('All'); setFilterAssigned('All'); })}
+            {TEMPERATURES.map(t => chip(t, t, n(l => l._temp === t), filterTemp === t,
+              () => setFilterTemp(filterTemp === t ? 'All' : t), TEMP_STYLES[t].dot))}
+            {chip('none', 'Not set', n(l => !l._temp), filterTemp === 'Not set', () => setFilterTemp(filterTemp === 'Not set' ? 'All' : 'Not set'), 'bg-stone-300')}
+            <span className="w-px h-5 bg-stone-200 mx-1"/>
+            {chip('stale', 'Stale', n(l => l._staleness.stale), filterStale === 'Stale', () => setFilterStale(filterStale === 'Stale' ? 'All' : 'Stale'))}
+            {stage === STAGE_INCOMING && !myUserId && chip('unassigned', 'Unassigned', n(l => isUnassigned(l)), filterAssigned === 'u_1',
+              () => setFilterAssigned(filterAssigned === 'u_1' ? 'All' : 'u_1'))}
+          </div>
+        );
+      })()}
       <div className="bg-white border border-stone-200 rounded-lg mb-4">
         <div className="p-2.5 md:p-3 flex items-center gap-2 flex-wrap">
           <div className="relative w-full md:flex-1 md:w-auto md:min-w-[240px]">
             <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
             <input type="text" value={search} onChange={e => setSearch(e.target.value)}
-              placeholder="Search name, email, phone, zip…"
+              placeholder={stage === STAGE_PROSPECT ? 'Search name, phone, keywords…' : 'Search name, email, phone, zip…'}
               className="w-full pl-9 pr-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"/>
           </div>
-          <FilterSelect value={filterStatus}   onChange={setFilterStatus}   options={statusFilterOptions} label="Status" />
-          <FilterSelect value={filterHeat}     onChange={setFilterHeat}     options={['All', 'Urgent', 'Warm', 'Cool', 'Cold']} label="Heat" />
+          {stage !== STAGE_PROSPECT && (
+            <FilterSelect value={filterStatus}   onChange={setFilterStatus}   options={statusFilterOptions} label="Status" />
+          )}
+          <FilterSelect value={filterTemp}     onChange={setFilterTemp}     options={['All', ...TEMPERATURES, 'Not set']} label="Temperature" />
           <FilterSelect value={filterStale}    onChange={setFilterStale}    options={['All', 'Stale', 'Fresh']} label="Age" />
           {!myUserId && (
             <FilterSelect
@@ -4006,7 +4064,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
                       </th>
                     )}
                     <SortHeader label="Customer"  field="customerName"  sortBy={sortBy} onClick={toggleSort} />
-                    <SortHeader label="Heat"      field="heat"          sortBy={sortBy} onClick={toggleSort} />
+                    <SortHeader label="Temp"      field="temperature"   sortBy={sortBy} onClick={toggleSort} />
                     <SortHeader label="Contact"   field="contactEmail"  sortBy={sortBy} onClick={toggleSort} />
                     <SortHeader label="Source"    field="leadSource"    sortBy={sortBy} onClick={toggleSort} />
                     <SortHeader label="Branch"    field="branch"        sortBy={sortBy} onClick={toggleSort} />
@@ -4049,14 +4107,23 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
                           <div className="text-xs text-stone-500 truncate max-w-[220px]">{lead.companyName}</div>
                         )}
                         {lead.zip && <div className="text-xs text-stone-500 font-mono mt-0.5">ZIP {lead.zip}</div>}
+                        {prospectKeywordList(lead).length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {prospectKeywordList(lead).map(k => (
+                              <span key={k} className="text-[11px] px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-100">{k}</span>
+                            ))}
+                          </div>
+                        )}
                         {lead.comment && (
                           <div className="text-xs text-stone-600 mt-1 line-clamp-4 max-w-[420px] leading-snug" title={lead.comment}>
                             {lead.comment}
                           </div>
                         )}
                       </td>
-                      <td className="px-3 py-3 cursor-pointer" onClick={() => onSelect(lead)}>
-                        <HeatBadge score={lead._score.total} tier={lead._score.tier} compact/>
+                      <td className="px-3 py-3" onClick={e => e.stopPropagation()}>
+                        {rowReadOnly(lead)
+                          ? <TemperatureBadge value={lead._temp}/>
+                          : <InlineTemperatureSelect value={lead._temp} onChange={t => onUpdate(lead.id, { temperature: t })}/>}
                       </td>
                       <td className="px-3 py-3 cursor-pointer" onClick={() => onSelect(lead)}>
                         {lead.contactEmail && <div className="text-stone-700 truncate max-w-[200px]">{lead.contactEmail}</div>}
@@ -4279,7 +4346,9 @@ function MobileLeadCard({ lead, config, isSelected, onSelect, onToggleSelect, on
               })()}
             </div>
             <div onClick={(e) => e.stopPropagation()} className="shrink-0">
-              <HeatBadge score={lead._score.total} tier={lead._score.tier} compact />
+              {readOnly
+                ? <TemperatureBadge value={lead._temp}/>
+                : <InlineTemperatureSelect value={lead._temp} onChange={t => onUpdate(lead.id, { temperature: t })}/>}
             </div>
           </div>
           {lead.companyName && (
@@ -4724,13 +4793,17 @@ function InlineAssignSelect({ value, users, onChange, fullWidth, readOnly }) {
 }
 
 /* ===================== ADD LEAD ===================== */
-function AddLeadView({ config, onAdd, currentUser }) {
+// `preset` is the + New menu's Prospect / Want entry: the same form, starting
+// in that status and owned by whoever adds it.
+function AddLeadView({ config, onAdd, currentUser, preset = null }) {
   const defaultDept = (config.departments && config.departments[0]) || '';
   const [form, setForm] = useState({
     customerName: '', companyName: '', contactEmail: '', phone: '', comment: '',
-    branch: '', zip: '', formTitle: 'Manual Entry',
+    branch: '', zip: '', formTitle: preset ? `Manual ${preset}` : 'Manual Entry',
     department: defaultDept,
-    leadSource: MANUAL_SOURCE, status: 'New', assignedTo: 'u_1',
+    leadSource: MANUAL_SOURCE, status: preset || 'New',
+    assignedTo: preset && currentUser && currentUser.id ? currentUser.id : 'u_1',
+    temperature: '', prospectKeywords: '',
     // Only used when status is Working — how many weeks the lead stays active.
     workingWeeks: null,
     dateSubmitted: toLocalDateTimeInputValue(),
@@ -4774,7 +4847,8 @@ function AddLeadView({ config, onAdd, currentUser }) {
       workingUntil: form.status === WORKING_STATUS && form.workingWeeks
         ? workingDeadlineFrom(form.workingWeeks)
         : null,
-      workingWeeks: form.status === WORKING_STATUS ? form.workingWeeks : null
+      workingWeeks: form.status === WORKING_STATUS ? form.workingWeeks : null,
+      prospectKeywords: PROSPECT_GROUP_STATUSES.includes(form.status) ? (form.prospectKeywords || '').trim() : ''
     };
     onAdd(payload);
   };
@@ -4888,16 +4962,29 @@ function AddLeadView({ config, onAdd, currentUser }) {
             />
           </Field>
           <Field label="Status" error={errors.status}>
-            {/* A new lead starts in Incoming or Working. Sales Request needs its
-                form and Completed means there is nothing to add. */}
+            {/* Anything but Completed (that needs a Sales Submittal) and Junk. */}
             <select value={form.status} onChange={e => update('status', e.target.value)}
               className="w-full px-3 py-2 border border-stone-200 rounded-md focus:outline-none focus:border-brand-500 text-sm bg-white">
               {config.statuses
-                .filter(s => [STAGE_INCOMING, STAGE_WORKING].includes(stageOfStatus(s, getClosedStatuses(config))))
+                .filter(s => s !== WON_STATUS && s !== JUNK_STATUS)
                 .map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </Field>
+          <Field label="Temperature">
+            <TemperaturePicker value={form.temperature} onChange={t => update('temperature', t)}/>
+          </Field>
         </div>
+
+        {PROSPECT_GROUP_STATUSES.includes(form.status) && (
+          <div className="mt-4">
+            <Field label="Keywords">
+              <input type="text" value={form.prospectKeywords} onChange={e => update('prospectKeywords', e.target.value)}
+                placeholder="e.g. Cat, CTL, needs trailer"
+                className="w-full px-3 py-2 border border-stone-200 rounded-md focus:outline-none focus:border-brand-500 text-sm"/>
+              <div className="text-[11px] text-stone-500 mt-1">Separate with commas. Search and the Prospect tab find prospects by these.</div>
+            </Field>
+          </div>
+        )}
 
         {form.status === WORKING_STATUS && (
           <div className="mt-4">
@@ -5991,315 +6078,16 @@ function ResetPasswordModal({ target, busy, result, error, onConfirm, onClose })
 }
 
 /* ===================== SCORING RULES VIEW ===================== */
-function ScoringRulesView({ config, onSave }) {
-  const rules = config.scoringRules || DEFAULT_SCORING_RULES;
 
-  const update = (path, value) => {
-    const next = JSON.parse(JSON.stringify(rules));
-    const keys = path.split('.');
-    let cursor = next;
-    for (let i = 0; i < keys.length - 1; i++) cursor = cursor[keys[i]];
-    cursor[keys[keys.length - 1]] = value;
-    onSave({ ...config, scoringRules: next });
-  };
 
-  const resetAll = () => {
-    if (window.confirm('Reset ALL scoring rules to defaults? This cannot be undone.')) {
-      onSave({ ...config, scoringRules: DEFAULT_SCORING_RULES });
-    }
-  };
 
-  return (
-    <div className="max-w-4xl space-y-4">
-      <div className="bg-amber-50 border border-amber-200 rounded-md px-4 py-3 flex gap-2.5">
-        <AlertTriangle size={16} className="text-amber-600 mt-0.5 shrink-0"/>
-        <div className="text-xs text-amber-900 leading-relaxed">
-          Changes apply immediately to all lead scores. The "Test Lead" panel at the bottom lets you preview how a hypothetical lead would score under the current rules.
-        </div>
-      </div>
 
-      <TierThresholdsCard rules={rules} update={update}/>
-      <ServiceAreaCard    rules={rules} update={update}/>
-      <CommentQualityCard rules={rules} update={update}/>
-      <BuyIntentCard      rules={rules} update={update}/>
-      <LegitimacyCard     rules={rules} update={update}/>
-      <TestLeadCard       rules={rules}/>
 
-      <div className="bg-white border border-stone-200 rounded-lg p-5">
-        <div className="text-sm font-semibold text-stone-900 mb-1">Reset</div>
-        <div className="text-xs text-stone-500 mb-3">Restore all scoring rules, point values, and keyword lists to their original defaults.</div>
-        <button onClick={resetAll}
-          className="px-3 py-1.5 border border-stone-200 text-stone-700 hover:bg-stone-50 text-xs font-semibold rounded-md flex items-center gap-1.5">
-          <RefreshCw size={12}/> Reset all to defaults
-        </button>
-      </div>
-    </div>
-  );
-}
 
-function RulesCard({ title, subtitle, accent, children }) {
-  return (
-    <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-stone-200 bg-stone-50">
-        <div className="flex items-center gap-2">
-          {accent && <span className="text-sm">{accent}</span>}
-          <div className="text-sm font-semibold text-stone-900">{title}</div>
-        </div>
-        {subtitle && <div className="text-xs text-stone-500 mt-0.5">{subtitle}</div>}
-      </div>
-      <div className="p-5">{children}</div>
-    </div>
-  );
-}
 
-function NumberField({ label, value, onChange, suffix, min = 0, max = 100, hint }) {
-  return (
-    <div>
-      <label className="block text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-1">{label}</label>
-      <div className="relative">
-        <input type="number" min={min} max={max} value={value}
-          onChange={e => onChange(Number(e.target.value))}
-          className="w-full pr-12 px-3 py-2 border border-stone-200 rounded-md text-sm font-mono focus:outline-none focus:border-brand-500"/>
-        {suffix && <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-stone-400 font-mono pointer-events-none">{suffix}</span>}
-      </div>
-      {hint && <div className="text-[10px] text-stone-500 mt-1">{hint}</div>}
-    </div>
-  );
-}
 
-function KeywordEditor({ keywords, onChange, placeholder }) {
-  const [val, setVal] = useState('');
-  const add = () => {
-    const v = val.trim().toLowerCase();
-    if (v && !keywords.includes(v)) onChange([...keywords, v]);
-    setVal('');
-  };
-  const remove = (kw) => onChange(keywords.filter(k => k !== kw));
-  return (
-    <div>
-      <div className="flex flex-wrap gap-1.5 mb-2 min-h-[28px]">
-        {keywords.length === 0 ? (
-          <span className="text-xs text-stone-400 italic">No keywords — this category will never trigger</span>
-        ) : keywords.map(kw => (
-          <span key={kw} className="inline-flex items-center gap-1 px-2 py-0.5 bg-stone-100 text-stone-700 text-xs rounded">
-            {kw}
-            <button onClick={() => remove(kw)} className="text-stone-400 hover:text-rose-600">
-              <X size={10}/>
-            </button>
-          </span>
-        ))}
-      </div>
-      <div className="flex gap-2">
-        <input type="text" value={val} onChange={e => setVal(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') add(); }}
-          placeholder={placeholder}
-          className="flex-1 px-2.5 py-1.5 border border-stone-200 rounded text-xs focus:outline-none focus:border-brand-500"/>
-        <button onClick={add} className="px-2.5 py-1.5 bg-stone-900 text-white text-xs font-semibold rounded hover:bg-stone-800">Add</button>
-      </div>
-    </div>
-  );
-}
 
-function TierThresholdsCard({ rules, update }) {
-  const t = rules.tiers;
-  return (
-    <RulesCard title="Tier Thresholds" subtitle="Minimum total score required to qualify for each heat tier (out of 100)">
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <NumberField label="🚨 Urgent ≥"  value={t.hot}  onChange={v => update('tiers.hot', v)}  suffix="pts" hint={`Currently ${t.hot}+`}/>
-        <NumberField label="⚡ Warm ≥" value={t.warm} onChange={v => update('tiers.warm', v)} suffix="pts" hint={`${t.warm}–${t.hot - 1}`}/>
-        <NumberField label="Cool ≥"   value={t.cool} onChange={v => update('tiers.cool', v)} suffix="pts" hint={`${t.cool}–${t.warm - 1} · Cold below ${t.cool}`}/>
-      </div>
-    </RulesCard>
-  );
-}
 
-function ServiceAreaCard({ rules, update }) {
-  const sa = rules.serviceArea;
-  return (
-    <RulesCard title="Service Area" subtitle="Points awarded based on the lead's ZIP code prefix" accent="📍">
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-        <NumberField label="Primary area points"        value={sa.texasPoints}    onChange={v => update('serviceArea.texasPoints', v)}    suffix="pts" max={50}/>
-        <NumberField label="Adjacent state points" value={sa.adjacentPoints} onChange={v => update('serviceArea.adjacentPoints', v)} suffix="pts" max={50}/>
-        <NumberField label="Other points"        value={sa.otherPoints}    onChange={v => update('serviceArea.otherPoints', v)}    suffix="pts" max={50}/>
-      </div>
-      <div className="space-y-3">
-        <div>
-          <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-1.5">Primary ZIP prefixes (first 2 digits)</div>
-          <KeywordEditor keywords={sa.texasPrefixes} onChange={v => update('serviceArea.texasPrefixes', v)} placeholder="e.g. 67"/>
-        </div>
-        <div>
-          <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-1.5">Adjacent state ZIP prefixes</div>
-          <KeywordEditor keywords={sa.adjacentPrefixes} onChange={v => update('serviceArea.adjacentPrefixes', v)} placeholder="e.g. 74"/>
-        </div>
-      </div>
-    </RulesCard>
-  );
-}
-
-function CommentQualityCard({ rules, update }) {
-  const cq = rules.commentQuality;
-  return (
-    <RulesCard title="Comment Quality" subtitle="Points awarded based on the customer comment length" accent="💬">
-      <div className="space-y-2.5">
-        <CommentTier label="Detailed"    chars={cq.detailedChars}    points={cq.detailedPoints}    onCharChange={v => update('commentQuality.detailedChars', v)}    onPointChange={v => update('commentQuality.detailedPoints', v)}/>
-        <CommentTier label="Substantial" chars={cq.substantialChars} points={cq.substantialPoints} onCharChange={v => update('commentQuality.substantialChars', v)} onPointChange={v => update('commentQuality.substantialPoints', v)}/>
-        <CommentTier label="Moderate"    chars={cq.moderateChars}    points={cq.moderatePoints}    onCharChange={v => update('commentQuality.moderateChars', v)}    onPointChange={v => update('commentQuality.moderatePoints', v)}/>
-        <CommentTier label="Short"       chars={cq.shortChars}       points={cq.shortPoints}       onCharChange={v => update('commentQuality.shortChars', v)}       onPointChange={v => update('commentQuality.shortPoints', v)}/>
-        <CommentTier label="Brief"       chars={1}                   points={cq.briefPoints}       onPointChange={v => update('commentQuality.briefPoints', v)}     readonlyChars/>
-      </div>
-    </RulesCard>
-  );
-}
-
-function CommentTier({ label, chars, points, onCharChange, onPointChange, readonlyChars }) {
-  return (
-    <div className="flex items-center gap-3 text-sm">
-      <div className="font-semibold text-stone-700 w-24 shrink-0">{label}</div>
-      <div className="text-xs text-stone-500 shrink-0">≥</div>
-      {readonlyChars ? (
-        <div className="font-mono text-xs text-stone-500 w-20">1+ chars</div>
-      ) : (
-        <div className="flex items-center gap-1">
-          <input type="number" min={1} value={chars} onChange={e => onCharChange(Number(e.target.value))}
-            className="w-20 px-2 py-1 border border-stone-200 rounded text-sm font-mono focus:outline-none focus:border-brand-500"/>
-          <span className="text-xs text-stone-500">chars</span>
-        </div>
-      )}
-      <div className="text-xs text-stone-500 ml-auto">=</div>
-      <div className="flex items-center gap-1">
-        <input type="number" min={0} max={50} value={points} onChange={e => onPointChange(Number(e.target.value))}
-          className="w-16 px-2 py-1 border border-stone-200 rounded text-sm font-mono focus:outline-none focus:border-brand-500"/>
-        <span className="text-xs text-stone-500">pts</span>
-      </div>
-    </div>
-  );
-}
-
-function BuyIntentCard({ rules, update }) {
-  const bi = rules.buyIntent;
-  const categories = [
-    { key: 'urgency',   label: 'Urgency',           hint: 'Customer signals they want to act fast' },
-    { key: 'pricing',   label: 'Pricing Interest',  hint: 'Customer is asking about cost or financing' },
-    { key: 'timeframe', label: 'Timeframe',         hint: 'Customer mentions a specific timeline' },
-    { key: 'equipment', label: 'Specific Equipment',hint: 'Customer names a category or model (also triggers on model numbers like S70, T76)' }
-  ];
-  return (
-    <RulesCard title="Buy Intent Keywords"
-      subtitle={`Total max: ${bi.urgencyPoints + bi.pricingPoints + bi.timeframePoints + bi.equipmentPoints} pts. A category triggers if any of its keywords appear in the comment.`}
-      accent="🎯">
-      <div className="space-y-5">
-        {categories.map(cat => (
-          <div key={cat.key}>
-            <div className="flex items-center justify-between mb-1.5">
-              <div>
-                <div className="text-sm font-semibold text-stone-900">{cat.label}</div>
-                <div className="text-xs text-stone-500">{cat.hint}</div>
-              </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <input type="number" min={0} max={30}
-                  value={bi[`${cat.key}Points`]}
-                  onChange={e => update(`buyIntent.${cat.key}Points`, Number(e.target.value))}
-                  className="w-16 px-2 py-1 border border-stone-200 rounded text-sm font-mono text-right focus:outline-none focus:border-brand-500"/>
-                <span className="text-xs text-stone-500">pts</span>
-              </div>
-            </div>
-            <KeywordEditor
-              keywords={bi[`${cat.key}Keywords`]}
-              onChange={v => update(`buyIntent.${cat.key}Keywords`, v)}
-              placeholder={cat.key === 'equipment' ? 'e.g. skid steer, telehandler' : 'Add a keyword and press Enter'}
-            />
-          </div>
-        ))}
-      </div>
-    </RulesCard>
-  );
-}
-
-function LegitimacyCard({ rules, update }) {
-  const lg = rules.legitimacy;
-  return (
-    <RulesCard title="Legitimacy Deductions" subtitle="Each lead starts with 20 legitimacy points. Red flags reduce the score." accent="🛡️">
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-        <NumberField label="Disposable email"      value={lg.disposableEmailDeduction} onChange={v => update('legitimacy.disposableEmailDeduction', v)} suffix="–pts" max={20}/>
-        <NumberField label="Suspicious name"       value={lg.suspiciousNameDeduction}  onChange={v => update('legitimacy.suspiciousNameDeduction', v)}  suffix="–pts" max={20}/>
-        <NumberField label="Fake phone number"     value={lg.fakePhoneDeduction}        onChange={v => update('legitimacy.fakePhoneDeduction', v)}        suffix="–pts" max={20}/>
-        <NumberField label="Invalid email format"  value={lg.invalidEmailDeduction}     onChange={v => update('legitimacy.invalidEmailDeduction', v)}     suffix="–pts" max={20}/>
-        <NumberField label="All-caps brief comment" value={lg.allCapsDeduction}         onChange={v => update('legitimacy.allCapsDeduction', v)}          suffix="–pts" max={20}/>
-      </div>
-      <div>
-        <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-1.5">Disposable email domains</div>
-        <KeywordEditor keywords={lg.disposableDomains} onChange={v => update('legitimacy.disposableDomains', v)} placeholder="e.g. mailinator"/>
-      </div>
-    </RulesCard>
-  );
-}
-
-function TestLeadCard({ rules }) {
-  const [test, setTest] = useState({
-    customerName: 'John Smith',
-    contactEmail: 'john@example.com',
-    phone: '281-555-0142',
-    zip: '77002',
-    comment: 'Looking to buy a T76 compact track loader. Need a quote this week. What is your best price?'
-  });
-  const score = useMemo(() => scoreLead(test, rules), [test, rules]);
-  const s = TIER_STYLES[score.tier];
-
-  return (
-    <RulesCard title="Test Lead" subtitle="Type sample lead data to preview scoring in real time" accent="🧪">
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-        <div>
-          <label className="block text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-1">Customer Name</label>
-          <input type="text" value={test.customerName} onChange={e => setTest({...test, customerName: e.target.value})}
-            className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:border-brand-500"/>
-        </div>
-        <div>
-          <label className="block text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-1">Email</label>
-          <input type="email" value={test.contactEmail} onChange={e => setTest({...test, contactEmail: e.target.value})}
-            className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:border-brand-500"/>
-        </div>
-        <div>
-          <label className="block text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-1">Phone</label>
-          <input type="tel" value={test.phone} onChange={e => setTest({...test, phone: e.target.value})}
-            className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm font-mono focus:outline-none focus:border-brand-500"/>
-        </div>
-        <div>
-          <label className="block text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-1">ZIP</label>
-          <input type="text" value={test.zip} onChange={e => setTest({...test, zip: e.target.value})}
-            className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm font-mono focus:outline-none focus:border-brand-500"/>
-        </div>
-      </div>
-      <div className="mb-4">
-        <label className="block text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-1">Comment</label>
-        <textarea value={test.comment} onChange={e => setTest({...test, comment: e.target.value})} rows={3}
-          className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm resize-none focus:outline-none focus:border-brand-500"/>
-      </div>
-
-      {/* Live score readout */}
-      <div className={`${s.bg} rounded-lg p-4 border border-stone-200`}>
-        <div className="flex items-center justify-between mb-3">
-          <div className="text-[10px] uppercase tracking-widest font-semibold text-stone-600 flex items-center gap-1.5">
-            <Flame size={12} className={s.text}/> Live Score
-          </div>
-          <div className={`text-[10px] uppercase tracking-widest font-bold ${s.text}`}>{s.icon} {score.tier}</div>
-        </div>
-        <div className="flex items-end gap-3 mb-3">
-          <div className="font-display text-3xl font-bold text-stone-900 leading-none">
-            {score.total}<span className="font-mono text-xs text-stone-400 font-normal ml-1">/ 100</span>
-          </div>
-          <div className="flex-1 mb-1.5">
-            <div className="w-full h-2 bg-white/70 rounded-full overflow-hidden">
-              <div className={`h-full ${s.bar} transition-all`} style={{ width: `${score.total}%` }}/>
-            </div>
-          </div>
-        </div>
-        <div className="space-y-1.5">
-          {score.breakdown.map((b, i) => <ScoreLine key={i} {...b}/>)}
-        </div>
-      </div>
-    </RulesCard>
-  );
-}
 
 /* ===================== SETTINGS VIEW ===================== */
 /* ===================== REPORTS VIEW ===================== */
@@ -6396,7 +6184,7 @@ function ReportsView({ leads, config }) {
     const winRate = closed > 0 ? won / closed : null;
 
     const open = rangeLeads.filter(l => !getClosedStatuses(config).includes(l.status)).length;
-    const hot = rangeLeads.filter(l => scoreLead(l, config.scoringRules).tier === 'Urgent').length;
+    const hot = rangeLeads.filter(l => leadTemperature(l) === 'Hot').length;
 
     const avgFirstContact = avgTimeToFirstContactHours(rangeLeads);
 
@@ -6405,7 +6193,7 @@ function ReportsView({ leads, config }) {
       won, lost, closed, winRate,
       open, hot, avgFirstContact
     };
-  }, [rangeLeads, priorLeads, config.scoringRules]);
+  }, [rangeLeads, priorLeads]);
 
   // ---- Time series ----
   const overTimeData = useMemo(
@@ -6426,12 +6214,12 @@ function ReportsView({ leads, config }) {
     return Object.entries(counts).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   }, [rangeLeads]);
 
-  // ---- Heat distribution ----
+  // ---- Temperature distribution (set by the rep) ----
   const heatData = useMemo(() => {
-    const tiers = { Urgent: 0, Warm: 0, Cool: 0, Cold: 0 };
-    rangeLeads.forEach(l => { tiers[scoreLead(l, config.scoringRules).tier]++; });
-    return ['Urgent', 'Warm', 'Cool', 'Cold'].map(name => ({ name, value: tiers[name] }));
-  }, [rangeLeads, config.scoringRules]);
+    const tiers = { Hot: 0, Warm: 0, Cold: 0, 'Not set': 0 };
+    rangeLeads.forEach(l => { tiers[leadTemperature(l) || 'Not set']++; });
+    return ['Hot', 'Warm', 'Cold', 'Not set'].map(name => ({ name, value: tiers[name] }));
+  }, [rangeLeads]);
 
   // ---- Branch breakdown ----
   const branchData = useMemo(() => {
@@ -6460,7 +6248,7 @@ function ReportsView({ leads, config }) {
       const won = userLeads.filter(l => l.status === WON_STATUS).length;
       const lost = userLeads.filter(l => l.status === 'Lost').length;
       const closed = won + lost;
-      const hot = userLeads.filter(l => scoreLead(l, config.scoringRules).tier === 'Urgent').length;
+      const hot = userLeads.filter(l => leadTemperature(l) === 'Hot').length;
       const open = userLeads.filter(l => !getClosedStatuses(config).includes(l.status)).length;
       const stale = userLeads.filter(l => isLeadStale(l, config.staleness)).length;
       return {
@@ -6468,7 +6256,7 @@ function ReportsView({ leads, config }) {
         winRate: closed > 0 ? won / closed : null
       };
     }).sort((a, b) => b.total - a.total);
-  }, [rangeLeads, config.users, config.scoringRules, config.staleness]);
+  }, [rangeLeads, config.users, config.staleness]);
 
   if (leads.length === 0) {
     return <EmptyState icon={BarChart3} title="No data to report yet" subtitle="Add some leads to start seeing pipeline metrics here."/>;
@@ -6494,7 +6282,7 @@ function ReportsView({ leads, config }) {
       ['KPI', 'Value'],
       ['Total Leads', kpis.total],
       ['Open Pipeline', kpis.open],
-      ['Urgent Leads', kpis.hot],
+      ['Hot Leads', kpis.hot],
       ['Won', kpis.won],
       ['Lost', kpis.lost],
       ['Closed', kpis.closed],
@@ -6524,9 +6312,9 @@ function ReportsView({ leads, config }) {
     XLSX.utils.book_append_sheet(wb, sourceSheet, 'By Source');
 
     // By Heat
-    const heatSheet = XLSX.utils.aoa_to_sheet([['Heat Tier', 'Count'], ...heatData.map(h => [h.name, h.value])]);
+    const heatSheet = XLSX.utils.aoa_to_sheet([['Temperature', 'Count'], ...heatData.map(h => [h.name, h.value])]);
     heatSheet['!cols'] = [{ wch: 14 }, { wch: 10 }];
-    XLSX.utils.book_append_sheet(wb, heatSheet, 'By Heat');
+    XLSX.utils.book_append_sheet(wb, heatSheet, 'By Temperature');
 
     // By Branch
     const branchSheet = XLSX.utils.aoa_to_sheet([['Branch', 'Count'], ...branchData.map(b => [b.name, b.value])]);
@@ -6538,7 +6326,7 @@ function ReportsView({ leads, config }) {
     XLSX.utils.book_append_sheet(wb, deptSheet, 'By Department');
 
     // Rep Performance
-    const repHeaders = ['Rep', 'Email', 'Role', 'Total', 'Open', 'Urgent', 'Stale', 'Won', 'Lost', 'Closed', 'Win Rate'];
+    const repHeaders = ['Rep', 'Email', 'Role', 'Total', 'Open', 'Hot', 'Stale', 'Won', 'Lost', 'Closed', 'Win Rate'];
     const repRows = repStats.map(r => [
       r.user.name, r.user.email, r.user.role === 'admin' ? 'Admin' : 'Sales Rep',
       r.total, r.open, r.hot, r.stale, r.won, r.closed - r.won, r.closed,
@@ -6551,14 +6339,13 @@ function ReportsView({ leads, config }) {
     // Lead Detail
     const leadHeaders = [
       'Customer Name', 'Company Name', 'Email', 'Phone', 'Branch', 'ZIP', 'Status', 'Lead Source',
-      'Heat Score', 'Heat Tier', 'Form Title', 'Comment',
+      'Temperature', 'Keywords', 'Form Title', 'Comment',
       'Date Submitted', 'Created Date', 'Date Assigned', 'Assigned To'
     ];
     const leadRows = rangeLeads.map(l => {
-      const score = scoreLead(l, config.scoringRules);
       return [
         l.customerName, l.companyName || '', l.contactEmail, l.phone, l.branch, l.zip, l.status, formatLeadSource(l),
-        score.total, score.tier, l.formTitle, l.comment,
+        leadTemperature(l), l.prospectKeywords || '', l.formTitle, l.comment,
         l.dateSubmitted, l.createdDate, l.dateAssigned || '',
         userMap[l.assignedTo]?.name || ''
       ];
@@ -6642,7 +6429,7 @@ function ReportsView({ leads, config }) {
       {/* KPI Row */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <KpiCard label="Total Leads"    value={kpis.total}    change={range ? kpis.totalChange : null}/>
-        <KpiCard label="Open Pipeline"  value={kpis.open}     subtitle={`${kpis.hot} urgent`}/>
+        <KpiCard label="Open Pipeline"  value={kpis.open}     subtitle={`${kpis.hot} hot`}/>
         <KpiCard label="Won / Lost"     value={`${kpis.won} / ${kpis.lost}`} subtitle={kpis.closed > 0 ? `${kpis.closed} closed` : 'no closed deals yet'}/>
         <KpiCard label="Win Rate"       value={kpis.winRate !== null ? `${Math.round(kpis.winRate * 100)}%` : '—'} subtitle={kpis.closed > 0 ? `of ${kpis.closed} closed` : 'no closed deals'} accent={kpis.winRate !== null && kpis.winRate >= 0.5 ? 'good' : null}/>
         <KpiCard label="Avg First Contact" value={kpis.avgFirstContact !== null ? formatAge(kpis.avgFirstContact) : '—'} subtitle="created → first status change"/>
@@ -6717,9 +6504,9 @@ function ReportsView({ leads, config }) {
         </ChartCard>
       </div>
 
-      {/* Two-column row: Heat & Branch */}
+      {/* Two-column row: Temperature & Branch */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <ChartCard title="Heat Distribution" subtitle="How many leads in each tier">
+        <ChartCard title="Temperature" subtitle="Hot, warm and cold, as set by the reps">
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={heatData} layout="vertical" margin={{ top: 5, right: 12, bottom: 5, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" horizontal={false}/>
@@ -6782,7 +6569,7 @@ function ReportsView({ leads, config }) {
                   <th className="px-4 py-2 text-left font-semibold">Rep</th>
                   <th className="px-3 py-2 text-right font-semibold">Total</th>
                   <th className="px-3 py-2 text-right font-semibold">Open</th>
-                  <th className="px-3 py-2 text-right font-semibold">🚨 Urgent</th>
+                  <th className="px-3 py-2 text-right font-semibold">Hot</th>
                   <th className="px-3 py-2 text-right font-semibold">Stale</th>
                   <th className="px-3 py-2 text-right font-semibold">Won</th>
                   <th className="px-3 py-2 text-right font-semibold">Win Rate</th>
@@ -6922,13 +6709,13 @@ function statusBarColor(status) {
   const map = {
     New: '#3b82f6', Contacted: '#f59e0b', Working: '#8b5cf6', Qualified: '#8b5cf6', Quoted: '#06b6d4',
     Won: '#10b981', Completed: '#10b981', Lost: '#f43f5e', Unqualified: '#a8a29e',
-    Prospect: '#0ea5e9', Pending: '#f59e0b', Want: '#06b6d4', 'Sales Submittal': '#f97316', Cancelled: '#a8a29e', Dead: '#57534e'
+    Prospect: '#0ea5e9', Pending: '#f59e0b', Wanted: '#06b6d4', Cancelled: '#a8a29e', Dead: '#57534e'
   };
   return map[status] || '#a8a29e';
 }
 
 function heatBarColor(tier) {
-  const map = { Urgent: '#ff3300', Warm: '#f59e0b', Cool: '#0ea5e9', Cold: '#a8a29e' };
+  const map = { Hot: '#f43f5e', Warm: '#f59e0b', Cold: '#0ea5e9', 'Not set': '#d6d3d1' };
   return map[tier] || '#a8a29e';
 }
 
@@ -7000,11 +6787,13 @@ function LeadRoutingView({ config, onSave, onCreateUser, canEdit = true }) {
         <CheckCircle2 size={16} className="text-emerald-700 shrink-0 mt-0.5"/>
         <div className="text-xs text-stone-700 leading-relaxed">
           <span className="font-semibold text-stone-900">Routing is live.</span> An incoming lead is matched on
-          its location and department. The <span className="font-semibold">Local Primary</span> is assigned the
-          lead and emailed; <span className="font-semibold">Local Backup</span> and the CCs are copied on that email.
+          its location and department. The <span className="font-semibold">Local Primary</span> (or the rep whose
+          <span className="font-semibold"> ZIP split</span> matches) is assigned the lead and emailed;
+          the <span className="font-semibold">Local Backup</span>, the <span className="font-semibold">Branch Manager</span> and
+          the CCs are copied. A form that sends no location still routes when a ZIP split claims its ZIP.
           <span className="block mt-1">
-            If it can&rsquo;t match &mdash; no location, no department, a department with no routing set up (Sales,
-            for instance), or a Local Primary who has been removed or is on leave &mdash; the lead stays
+            If it can&rsquo;t match &mdash; no location, no department, a department with no routing set up,
+            or a Local Primary who has been removed or is on leave &mdash; the lead stays
             unassigned and notifies
             <span className="font-semibold"> Settings &rarr; Email Notifications &rarr; New Leads</span> instead.
           </span>
@@ -7043,6 +6832,20 @@ function LeadRoutingView({ config, onSave, onCreateUser, canEdit = true }) {
         })}
       </div>
 
+      {/* Branch manager: copied on every lead alert for this location */}
+      <div className="bg-white border border-stone-200 rounded-lg px-5 py-4 grid grid-cols-1 sm:grid-cols-[150px_1fr] gap-1.5 sm:gap-3 sm:items-center">
+        <div>
+          <div className="text-xs font-medium text-stone-700">Branch Manager</div>
+          <div className="text-[10px] text-stone-400 leading-tight mt-0.5">Copied on every lead alert for {activeBranch}</div>
+        </div>
+        <select value={(config.branchManagers || {})[activeBranch] || ''} aria-label={`Branch manager for ${activeBranch}`}
+          onChange={e => onSave({ ...config, branchManagers: { ...(config.branchManagers || {}), [activeBranch]: e.target.value } })}
+          className="w-full sm:max-w-sm px-2.5 py-1.5 border border-stone-200 rounded text-sm bg-white">
+          <option value="">— None —</option>
+          {assignableUsers.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+        </select>
+      </div>
+
       {/* Department cards for the selected location */}
       <div className="space-y-4">
         {departments.map(department => (
@@ -7053,14 +6856,17 @@ function LeadRoutingView({ config, onSave, onCreateUser, canEdit = true }) {
             entry={getRoutingEntry(config, activeBranch, department)}
             users={assignableUsers}
             onChange={(slotKey, value) => updateSlot(activeBranch, department, slotKey, value)}
+            onZipSplitsChange={(splits) => updateSlot(activeBranch, department, 'zipSplits', splits)}
             onAddNew={(slotKey) => setAddingFor({ branch: activeBranch, department, slotKey })}
           />
         ))}
       </div>
 
+      <SharedAreasCard config={config} onSave={onSave} departments={departments} users={assignableUsers}/>
+
       <div className="text-[11px] text-stone-400 leading-relaxed px-1">
         A lead is matched by its own department field against the names below, so these must match the
-        department values your web forms send. Edit the list under Settings &rarr; Routing Departments.
+        department values your web forms send. Equipment leads use the Sales department.
       </div>
 
       {addingFor && (
@@ -7303,7 +7109,7 @@ function RoutingOverview({ config, onBack, readOnly = false }) {
 
           <div className="text-xs text-stone-600 leading-relaxed pt-1">
             A lead falls back when it has <span className="font-medium">no location</span>, <span className="font-medium">no
-            department</span>, a department with no routing set up (a Sales enquiry, for instance), no Local Primary
+            department</span>, a department with no routing set up, no Local Primary
             chosen, or a Local Primary who has been removed or put on leave.
           </div>
         </div>
@@ -7318,7 +7124,7 @@ function RoutingOverview({ config, onBack, readOnly = false }) {
   );
 }
 
-function RoutingDepartmentCard({ branch, department, entry, users, onChange, onAddNew }) {
+function RoutingDepartmentCard({ branch, department, entry, users, onChange, onAddNew, onZipSplitsChange }) {
   const filled = countRoutingFilled(entry);
   // A user slot that no longer resolves — deleted or put on leave after being set
   // here. Silently showing "not set" would hide a broken routing rule.
@@ -7407,6 +7213,116 @@ function RoutingDepartmentCard({ branch, department, entry, users, onChange, onA
             )}
           </div>
         ))}
+        {onZipSplitsChange && (
+          <ZipSplitsEditor splits={Array.isArray(entry.zipSplits) ? entry.zipSplits : []} users={users} onChange={onZipSplitsChange}/>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// "By Zip": the first rep whose ZIP list matches the lead's ZIP is assigned
+// instead of the Local Primary. 5-digit ZIPs match exactly; 3-digit ones
+// (e.g. 460) match every ZIP that starts with them.
+function ZipSplitsEditor({ splits, users, onChange }) {
+  const set = (i, patch) => onChange(splits.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-[150px_1fr] gap-1.5 sm:gap-3 sm:items-start pt-2 border-t border-stone-100">
+      <div className="pt-1.5">
+        <div className="text-xs font-medium text-stone-700">Split by ZIP</div>
+        <div className="text-[10px] text-stone-400 leading-tight mt-0.5">A matching ZIP goes to that rep instead of the Local Primary</div>
+      </div>
+      <div className="space-y-2">
+        {splits.map((s, i) => (
+          <div key={i} className="flex flex-col md:flex-row gap-2 md:items-start">
+            <select value={s.userId || ''} onChange={e => set(i, { userId: e.target.value })} aria-label="Rep for these ZIPs"
+              className="md:w-48 px-2.5 py-1.5 border border-stone-200 rounded text-sm bg-white">
+              <option value="">— Pick a rep —</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+            <ZipListField value={s.zips || ''} onCommit={v => set(i, { zips: v })}/>
+            <button type="button" onClick={() => onChange(splits.filter((_, j) => j !== i))}
+              className="text-xs text-stone-500 hover:text-rose-700 px-1 py-1.5" aria-label="Remove this ZIP split"><X size={14}/></button>
+          </div>
+        ))}
+        <button type="button" onClick={() => onChange([...splits, { userId: '', zips: '' }])}
+          className="text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+          <Plus size={12}/> Add a ZIP split
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Commits on blur so typing a long list doesn't save on every keystroke.
+function ZipListField({ value, onCommit, rows = 2 }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  const count = String(draft || '').split(/[\s,;]+/).filter(z => /^\d{3,5}$/.test(z.trim())).length;
+  return (
+    <div className="flex-1">
+      <textarea value={draft} rows={rows} onChange={e => setDraft(e.target.value)} onBlur={() => { if (draft !== value) onCommit(draft); }}
+        placeholder="46011, 46012, 460…" aria-label="ZIP codes"
+        className="w-full px-2.5 py-1.5 border border-stone-200 rounded text-sm font-mono resize-y"/>
+      <div className="text-[10px] text-stone-400">{count} ZIP{count === 1 ? '' : 's'} / prefixes</div>
+    </div>
+  );
+}
+
+// Areas that more than one branch covers (Marion County: Indy and Indy North
+// sales). A lead from one of these ZIPs, for that department, goes to the
+// routed rep of every listed branch.
+const MARION_COUNTY_ZIPS = '46107, 46183, 46201, 46202, 46203, 46204, 46205, 46206, 46207, 46208, 46209, 46213, 46214, 46216, 46217, 46218, 46219, 46220, 46221, 46222, 46224, 46225, 46226, 46227, 46228, 46229, 46230, 46231, 46234, 46235, 46236, 46237, 46239, 46240, 46241, 46242, 46244, 46247, 46249, 46250, 46251, 46253, 46254, 46255, 46256, 46259, 46260, 46262, 46268, 46277, 46278, 46282, 46283, 46285, 46288, 46298';
+function SharedAreasCard({ config, onSave, departments }) {
+  const areas = Array.isArray(config.sharedAreas) ? config.sharedAreas : [];
+  const branches = config.branches || [];
+  const save = (next) => onSave({ ...config, sharedAreas: next });
+  const set = (i, patch) => save(areas.map((a, j) => (j === i ? { ...a, ...patch } : a)));
+  const hasMarion = areas.some(a => /marion/i.test(a.name || ''));
+  return (
+    <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
+      <div className="px-5 py-3 border-b border-stone-200 bg-stone-50">
+        <div className="text-sm font-semibold text-stone-900">Shared Areas</div>
+        <div className="text-xs text-stone-500">ZIPs that more than one location covers. A lead from one goes to every listed location&rsquo;s rep: its own location&rsquo;s rep is assigned, the others see it too and are copied.</div>
+      </div>
+      <div className="p-5 space-y-4">
+        {areas.map((a, i) => (
+          <div key={i} className="border border-stone-200 rounded-md p-3 space-y-2">
+            <div className="flex flex-col md:flex-row gap-2">
+              <input value={a.name || ''} onChange={e => set(i, { name: e.target.value })} placeholder="Area name" aria-label="Area name"
+                className="md:w-56 px-2.5 py-1.5 border border-stone-200 rounded text-sm"/>
+              <select value={a.department || ''} onChange={e => set(i, { department: e.target.value })} aria-label="Department"
+                className="md:w-40 px-2.5 py-1.5 border border-stone-200 rounded text-sm bg-white">
+                <option value="">Any department</option>
+                {departments.map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <button type="button" onClick={() => save(areas.filter((_, j) => j !== i))}
+                className="md:ml-auto text-xs text-stone-500 hover:text-rose-700 inline-flex items-center gap-1"><Trash2 size={12}/> Remove</button>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {branches.map(b => (
+                <label key={b} className="flex items-center gap-1.5 text-sm text-stone-700">
+                  <input type="checkbox" className="accent-brand-500" checked={(a.branches || []).includes(b)}
+                    onChange={e => set(i, { branches: e.target.checked ? [...(a.branches || []), b] : (a.branches || []).filter(x => x !== b) })}/>
+                  {b}
+                </label>
+              ))}
+            </div>
+            <ZipListField value={a.zips || ''} onCommit={v => set(i, { zips: v })} rows={3}/>
+          </div>
+        ))}
+        <div className="flex flex-wrap gap-3">
+          {!hasMarion && branches.includes('Indy') && branches.includes('Indy North') && (
+            <button type="button" onClick={() => save([...areas, { name: 'Marion County', department: 'Sales', branches: ['Indy', 'Indy North'], zips: MARION_COUNTY_ZIPS }])}
+              className="text-xs px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-md inline-flex items-center gap-1.5">
+              <Plus size={12}/> Add Marion County (Indy + Indy North sales)
+            </button>
+          )}
+          <button type="button" onClick={() => save([...areas, { name: '', department: '', branches: [], zips: '' }])}
+            className="text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+            <Plus size={12}/> Add a shared area
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -7745,6 +7661,28 @@ function NotificationsConfigCard({ config, onSave }) {
         </div>
       </div>
 
+      {/* ---- Daily reminders (dailyLeadReminders function) ---- */}
+      <div className="px-5 py-4 border-t border-stone-100">
+        <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">Daily Reminders</div>
+        <div className="text-xs text-stone-500 mb-3">
+          Weekday mornings at 8:00, each rep gets one email covering both of these. Nothing is sent to someone with nothing to do.
+        </div>
+        {[['contactRemindersEnabled', 'Make contact', 'Leads assigned to the rep and still in New, every weekday until they move out of New.'],
+          ['followUpRemindersEnabled', '30-day follow-up', 'Once, 30 days after a deal is Completed: a nudge to send the customer a follow-up email.']]
+          .map(([key, label, hint]) => {
+            const on = config.notifications?.[key] !== false;
+            return (
+              <label key={key} className="flex items-start gap-3 py-1.5 cursor-pointer select-none">
+                <input type="checkbox" checked={on} onChange={(e) => persistNotifications({ [key]: e.target.checked })} className="accent-brand-500 mt-0.5"/>
+                <span>
+                  <span className="text-sm font-medium text-stone-800">{label}</span>
+                  <span className="block text-xs text-stone-500">{hint}</span>
+                </span>
+              </label>
+            );
+          })}
+      </div>
+
       {/* ---- Sales requests ---- */}
       <div className="px-5 py-4 border-t border-stone-100">
         <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">Sales Submittals</div>
@@ -8048,12 +7986,12 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
   const nNotes = (lead.internalComments || []).length;
   const tabs = [
     { id: 'overview',  label: 'Overview' },
-    { id: 'submittal', label: 'Sales Submittal', show: !!lead.salesRequest },
+    { id: 'submittal', label: lead.salesRequest ? `Sales Submittal · ${submittalStatus(lead)}` : 'Sales Submittal', show: !!lead.salesRequest },
     { id: 'requests',  label: 'Sales Requests', count: leadRecords.requests.length, show: leadStage !== 'junk' || leadRecords.requests.length > 0 },
     { id: 'tradeIns',  label: 'Trade-Ins', count: leadRecords.tradeIns.length, show: leadStage !== 'junk' || leadRecords.tradeIns.length > 0 },
     { id: 'finance',   label: 'Finance', count: leadRecords.finance.length,
-      show: leadRecords.finance.length > 0 || leadStage === STAGE_SALES_REQUEST || leadStage === STAGE_COMPLETED },
-    { id: 'files',     label: 'Files', count: nFiles },
+      show: leadRecords.finance.length > 0 || !!lead.salesRequest || leadStage === STAGE_COMPLETED },
+    { id: 'files',     label: 'Quotes', count: nFiles },
     { id: 'activity',  label: 'Notes & Activity', count: nNotes },
   ].filter(t => t.show !== false);
 
@@ -8117,6 +8055,10 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
               <span>Created {fmtDateTime(lead.createdDate)}</span>
               <PanelStalenessChip lead={lead} staleness={config.staleness}/>
             </div>
+            <div className="mt-3 flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold">Temperature</span>
+              <TemperaturePicker value={leadTemperature(lead)} onChange={t => onUpdate(lead.id, { temperature: t })}/>
+            </div>
           </div>
           {!editing && (
             <div className="flex items-center gap-2 flex-wrap lg:justify-end lg:max-w-md shrink-0">
@@ -8125,12 +8067,12 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
               {statusOptionsFor(lead.status, config.statuses, getClosedStatuses(config), { isAdmin: currentUser?.role === 'admin' })
                 .map(s => <option key={s} value={s}>{s}</option>)}
             </select>
-            {/* The one move worth a button: a sale made in Working means
-                filling in the Sales Submittal. */}
-            {leadStage === STAGE_WORKING && (
+            {/* The one move worth a button: a done deal means filling in the
+                Sales Submittal, which also marks the lead Completed. */}
+            {lead.status !== WON_STATUS && leadStage !== 'junk' && !lead.salesRequest && (
               <button onClick={() => quickStatus(WON_STATUS)}
                 className="text-xs px-2.5 py-1.5 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded inline-flex items-center gap-1"
-                title="Sale made — fill in the Sales Submittal and send it to the back office">
+                title="Deal done — fill in the Sales Submittal, send it to the back office, and mark the lead Completed">
                 <ClipboardList size={12}/> Sales Submittal
               </button>
             )}
@@ -8300,6 +8242,9 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
                 </Section>
               </div>
             )}
+            {(PROSPECT_GROUP_STATUSES.includes(lead.status) || lead.prospectKeywords) && (
+              <div className={card}><ProspectKeywordsSection lead={lead} onUpdate={onUpdate}/></div>
+            )}
             {leadStage !== 'junk' && <div className={card}><DealSection lead={lead} onUpdate={onUpdate}/></div>}
             <div className={card}>
               <Section title="Contact">
@@ -8319,7 +8264,6 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
             </div>
           </div>
           <div className="space-y-4">
-            <div className={card}><LeadScoreSection lead={lead} rules={config.scoringRules}/></div>
             <div className={card}>
               <Section title="Status">
                 <StatusDetailRows lead={lead} config={config} onExtendWorking={onExtendWorking}/>
@@ -8417,9 +8361,9 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
 
       {tab === 'files' && (
         <div className={`${card} max-w-3xl`}>
-          <Section title="Files">
+          <Section title="Quotes">
             <AttachmentList attachments={Array.isArray(lead.attachments) ? lead.attachments : []} currentUser={currentUser}
-              emptyText="Quotes, photos, spec sheets, signed paperwork."
+              emptyText="Quotes, and anything else for this customer: photos, spec sheets, signed paperwork."
               onAdd={(files) => onAddLeadFiles(lead.id, files)}
               onRemove={(att) => onRemoveLeadFile(lead.id, att)}/>
           </Section>
@@ -8694,56 +8638,7 @@ function DetailRow({ icon: Icon, label, value, mono, href }) {
   );
 }
 
-function LeadScoreSection({ lead, rules }) {
-  const { total, tier, breakdown } = useMemo(() => scoreLead(lead, rules), [lead, rules]);
-  const s = TIER_STYLES[tier];
 
-  return (
-    <div className={`px-4 md:px-6 py-3 md:py-4 border-b border-stone-200 ${s.bg}`}>
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Flame size={14} className={s.text}/>
-          <span className="text-[10px] uppercase tracking-widest font-semibold text-stone-600">Lead Heat</span>
-        </div>
-        <div className={`text-[10px] uppercase tracking-widest font-bold ${s.text}`}>{s.icon} {tier}</div>
-      </div>
-
-      <div className="flex items-end gap-3 mb-3">
-        <div className="font-display text-4xl font-bold text-stone-900 leading-none">
-          {total}
-          <span className="font-mono text-sm text-stone-400 font-normal ml-1">/ 100</span>
-        </div>
-        <div className="flex-1 mb-1.5">
-          <div className="w-full h-2 bg-white/60 rounded-full overflow-hidden">
-            <div className={`h-full ${s.bar} transition-all`} style={{ width: `${total}%` }}/>
-          </div>
-        </div>
-      </div>
-
-      <div className="space-y-1.5 mt-3">
-        {breakdown.map((b, i) => (
-          <ScoreLine key={i} {...b}/>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ScoreLine({ label, detail, points, max, status }) {
-  const color =
-    status === 'hit'     ? 'bg-emerald-500' :
-    status === 'partial' ? 'bg-amber-500'   : 'bg-stone-300';
-  return (
-    <div className="flex items-center gap-3 text-xs">
-      <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${color}`}/>
-      <div className="font-semibold text-stone-700 w-28 shrink-0">{label}</div>
-      <div className="text-stone-500 flex-1 truncate" title={detail}>{detail}</div>
-      <div className="font-mono font-semibold text-stone-700 shrink-0 tabular-nums">
-        +{points}<span className="text-stone-400"> / {max}</span>
-      </div>
-    </div>
-  );
-}
 
 function ActivityTimeline({ lead, config, newComment, setNewComment, onAddComment, onDeleteComment }) {
   const userMap = useMemo(() => Object.fromEntries(config.users.map(u => [u.id, u])), [config.users]);
@@ -9146,70 +9041,50 @@ function WorkingWeeksModal({ leadName, current, onChoose, onCancel }) {
 // The first screen after sign-in. One card per step, in order, each opening that
 // step's dashboard. Counts come from the same buckets the dashboards render, so
 // "12 in Working" here is exactly the 12 rows on the other side of the click.
-function StageHomeView({ stageLeads, config, currentUser, onOpen, openRequestCount = 0, onOpenRequests, openFinanceCount = 0, onOpenFinance }) {
+function StageHomeView({ stageLeads, config, currentUser, onOpen, openRequestCount = 0, onOpenRequests, openFinanceCount = 0, onOpenFinance, openSubmittalCount = 0, onOpenSubmittals }) {
   const mine = currentUser.role !== 'admin';
+  const backOffice = [
+    { label: 'Sales Submittals', count: openSubmittalCount, note: 'open', icon: ClipboardList, accent: STAGE_ACCENTS[STAGE_SALES_REQUEST], onClick: onOpenSubmittals },
+    { label: 'Sales Requests',   count: openRequestCount,   note: 'open', icon: Send,          accent: { soft: 'bg-orange-50', text: 'text-orange-700' }, onClick: onOpenRequests },
+    { label: 'Finance',          count: openFinanceCount,   note: 'in progress', icon: Briefcase, accent: { soft: 'bg-violet-50', text: 'text-violet-700' }, onClick: onOpenFinance }
+  ];
   return (
-    <div className="max-w-6xl">
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        {PIPELINE_STAGES.map((stage, i) => {
+    <div className="max-w-7xl">
+      <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mb-2">Lead Management</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
+        {PIPELINE_STAGES.map(stage => {
           const list = stageLeads[stage.id] || [];
           const Icon = STAGE_ICONS[stage.id];
           const accent = STAGE_ACCENTS[stage.id];
           const stale = list.filter(l => isLeadStale(l, config.staleness)).length;
-          const urgent = list.filter(l => scoreLead(l, config.scoringRules).tier === 'Urgent').length;
+          const hot = list.filter(l => leadTemperature(l) === 'Hot').length;
           const unassigned = list.filter(l => isUnassigned(l)).length;
-          const won = list.filter(l => l.status === WON_STATUS).length;
           return (
             <button key={stage.id} type="button" onClick={() => onOpen(stage.view)}
               className="relative flex flex-col items-stretch text-left bg-white border border-stone-200 rounded-lg overflow-hidden hover:border-stone-400 hover:shadow-md transition-all group focus:outline-none focus:ring-2 focus:ring-brand-500">
               <div className={`h-1.5 shrink-0 ${accent.bar}`}/>
-              <div className="p-5 flex-1">
-                <div className="flex items-center justify-between">
-                  <div className={`w-10 h-10 rounded-md flex items-center justify-center ${accent.soft}`}>
-                    <Icon size={20} className={accent.text}/>
-                  </div>
-                  <span className="text-[10px] uppercase tracking-widest font-semibold text-stone-500">Step {i + 1}</span>
+              <div className="p-4 flex-1 flex flex-col">
+                <div className={`w-9 h-9 rounded-md flex items-center justify-center ${accent.soft}`}>
+                  <Icon size={18} className={accent.text}/>
                 </div>
-                <div className="font-display text-2xl font-bold text-stone-900 mt-4">{stage.label}</div>
-                <div className="text-xs text-stone-500 mt-1 xl:min-h-[3.75rem] leading-relaxed">{stage.blurb}</div>
-                <div className="flex items-end justify-between mt-4">
+                <div className="font-display text-xl font-bold text-stone-900 mt-3">{stage.label}</div>
+                <div className="text-xs text-stone-500 mt-1 leading-relaxed flex-1">{stage.blurb}</div>
+                <div className="flex items-end justify-between mt-3">
                   <div>
-                    <div className="font-display text-5xl font-bold text-stone-900 leading-none">{list.length}</div>
+                    <div className="font-display text-4xl font-bold text-stone-900 leading-none">{list.length}</div>
                     <div className="text-[11px] text-stone-500 mt-1">
                       {mine
-                        ? (stage.id === STAGE_INCOMING ? 'yours or unassigned' : 'assigned to you')
+                        ? (stage.id === STAGE_INCOMING ? 'yours or unassigned' : 'yours')
                         : (list.length === 1 ? 'lead' : 'leads')}
                     </div>
                   </div>
                   <ArrowRight size={18} className="text-stone-300 group-hover:text-brand-600 transition-colors mb-1"/>
                 </div>
-                <div className="flex flex-wrap gap-1.5 mt-4 min-h-[1.5rem]">
-                  {stage.id === STAGE_COMPLETED ? (
-                    won > 0 && <HomeChip className="bg-emerald-50 text-emerald-700">{won} won</HomeChip>
-                  ) : (
-                    <>
-                      {stale > 0 && <HomeChip className="bg-rose-50 text-rose-700">{stale} stale</HomeChip>}
-                      {urgent > 0 && <HomeChip className="bg-brand-50 text-brand-700">{urgent} urgent</HomeChip>}
-                      {stage.id === STAGE_INCOMING && unassigned > 0 && (
-                        <HomeChip className="bg-stone-100 text-stone-700">{unassigned} unassigned</HomeChip>
-                      )}
-                      {stage.id === STAGE_SALES_REQUEST && openRequestCount > 0 && (
-                        <span role="link" tabIndex={0}
-                          onClick={e => { e.stopPropagation(); onOpenRequests && onOpenRequests(); }}
-                          onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); onOpenRequests && onOpenRequests(); } }}
-                          className="text-[11px] font-semibold px-2 py-0.5 rounded bg-orange-50 text-orange-700 hover:underline">
-                          {openRequestCount} open request{openRequestCount === 1 ? '' : 's'}
-                        </span>
-                      )}
-                      {stage.id === STAGE_SALES_REQUEST && openFinanceCount > 0 && (
-                        <span role="link" tabIndex={0}
-                          onClick={e => { e.stopPropagation(); onOpenFinance && onOpenFinance(); }}
-                          onKeyDown={e => { if (e.key === 'Enter') { e.stopPropagation(); onOpenFinance && onOpenFinance(); } }}
-                          className="text-[11px] font-semibold px-2 py-0.5 rounded bg-violet-50 text-violet-700 hover:underline">
-                          {openFinanceCount} in finance
-                        </span>
-                      )}
-                    </>
+                <div className="flex flex-wrap gap-1.5 mt-3 min-h-[1.5rem]">
+                  {hot > 0 && stage.id !== STAGE_COMPLETED && <HomeChip className="bg-rose-50 text-rose-700">{hot} hot</HomeChip>}
+                  {stale > 0 && <HomeChip className="bg-amber-50 text-amber-700">{stale} stale</HomeChip>}
+                  {stage.id === STAGE_INCOMING && unassigned > 0 && (
+                    <HomeChip className="bg-stone-100 text-stone-700">{unassigned} unassigned</HomeChip>
                   )}
                 </div>
               </div>
@@ -9217,9 +9092,28 @@ function StageHomeView({ stageLeads, config, currentUser, onOpen, openRequestCou
           );
         })}
       </div>
+
+      <div className="text-[10px] uppercase tracking-widest text-stone-500 font-semibold mt-6 mb-2">Back Office</div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {backOffice.map(b => {
+          const Icon = b.icon;
+          return (
+            <button key={b.label} type="button" onClick={b.onClick}
+              className="flex items-center gap-3 text-left bg-white border border-stone-200 rounded-lg p-4 hover:border-stone-400 hover:shadow-md transition-all group focus:outline-none focus:ring-2 focus:ring-brand-500">
+              <div className={`w-9 h-9 rounded-md flex items-center justify-center shrink-0 ${b.accent.soft}`}>
+                <Icon size={18} className={b.accent.text}/>
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold text-stone-900">{b.label}</div>
+                <div className="text-xs text-stone-500">{b.count} {b.note}</div>
+              </div>
+              <div className="font-display text-3xl font-bold text-stone-900">{b.count}</div>
+            </button>
+          );
+        })}
+      </div>
       <div className="text-xs text-stone-500 mt-4 leading-relaxed">
-        A lead is in exactly one step at a time. Changing its status moves it to the next step and out of the last one.
-        Completed leads move to Archived after 30 days.
+        A lead is in one tab at a time; changing its status moves it. Sales Submittals and Sales Requests are their own processes and can be tied to a lead.
       </div>
     </div>
   );
@@ -9464,30 +9358,78 @@ function SalesRequestModal({ lead, config, busy, onSubmit, onCancel, newLead = f
 }
 
 // Asked when a single lead is set to Lost.
-function LostDealModal({ lead, onSubmit, onCancel }) {
-  const [form, setForm] = useState({ lostReason: '', competitor: lead.deal?.competitor || '' });
+// Asked when a lead moves into the Prospect group (Prospect, Dead, Unqualified,
+// Lost): keywords so the prospect list stays searchable, and for Lost, why.
+function LostDealModal({ lead, status = LOST_STATUS, onSubmit, onCancel }) {
+  const isLost = status === LOST_STATUS;
+  const [form, setForm] = useState({ lostReason: '', competitor: lead.deal?.competitor || '', prospectKeywords: lead.prospectKeywords || '' });
   const [errors, setErrors] = useState({});
   const submit = () => {
     const errs = {};
-    for (const f of LOST_FIELDS) if (f.required && !String(form[f.key] || '').trim()) errs[f.key] = 'Required';
+    if (isLost) for (const f of LOST_FIELDS) if (f.required && !String(form[f.key] || '').trim()) errs[f.key] = 'Required';
     if (Object.keys(errs).length) { setErrors(errs); return; }
-    onSubmit({ lostReason: form.lostReason.trim(), competitor: (form.competitor || '').trim() });
+    onSubmit({ lostReason: (form.lostReason || '').trim(), competitor: (form.competitor || '').trim(), prospectKeywords: (form.prospectKeywords || '').trim() });
   };
   return (
-    <ModalShell label="Lost deal" icon={X} accent={{ soft: 'bg-rose-50', text: 'text-rose-700' }} wide={false} onCancel={onCancel}
-      title="Mark as Lost"
-      subtitle={<><span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'This lead'}</span> moves to Completed.</>}
+    <ModalShell label={isLost ? 'Lost deal' : 'Prospect'} icon={isLost ? X : Tag}
+      accent={isLost ? { soft: 'bg-rose-50', text: 'text-rose-700' } : { soft: 'bg-sky-50', text: 'text-sky-700' }} wide={false} onCancel={onCancel}
+      title={`Mark as ${status}`}
+      subtitle={<><span className="font-medium text-stone-700">{lead.customerName || lead.companyName || 'This lead'}</span> moves to Prospect{status !== PROSPECT_STATUS ? ` (${status})` : ''}.</>}
       footer={<>
         <button onClick={onCancel} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium">Cancel</button>
-        <button onClick={submit} className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white text-sm font-semibold rounded-md">Mark Lost</button>
+        <button onClick={submit} className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white text-sm font-semibold rounded-md">Mark {status}</button>
       </>}>
-      {LOST_FIELDS.map(f => (
+      <Field label="Keywords">
+        <input value={form.prospectKeywords} onChange={e => setForm(x => ({ ...x, prospectKeywords: e.target.value }))}
+          placeholder="e.g. Cat, CTL, needs trailer" aria-label="Keywords"
+          className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:border-brand-500"/>
+        <div className="text-[11px] text-stone-500 mt-1">Separate with commas. Search and the Prospect tab find leads by these.</div>
+      </Field>
+      {isLost && LOST_FIELDS.map(f => (
         <Field key={f.key} label={f.label} required={f.required} error={errors[f.key]}>
           <PipelineFieldInput field={f} value={form[f.key]} error={errors[f.key]}
             onChange={v => { setForm(x => ({ ...x, [f.key]: v })); if (errors[f.key]) setErrors(e => ({ ...e, [f.key]: undefined })); }}/>
         </Field>
       ))}
     </ModalShell>
+  );
+}
+
+/* ===================== PROSPECT KEYWORDS ===================== */
+function ProspectKeywordsSection({ lead, onUpdate }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(lead.prospectKeywords || '');
+  useEffect(() => { setDraft(lead.prospectKeywords || ''); setEditing(false); }, [lead.id, lead.prospectKeywords]);
+  const words = prospectKeywordList(lead);
+  return (
+    <Section title={
+      <span className="flex items-center justify-between w-full">
+        <span>Keywords</span>
+        {!editing && (
+          <button onClick={() => setEditing(true)} className="normal-case tracking-normal text-xs font-medium text-brand-700 hover:underline inline-flex items-center gap-1">
+            <Edit3 size={11}/> {words.length ? 'Edit' : 'Add keywords'}
+          </button>
+        )}
+      </span>
+    }>
+      {editing ? (
+        <div className="flex gap-2">
+          <input value={draft} onChange={e => setDraft(e.target.value)} autoFocus aria-label="Keywords"
+            placeholder="e.g. Cat, CTL, needs trailer"
+            className="flex-1 px-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:border-brand-500"/>
+          <button onClick={() => { onUpdate(lead.id, { prospectKeywords: draft.trim() }); setEditing(false); }}
+            className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold rounded-md">Save</button>
+          <button onClick={() => { setDraft(lead.prospectKeywords || ''); setEditing(false); }}
+            className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-xs">Cancel</button>
+        </div>
+      ) : words.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {words.map(k => <span key={k} className="text-xs px-2 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-100">{k}</span>)}
+        </div>
+      ) : (
+        <div className="text-xs text-stone-500">What this prospect is after — makes them easy to find later.</div>
+      )}
+    </Section>
   );
 }
 
@@ -9560,7 +9502,7 @@ function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChan
 
   const submitter = (config.users || []).find(u => u.id === sr.submittedBy);
   const bo = sr.backOffice || {};
-  const inSalesRequest = lead.status === SALES_REQUEST_STATUS;
+  const subStatus = submittalStatus(lead);
 
   const saveBackOffice = (extra = {}) => {
     const backOffice = pruneHiddenAnswers(BACK_OFFICE_FIELDS, { ...draft });
@@ -9570,6 +9512,12 @@ function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChan
 
   return (
     <Section title="Sales Submittal">
+      <div className="flex items-center gap-2 mb-1">
+        <SubmittalStatusChip status={subStatus}/>
+        {subStatus === SUBMITTAL_COMPLETE && sr.completedAt && (
+          <span className="text-[11px] text-stone-500">completed {fmtDateTime(sr.completedAt)}</span>
+        )}
+      </div>
       <DetailRow icon={Building} label="Store" value={lead.branch}/>
       {SALES_REQUEST_SECTIONS.map(section => {
         const rows = SALES_REQUEST_FIELDS
@@ -9630,16 +9578,25 @@ function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChan
             )}
           </>
         )}
-        {isAdmin && inSalesRequest && !editing && (
+        {/* The submittal is the back office's own process: completing it
+            doesn't change the lead, which is already a done deal. */}
+        {isAdmin && subStatus === SUBMITTAL_OPEN && !editing && (
           <button
             onClick={() => {
-              if (!window.confirm('Mark this submittal complete? The lead moves to Completed.')) return;
+              if (!window.confirm('Mark this submittal complete? It leaves the open Sales Submittals queue.')) return;
               const today = new Date().toISOString().slice(0, 10);
               const backOffice = { ...bo, completionDate: bo.completionDate || today };
-              onUpdate(lead.id, { status: WON_STATUS, salesRequest: { ...sr, backOffice } });
+              onUpdate(lead.id, { salesRequest: { ...sr, backOffice, status: SUBMITTAL_COMPLETE, completedAt: new Date().toISOString() }, _salesRequestEdit: true });
             }}
             className="mt-3 w-full px-3 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold rounded-md inline-flex items-center justify-center gap-1.5">
             <CheckCircle2 size={13}/> Mark Submittal Complete
+          </button>
+        )}
+        {isAdmin && subStatus === SUBMITTAL_COMPLETE && !editing && (
+          <button
+            onClick={() => onUpdate(lead.id, { salesRequest: { ...sr, status: SUBMITTAL_OPEN, completedAt: null }, _salesRequestEdit: true })}
+            className="mt-3 text-xs font-medium text-stone-600 hover:text-stone-900 inline-flex items-center gap-1">
+            <RotateCcw size={11}/> Reopen submittal
           </button>
         )}
       </div>
@@ -9647,7 +9604,120 @@ function SalesRequestSection({ lead, config, currentUser, onUpdate, onStatusChan
   );
 }
 
-// Underline tabs above a view (Incoming | Junk, Completed | Archived, Settings).
+function SubmittalStatusChip({ status }) {
+  if (!status) return null;
+  const cls = status === SUBMITTAL_COMPLETE ? 'bg-emerald-50 text-emerald-700' : 'bg-orange-50 text-orange-700';
+  return <span className={`text-xs font-medium px-2 py-0.5 rounded ${cls}`}>{status === SUBMITTAL_COMPLETE ? 'Complete' : 'Open'}</span>;
+}
+
+/* ===================== SALES SUBMITTALS QUEUE ===================== */
+// The back office's queue. A submittal is its own process: it stays Open here
+// until an admin completes it, whatever happens to the lead.
+function SubmittalsView({ leads, config, currentUser, onOpen, onNew }) {
+  const [show, setShow] = useState(SUBMITTAL_OPEN);
+  const users = config.users || [];
+  const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
+  const count = (s) => leads.filter(l => submittalStatus(l) === s).length;
+  const rows = useMemo(() => leads
+    .filter(l => show === 'all' || submittalStatus(l) === show)
+    .sort((a, b) => (b.salesRequest.submittedAt || '').localeCompare(a.salesRequest.submittedAt || '')), [leads, show]);
+  return (
+    <div>
+      <RecordListTabs value={show} onChange={setShow} onNew={onNew} newLabel="New Sales Submittal"
+        tabs={[[SUBMITTAL_OPEN, 'Open', count(SUBMITTAL_OPEN)], [SUBMITTAL_COMPLETE, 'Complete', count(SUBMITTAL_COMPLETE)], ['all', 'All', leads.length]]}/>
+      {rows.length === 0 ? (
+        <EmptyState icon={ClipboardList} title={show === SUBMITTAL_OPEN ? 'No open submittals' : 'Nothing here'}
+          subtitle="Marking a lead Completed opens its Sales Submittal, which lands here for the back office. Walk-in sales: New Sales Submittal."/>
+      ) : (
+        <div className="bg-white border border-stone-200 rounded-lg overflow-x-auto">
+          <table className="w-full text-sm min-w-[860px]">
+            <thead>
+              <tr className="border-b border-stone-200 text-left text-[10px] uppercase tracking-widest text-stone-500">
+                <th className="px-3 py-2.5 font-semibold">Submitted</th>
+                <th className="px-3 py-2.5 font-semibold">Customer</th>
+                <th className="px-3 py-2.5 font-semibold">Unit</th>
+                <th className="px-3 py-2.5 font-semibold">Value</th>
+                <th className="px-3 py-2.5 font-semibold">Payment</th>
+                <th className="px-3 py-2.5 font-semibold">Store</th>
+                <th className="px-3 py-2.5 font-semibold">Sales Person</th>
+                <th className="px-3 py-2.5 font-semibold">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(l => {
+                const sr = l.salesRequest;
+                const rep = userMap[l.assignedTo] && !userMap[l.assignedTo].isSystem ? userMap[l.assignedTo] : userMap[sr.submittedBy];
+                return (
+                  <tr key={l.id} onClick={() => onOpen(l)} className="border-b border-stone-100 align-top cursor-pointer hover:bg-stone-50">
+                    <td className="px-3 py-3 text-xs font-mono text-stone-700 whitespace-nowrap">{fmtYmd(sr.submittedAt)}</td>
+                    <td className="px-3 py-3">
+                      <div className="font-medium text-stone-900">{sr.customerName || l.customerName || l.companyName || 'No name'}</div>
+                      {l.companyName && sr.customerName !== l.companyName && <div className="text-xs text-stone-500">{l.companyName}</div>}
+                    </td>
+                    <td className="px-3 py-3 text-stone-700">{sr.model || '—'}</td>
+                    <td className="px-3 py-3 text-stone-900 font-medium">{sr.estimatedValue || '—'}</td>
+                    <td className="px-3 py-3 text-xs text-stone-700">{sr.payment || '—'}</td>
+                    <td className="px-3 py-3 text-xs text-stone-700">{l.branch || '—'}</td>
+                    <td className="px-3 py-3 text-xs text-stone-700">{rep ? rep.name : '—'}</td>
+                    <td className="px-3 py-3"><SubmittalStatusChip status={submittalStatus(l)}/></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ===================== TEMPERATURE ===================== */
+// Hot / Warm / Cold, set by the rep. Replaced the computed heat score.
+const TEMP_STYLES = {
+  Hot:  { on: 'bg-rose-50 text-rose-700 border-rose-300',   dot: 'bg-rose-500'  },
+  Warm: { on: 'bg-amber-50 text-amber-700 border-amber-300', dot: 'bg-amber-500' },
+  Cold: { on: 'bg-sky-50 text-sky-700 border-sky-300',       dot: 'bg-sky-500'   }
+};
+function TemperatureBadge({ value }) {
+  if (!value || !TEMP_STYLES[value]) return <span className="text-xs text-stone-400">—</span>;
+  return (
+    <span className={`text-xs font-medium px-2 py-0.5 rounded border inline-flex items-center gap-1 ${TEMP_STYLES[value].on}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${TEMP_STYLES[value].dot}`}/>{value}
+    </span>
+  );
+}
+// Compact version for table rows and cards.
+function InlineTemperatureSelect({ value, onChange }) {
+  const st = TEMP_STYLES[value];
+  return (
+    <select value={value || ''} onChange={e => onChange(e.target.value)} onClick={e => e.stopPropagation()} aria-label="Temperature"
+      className={`text-xs font-medium pl-2 pr-6 py-1 rounded border focus:outline-none focus:ring-1 focus:ring-brand-500 ${st ? st.on : 'bg-white text-stone-500 border-stone-200'}`}>
+      <option value="">—</option>
+      {TEMPERATURES.map(t => <option key={t} value={t}>{t}</option>)}
+    </select>
+  );
+}
+
+// A row of three buttons; picking the selected one clears it.
+function TemperaturePicker({ value, onChange, size = 'md', disabled = false }) {
+  const pad = size === 'sm' ? 'px-2 py-0.5 text-[11px]' : 'px-3 py-1.5 text-xs';
+  return (
+    <div className="inline-flex gap-1" role="radiogroup" aria-label="Temperature">
+      {TEMPERATURES.map(t => {
+        const on = value === t;
+        return (
+          <button key={t} type="button" role="radio" aria-checked={on} disabled={disabled}
+            onClick={(e) => { e.stopPropagation(); onChange(on ? '' : t); }}
+            className={`${pad} rounded border font-medium inline-flex items-center gap-1 disabled:opacity-60 ${on ? TEMP_STYLES[t].on : 'bg-white text-stone-600 border-stone-200 hover:border-stone-400'}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${TEMP_STYLES[t].dot}`}/>{t}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Underline tabs above a view (New | Junk, Completed | Archived, Settings).
 /* ===================== GLOBAL SEARCH ===================== */
 // Top-bar search across leads and the three record types. `scope` is already
 // limited to what the user can open. Ctrl/Cmd+K or "/" focuses it.
@@ -10843,8 +10913,6 @@ function DuplicateCheckModal({ check, config, onLinkSubmission, onOpenExisting, 
 }
 
 function DuplicateMatchCard({ lead, matchedOn, userMap, onLink, onOpen }) {
-  const score = useMemo(() => scoreLead(lead), [lead]);
-  const tier = TIER_STYLES[score.tier];
   const assigned = userMap[lead.assignedTo];
   const assignedName = assigned && !assigned.isSystem ? assigned.name : '— Unassigned —';
 
@@ -10856,9 +10924,7 @@ function DuplicateMatchCard({ lead, matchedOn, userMap, onLink, onOpen }) {
             <div className="flex items-center gap-2 mb-1">
               <span className="font-semibold text-stone-900 truncate">{lead.customerName || 'Unnamed lead'}</span>
               <StatusBadge status={lead.status}/>
-              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold ${tier.bg} ${tier.text}`}>
-                {tier.icon} {score.total}
-              </span>
+              {leadTemperature(lead) && <TemperatureBadge value={leadTemperature(lead)}/>}
             </div>
             <div className="text-xs text-stone-600 space-y-0.5">
               {lead.contactEmail && (

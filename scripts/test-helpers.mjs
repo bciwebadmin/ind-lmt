@@ -156,39 +156,54 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('legacy Contacted -> incoming', st('Contacted') === 'incoming');
   check('legacy Quoted -> working', st('Quoted') === 'working');
   check('legacy Qualified -> working', st('Qualified') === 'working');
-  check('legacy Wants -> working', st('Wants') === 'working');
+  check('legacy Want/Wants -> wanted', st('Want') === 'wanted' && st('Wants') === 'wanted');
   check('legacy Won -> completed', st('Won') === 'completed');
-  check('legacy No Decision -> completed', st('No Decision') === 'completed');
+  check('legacy No Decision -> prospect', st('No Decision') === 'prospect');
+  check('old Sales Submittal leads -> completed', st('Sales Submittal') === 'completed' && st('Sales Request') === 'completed');
+  check('legacy Cancelled -> prospect', st('Cancelled') === 'prospect');
   check('Indy calls a finished sale Completed', P.WON_STATUS === 'Completed');
   check('custom closed status -> completed', st('Sold Elsewhere', [...P.PIPELINE_CLOSED_STATUSES, 'Sold Elsewhere']) === 'completed');
-  check('unknown open status -> incoming', st('On Hold') === 'incoming');
-  check('a missing status -> incoming', st(undefined) === 'incoming');
+  check('unknown open status -> new', st('On Hold') === 'incoming');
+  check('a missing status -> new', st(undefined) === 'incoming');
 
-  // The flow only goes forward through the dropdowns.
-  const inc = opts('New'), wrk = opts('Prospect'), sr = opts('Sales Submittal'), done = opts('Completed');
-  check('Incoming cannot jump to Sales Request or Completed', !inc.includes('Sales Submittal') && !inc.includes('Completed'), inc.join(','));
-  check('Incoming can reach Working and fall through', ['Working', 'Prospect', 'Pending', 'Want', 'Lost', 'Unqualified'].every(s => inc.includes(s)), inc.join(','));
-  check('Working offers exactly Erin\'s list (+ Working, Dead, Junk)',
-    JSON.stringify(wrk) === JSON.stringify(['Working', 'Prospect', 'Pending', 'Want', 'Completed', 'Lost', 'Unqualified', 'Dead', 'Junk']), wrk.join(','));
-  check('Working does not go back to New', !wrk.includes('New'), wrk.join(','));
-  check('Completed from Working goes via the Sales Submittal', P.completesViaSalesRequest('Pending', 'Completed'));
-  check('Completed from Sales Request is the back office closing it', !P.completesViaSalesRequest('Sales Submittal', 'Completed'));
-  check('Lost from Working is not a sale', !P.completesViaSalesRequest('Working', 'Lost'));
-  check('a rep cannot close a submittal from the menu',
-    JSON.stringify(opts('Sales Submittal', undefined, undefined, { isAdmin: false })) === JSON.stringify(['Sales Submittal', 'Working', 'Cancelled']));
-  check('a rep cannot close a submittal via a direct write', !P.canCloseSalesRequest('Sales Submittal', 'Completed', false));
-  check('an admin can close a submittal', P.canCloseSalesRequest('Sales Submittal', 'Completed', true));
-  check('a rep bulk menu on Sales Request has no Completed', !bulk('sales-request', undefined, undefined, { isAdmin: false }).includes('Completed'));
-  check('Sales Request offers exactly Completed / Working / Cancelled',
-    JSON.stringify(sr) === JSON.stringify(['Sales Submittal', 'Completed', 'Working', 'Cancelled']), sr.join(','));
-  check('Completed can reopen to Working, not Sales Request', done.includes('Working') && !done.includes('Sales Submittal'), done.join(','));
+  // Oct 2026 layout: New, Working (+Pending), Prospect (+Dead, Unqualified, Lost), Wanted, Completed.
+  check('tabs are New, Working, Prospect, Wanted, Completed', JSON.stringify(P.PIPELINE_STAGES.map(s => s.label)) === JSON.stringify(['New', 'Working', 'Prospect', 'Wanted', 'Completed']));
+  check('Working holds Pending', st('Pending') === 'working');
+  check('Prospect holds Dead, Unqualified and Lost', ['Prospect', 'Dead', 'Unqualified', 'Lost'].every(x => st(x) === 'prospect'));
+  check('Completed is only done deals', JSON.stringify(P.getStage('completed').statuses) === JSON.stringify(['Completed']));
+  check('Prospect type buttons: Prospect first (default), then Dead, Unqualified, Lost', JSON.stringify(P.PROSPECT_TYPES.map(t => t.label)) === JSON.stringify(['Prospect', 'Dead', 'Unqualified', 'Lost']));
+  check('only done deals and junk are closed', JSON.stringify(P.PIPELINE_CLOSED_STATUSES) === JSON.stringify(['Completed', 'Junk']));
+
+  // Moves are free between tabs; Completed goes through the Sales Submittal.
+  const inc = opts('New'), done = opts('Completed');
+  check('any tab is reachable from New', ['Working', 'Pending', 'Prospect', 'Wanted', 'Dead', 'Lost', 'Unqualified', 'Completed', 'Junk'].every(x => inc.includes(x)), inc.join(','));
+  check('a done deal can reopen', done.includes('Working') && done.includes('Prospect'), done.join(','));
+  check('Completed from any open status opens the Sales Submittal', ['New', 'Working', 'Pending', 'Prospect', 'Lost', 'Wanted'].every(x => P.completesViaSalesRequest(x, 'Completed')));
+  check('Completed to Completed is not a new sale', !P.completesViaSalesRequest('Completed', 'Completed'));
+  check('Lost is not a sale', !P.completesViaSalesRequest('Working', 'Lost'));
+  check('moving into Prospect group asks for keywords', P.entersProspectGroup('Working', 'Dead') && P.entersProspectGroup('New', 'Prospect'));
+  check('moving within the Prospect group does not re-ask', !P.entersProspectGroup('Dead', 'Lost'));
   check('current status always offered', opts('On Hold').includes('On Hold'));
   check('custom statuses stay reachable', opts('New', [...P.PIPELINE_STATUSES, 'On Hold']).includes('On Hold'));
   for (const s of P.PIPELINE_STAGES) {
-    check(`bulk menu for ${s.id} never offers Sales Request`, !bulk(s.id).includes('Sales Submittal'), bulk(s.id).join(','));
+    check(`bulk menu for ${s.id} never completes a deal`, !bulk(s.id).includes('Completed'), bulk(s.id).join(','));
   }
-  check('bulk menu for working cannot complete a sale', !bulk('working').includes('Completed'), bulk('working').join(','));
-  check('bulk menu for completed can still set Completed', bulk('completed').includes('Completed'), bulk('completed').join(','));
+  check('retired Sales Submittal status is never offered', !inc.includes('Sales Submittal') && !inc.includes('Cancelled'));
+
+  // Submittals are their own queue.
+  check('submittal: none on a lead without one', P.submittalStatus({ status: 'Working' }) === null);
+  check('submittal: explicit status wins', P.submittalStatus({ status: 'Completed', salesRequest: { status: 'Open' } }) === 'Open');
+  check('submittal: pre-Oct lead already Completed reads Complete', P.submittalStatus({ status: 'Completed', salesRequest: {} }) === 'Complete');
+  check('submittal: lead migrated from Sales Submittal reads Open', P.submittalStatus({ status: 'Completed', _migratedFrom: 'Sales Submittal', salesRequest: {} }) === 'Open');
+
+  // Temperature replaces the heat score.
+  check('temperature: Hot/Warm/Cold', JSON.stringify(P.TEMPERATURES) === JSON.stringify(['Hot', 'Warm', 'Cold']));
+  check('temperature: reads lead.temperature', P.leadTemperature({ temperature: 'Hot' }) === 'Hot');
+  check('temperature: falls back to the old deal field', P.leadTemperature({ deal: { temperature: 'Cold' } }) === 'Cold');
+  check('temperature: new field wins over old', P.leadTemperature({ temperature: 'Warm', deal: { temperature: 'Cold' } }) === 'Warm');
+  check('temperature: junk value ignored', P.leadTemperature({ temperature: 'Urgent' }) === '');
+  check('temperature: no longer a deal field', !P.DEAL_FIELDS.some(f => f.key === 'temperature'));
+  check('keywords: split on commas', JSON.stringify(P.prospectKeywordList({ prospectKeywords: 'Cat, CTL;  trailer ,' })) === JSON.stringify(['Cat', 'CTL', 'trailer']));
 
   // A config saved before the pipeline existed (Atlanta's status list) heals.
   const old = {
@@ -201,7 +216,8 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('heal: drops the legacy names', ['Contacted', 'Quoted', 'Wants', 'Won', 'No Decision'].every(s => !healed.statuses.includes(s)), healed.statuses.join(','));
   check('heal: keeps a custom status', healed.statuses.includes('On Hold'));
   check('heal: Junk stays last', healed.statuses[healed.statuses.length - 1] === 'Junk');
-  check('heal: Cancelled counts as closed', healed.closedStatuses.includes('Cancelled'));
+  check('heal: Completed counts as closed', healed.closedStatuses.includes('Completed'));
+  check('heal: Lost is no longer closed (it lives in Prospect)', !healed.closedStatuses.includes('Lost'));
   check('heal: Working can never be closed', !healed.closedStatuses.includes('Working'));
   check('heal: never overwrites an admin threshold', healed.staleness.thresholds.Pending === 999);
   check('heal: adds a missing threshold', healed.staleness.thresholds.Prospect === 336);
@@ -287,7 +303,7 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('a rep cannot reopen a completed request', JSON.stringify(P.requestStatusOptionsFor('Completed', false)) === JSON.stringify(['Completed']));
 
   // Dead (Indy's Prospect sheet).
-  check('Dead is a Completed-step status', st('Dead') === 'completed');
+  check('Dead lives under Prospect', st('Dead') === 'prospect');
   check('Working can mark a lead Dead', opts('Prospect').includes('Dead'));
 
   // Trade-in evaluation.
@@ -367,19 +383,17 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('no form field is keyed `attachments`', clash.length === 0, clash.join(', '));
 }
 
-// ---- Sales Request -> Sales Submittal rename (Oct 2026) --------------------
+// ---- Status renames ---------------------------------------------------------
 {
   const P = await import('../src/lib/pipeline.js');
-  check('rename: status is Sales Submittal', P.SALES_REQUEST_STATUS === 'Sales Submittal');
-  check('rename: step is labelled Sales Submittals', P.getStage(P.STAGE_SALES_REQUEST).label === 'Sales Submittals');
-  check('rename: old status still lands in the submittal step', P.stageOfStatus('Sales Request') === P.STAGE_SALES_REQUEST);
-  check('rename: old name maps to new', P.renamedStatus('Sales Request') === 'Sales Submittal' && P.renamedStatus('Qualified') === 'Working' && P.renamedStatus('Working') === 'Working');
-  const healed = P.ensurePipelineStatuses({ statuses: ['New', 'Sales Request', 'Custom'], closedStatuses: [], staleness: { thresholds: { 'Sales Request': 48 } } });
-  check('rename: Settings drops the old status, keeps custom ones', !healed.statuses.includes('Sales Request') && healed.statuses.includes('Sales Submittal') && healed.statuses.includes('Custom'), healed.statuses.join(','));
-  check('rename: a threshold set under the old name carries over', healed.staleness.thresholds['Sales Submittal'] === 48 && !('Sales Request' in healed.staleness.thresholds));
-  const kept = P.ensurePipelineStatuses({ statuses: [], staleness: { thresholds: { 'Sales Request': 48, 'Sales Submittal': 24 } } });
-  check('rename: an explicit new-name threshold wins', kept.staleness.thresholds['Sales Submittal'] === 24);
-  check('rename: Back Office Sales Requests keep their name', !P.PIPELINE_STATUSES.includes('Sales Request'));
+  check('rename: Want -> Wanted', P.renamedStatus('Want') === 'Wanted');
+  check('rename: old submittal statuses -> Completed', P.renamedStatus('Sales Request') === 'Completed' && P.renamedStatus('Sales Submittal') === 'Completed');
+  check('rename: Cancelled -> Lost', P.renamedStatus('Cancelled') === 'Lost');
+  check('rename: Qualified -> Working; others unchanged', P.renamedStatus('Qualified') === 'Working' && P.renamedStatus('Working') === 'Working');
+  const healed = P.ensurePipelineStatuses({ statuses: ['New', 'Want', 'Sales Submittal', 'Custom'], closedStatuses: [], staleness: { thresholds: { Want: 200, 'Sales Submittal': 48 } } });
+  check('rename: Settings drops old names, keeps custom ones', !healed.statuses.includes('Want') && !healed.statuses.includes('Sales Submittal') && healed.statuses.includes('Wanted') && healed.statuses.includes('Custom'), healed.statuses.join(','));
+  check('rename: a threshold set under the old name carries over', healed.staleness.thresholds.Wanted === 200 && !('Want' in healed.staleness.thresholds));
+  check('rename: a renamed-to-closed threshold is dropped (Completed is never stale)', !('Completed' in healed.staleness.thresholds) && !('Sales Submittal' in healed.staleness.thresholds));
 }
 
 // ---- Global search ---------------------------------------------------------
@@ -419,12 +433,79 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('intake: default source is one of the app defaults', ['Internet'].every(x => R.DEFAULT_SOURCE === x));
   const closed = R.closedStatusesFrom({ closedStatuses: ['Lost'] });
   check('intake: closed list covers the pipeline even with old Settings', ['Completed', 'Lost', 'Dead', 'Unqualified', 'Cancelled'].every(x => closed.includes(x)));
-  check('intake: repeat joins an open lead', R.canLinkResubmission({ status: 'Working' }, closed) && R.canLinkResubmission({ status: 'Sales Request' }, closed));
+  check('intake: repeat joins an open lead', R.canLinkResubmission({ status: 'Working' }, closed) && R.canLinkResubmission({ status: 'Wanted' }, closed));
+  check('intake: a prospect reaching out again gets a fresh lead', !R.canLinkResubmission({ status: 'Prospect' }, closed));
   check('intake: repeat never joins a closed lead', !R.canLinkResubmission({ status: 'Completed' }, closed) && !R.canLinkResubmission({ status: 'Dead' }, closed));
   check('intake: repeat spam stays in Junk', R.canLinkResubmission({ status: 'Junk' }, closed));
   check('intake: every pipeline closed status is covered', ['Completed', 'Lost', 'Unqualified', 'Dead', 'Cancelled'].every(x => R.CLOSED_STATUSES.includes(x)));
   const fnSrc = readFileSync(join(root, 'functions/index.js'), 'utf8');
   check('intake: the endpoint uses the rules', /intakeStatus\(\)/.test(fnSrc) && /closedStatusesFrom\(appConfig\)/.test(fnSrc) && !/'Google Sheet'/.test(fnSrc));
+}
+
+// ---- Lead routing (Oct 2026: branch manager, ZIP splits, shared areas) ----
+{
+  const { createRequire } = await import('node:module');
+  const R = createRequire(import.meta.url)('../functions/routingRules.js');
+  const cfg = {
+    branches: ['Anderson', 'Columbus', 'Ellettsville', 'Indy', 'Indy North'],
+    branchManagers: { Anderson: 'jack', Indy: 'rob', 'Indy North': 'nate' },
+    leadRouting: {
+      'Anderson::Parts': { primaryUserId: 'melvin', backupUserId: 'gary', cc1: 'x@ex.com' },
+      'Anderson::Sales': { primaryUserId: 'michel', zipSplits: [{ userId: 'michel', zips: '46011, 46012' }, { userId: 'max', zips: '460' }] },
+      'Indy::Sales': { primaryUserId: 'drew' },
+      'Indy North::Sales': { primaryUserId: 'todd', zipSplits: [{ userId: 'chris', zips: '46077, 46250' }] }
+    },
+    sharedAreas: [{ name: 'Marion County', department: 'Sales', branches: ['Indy', 'Indy North'], zips: R.MARION_COUNTY_ZIPS.join(', ') }]
+  };
+  const plan = (o) => R.planRouting(cfg, o);
+  check('zip: exact and prefix', R.zipMatches('46011', '46011') && R.zipMatches('46099', '460') && !R.zipMatches('46199', '460'));
+  check('zip: ZIP+4 and junk handled', R.zipMatches('46011-1234', '46011') && !R.zipMatches('', '460') && !R.zipMatches('abc', '460'));
+  let p = plan({ branch: 'Anderson', department: 'Parts', zip: '46011' });
+  check('routing: dept person assigned, backup second', p.matched && p.assigneeId === 'melvin' && p.backupId === 'gary');
+  check('routing: branch manager copied', p.branchManagerId === 'jack' && p.ccEmails.includes('x@ex.com'));
+  p = plan({ branch: 'Anderson', department: 'Sales', zip: '46011' });
+  check('routing: first matching ZIP split wins', p.assigneeId === 'michel' && p.via === 'zip');
+  p = plan({ branch: 'Anderson', department: 'Sales', zip: '46040' });
+  check('routing: prefix split', p.assigneeId === 'max' && p.via === 'zip');
+  p = plan({ branch: 'Anderson', department: 'Sales', zip: '47401' });
+  check('routing: no split match falls back to primary', p.assigneeId === 'michel' && p.via === 'primary');
+  p = plan({ branch: '', department: 'Sales', zip: '46040' });
+  check('routing: no branch, ZIP split supplies it', p.matched && p.branch === 'Anderson' && p.assigneeId === 'max');
+  check('routing: no branch and no claiming split = unrouted', plan({ branch: '', department: 'Sales', zip: '47401' }).reason === 'no-branch');
+  p = plan({ branch: 'Indy', department: 'Sales', zip: '46250' });
+  check('routing: Marion County Indy sales lead also goes to the Indy North ZIP rep', p.assigneeId === 'drew' && JSON.stringify(p.partnerIds) === JSON.stringify(['chris']));
+  p = plan({ branch: 'Indy North', department: 'Sales', zip: '46201' });
+  check('routing: Marion County Indy North lead also goes to Indy', p.assigneeId === 'todd' && JSON.stringify(p.partnerIds) === JSON.stringify(['drew']));
+  check('routing: outside Marion County, no partner', plan({ branch: 'Indy', department: 'Sales', zip: '46143' }).partnerIds.length === 0);
+  check('routing: shared area is per department', plan({ branch: 'Indy', department: 'Parts', zip: '46201' }).partnerIds.length === 0);
+  check('routing: case-insensitive department', plan({ branch: 'Anderson', department: 'parts', zip: '' }).assigneeId === 'melvin');
+  const unrouted = plan({ branch: 'Indy', department: 'Service', zip: '' });
+  check('routing: unrouted lead still names its branch manager', !unrouted.matched && unrouted.reason === 'no-routing-entry' && unrouted.branchManagerId === 'rob');
+  check('routing: Marion County list has 56 ZIPs incl. Beech Grove', R.MARION_COUNTY_ZIPS.length === 56 && R.MARION_COUNTY_ZIPS.includes('46107'));
+  const appSrc = readFileSync(join(root, 'src/App.jsx'), 'utf8');
+  const m = appSrc.match(/const MARION_COUNTY_ZIPS = '([^']+)'/);
+  check('routing: Settings and server Marion County lists match', !!m && m[1].split(/,\s*/).join(',') === R.MARION_COUNTY_ZIPS.join(','));
+}
+
+// ---- Daily reminders ---------------------------------------------------------
+{
+  const { createRequire } = await import('node:module');
+  const M = createRequire(import.meta.url)('../functions/reminderRules.js');
+  const now = Date.parse('2026-10-29T13:00:00Z');
+  const ago = (d) => new Date(now - d * 86400e3).toISOString();
+  check('contact: assigned New lead from yesterday', M.needsContactReminder({ status: 'New', assignedTo: 'r1', dateAssigned: ago(1) }, now));
+  check('contact: not the day it was assigned', !M.needsContactReminder({ status: 'New', assignedTo: 'r1', dateAssigned: ago(0.2) }, now));
+  check('contact: not unassigned', !M.needsContactReminder({ status: 'New', assignedTo: 'u_1', dateAssigned: ago(3) }, now));
+  check('contact: stops once it leaves New', !M.needsContactReminder({ status: 'Working', assignedTo: 'r1', dateAssigned: ago(3) }, now));
+  check('follow-up: 30 days after completion', M.needsFollowUpReminder({ status: 'Completed', assignedTo: 'r1', completedAt: ago(30.2) }, now));
+  check('follow-up: not at 29 days', !M.needsFollowUpReminder({ status: 'Completed', assignedTo: 'r1', completedAt: ago(29) }, now));
+  check('follow-up: not old deals (45+ days)', !M.needsFollowUpReminder({ status: 'Completed', assignedTo: 'r1', completedAt: ago(200) }, now));
+  check('follow-up: only once', !M.needsFollowUpReminder({ status: 'Completed', assignedTo: 'r1', completedAt: ago(31), followUpReminderSentAt: ago(1) }, now));
+  check('follow-up: falls back to statusChangedAt', M.needsFollowUpReminder({ status: 'Completed', assignedTo: 'r1', statusChangedAt: ago(32) }, now));
+  const g = M.groupByAssignee([{ id: 'a', assignedTo: 'r1' }, { id: 'b', assignedTo: 'r2' }, { id: 'c', assignedTo: 'r1' }]);
+  check('reminders: one email per rep', g.r1.length === 2 && g.r2.length === 1);
+  const fn = readFileSync(join(root, 'functions/index.js'), 'utf8');
+  check('reminders: scheduled weekdays 8am Indianapolis', /schedule: '0 8 \* \* 1-5'/.test(fn) && /timeZone: 'America\/Indiana\/Indianapolis'/.test(fn));
 }
 
 console.log('');

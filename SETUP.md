@@ -94,6 +94,17 @@ Then confirm hosting actually released (look for `release complete`; if not,
 
 ---
 
+## 4b. Cloud Scheduler (daily reminder emails)
+
+`dailyLeadReminders` runs on a schedule, which needs Cloud Scheduler. Once:
+
+```powershell
+gcloud services enable cloudscheduler.googleapis.com --project=ind-lmt
+gcloud projects add-iam-policy-binding ind-lmt --member="serviceAccount:github-deploy@ind-lmt.iam.gserviceaccount.com" --role=roles/cloudscheduler.admin --condition=None
+```
+
+Without the role, the GitHub deploy of functions fails on that one function.
+
 ## 5. Bootstrap the first admin and `u_1`
 
 1. **Firebase Console → Authentication → Users → Add user**
@@ -225,8 +236,8 @@ divergences from Bobcat of Atlanta, which this repo was taken from:
 | Scoring service area | `46,47` (IN) primary; `60,61,62` (IL), `43,44,45` (OH), `40,41,42` (KY), `48,49` (MI) adjacent | `30,31,35` primary; `36,37,38,29,28,27,32,39` adjacent |
 | Export filenames | `ind-lmt-report`, `ind-lmt-archived`, `ind-leads`, `ind-lmt-import-template`, `ind-routing-overview` | `atl-` equivalents |
 | Temp password prefix | `IND-` | `ATL-` |
-| Lead views | Four-step pipeline — Incoming, Working, Sales Submittals, Completed — behind a dashboard picker (`src/lib/pipeline.js`) | Leads / My Open / My Closed / All Closed |
-| Statuses | New · Working, Prospect, Pending, Want · Sales Submittal · Completed, Lost, Unqualified, Cancelled · Junk | New, Contacted, Working, Quoted, Won, Lost, Unqualified, No Decision, Junk |
+| Lead views | Tabs New, Working (+Pending), Prospect (+Dead, Unqualified, Lost), Wanted, Completed, plus a dashboard (`src/lib/pipeline.js`) | Leads / My Open / My Closed / All Closed |
+| Statuses | New · Working, Pending · Prospect, Dead, Unqualified, Lost · Wanted · Completed · Junk | New, Contacted, Working, Quoted, Won, Lost, Unqualified, No Decision, Junk |
 | Sales Submittal | Rep form on the lead + back-office fields (admins) + `sendSalesRequestEmail` to Settings → Sales Submittals | — |
 | Deal details | `lead.deal` — machine, model, new/used, temperature, quoted date, location, competitor, lost reason | — |
 | Sales Requests | `requests` collection — delivery / get ready / demo / parts / pick up / service, per-department check-offs | — |

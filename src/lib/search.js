@@ -40,7 +40,7 @@ function run(items, q, fieldsOf, primaryOf, dateOf, limit) {
 
 export function searchLeads(leads, q, limit = 8) {
   return run(leads, q,
-    (l) => [l.customerName, l.companyName, l.contactEmail, l.phone, l.zip, l.branch,
+    (l) => [l.customerName, l.companyName, l.contactEmail, l.phone, l.zip, l.branch, l.prospectKeywords,
             l.deal && l.deal.model, l.salesRequest && l.salesRequest.customerName],
     (l) => l.customerName || l.companyName,
     (l) => l.createdDate || l.dateSubmitted,

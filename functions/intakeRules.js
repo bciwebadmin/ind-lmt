@@ -4,7 +4,9 @@
 // Statuses that take a lead out of play. A new inquiry that matches one of
 // these is a new sale to work, not a repeat of an open one. Union of the
 // stored config (which may predate the Indy pipeline) and the pipeline's own.
-const CLOSED_STATUSES = ['Completed', 'Lost', 'Unqualified', 'Dead', 'Cancelled', 'Won', 'No Decision'];
+// Prospect is included (Oct 2026): a prospect who reaches out again is a live
+// lead and belongs back in New, not as a note on a lead in the Prospect tab.
+const CLOSED_STATUSES = ['Completed', 'Lost', 'Unqualified', 'Dead', 'Cancelled', 'Won', 'No Decision', 'Prospect'];
 
 const squash = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, '');
 

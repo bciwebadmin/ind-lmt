@@ -17,6 +17,9 @@ const admin = require('firebase-admin');
 const { Resend } = require('resend');
 const { nearestBranchForZip } = require('./branchRouting');
 const { canonical, intakeStatus, intakeSource, closedStatusesFrom, canLinkResubmission } = require('./intakeRules');
+const { planRouting } = require('./routingRules');
+const { needsContactReminder, needsFollowUpReminder, completedAtOf, daysSince, groupByAssignee } = require('./reminderRules');
+const { onSchedule } = require('firebase-functions/v2/scheduler');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -217,8 +220,15 @@ exports.intake = onRequest(
     try {
       const routing = await resolveLeadRouting({
         branch: candidate.branch,
-        department: candidate.department
+        department: candidate.department,
+        zip: candidate.zip
       });
+      // A ZIP claimed by one branch's "By Zip" split supplies the branch when
+      // the form didn't send one.
+      if (!candidate.branch && routing.branch) {
+        candidate.branch = routing.branch;
+        candidate.history[0].branchFromZipSplit = { fromZip: candidate.zip, toBranch: routing.branch };
+      }
       if (routing.matched) {
         candidate.assignedTo = routing.assigneeId;
         candidate.dateAssigned = now;
@@ -230,7 +240,10 @@ exports.intake = onRequest(
           branch: candidate.branch,
           department: candidate.department,
           assigneeId: routing.assigneeId,
-          secondaryId: routing.secondaryId || null
+          secondaryId: routing.secondaryId || null,
+          byZip: routing.via === 'zip',
+          sharedWith: routing.partnerIds || [],
+          branchManagerCopied: routing.branchManagerId || null
         };
         console.log(`[intake] Routed ${candidate.branch}/${candidate.department} -> ${routing.assigneeId}`);
       } else {
@@ -379,7 +392,7 @@ function buildAssignmentEmailHtml({ rep, lead, leadUrl, score }) {
 
   // Heat tier color
   const tierColors = {
-    Urgent: { bg: '#ffece5', text: '#851a00' },
+    Hot: { bg: '#ffe4e6', text: '#9f1239' },
     Warm: { bg: '#fef3c7', text: '#92400e' },
     Cool: { bg: '#dbeafe', text: '#1e40af' },
     Cold: { bg: '#f1f5f9', text: '#475569' }
@@ -428,7 +441,7 @@ function buildAssignmentEmailHtml({ rep, lead, leadUrl, score }) {
                     <tr>
                       <td style="font-size: 18px; font-weight: 700; color: #1c1917;">${safeName}${safeCompany ? `<div style="font-size: 13px; font-weight: 500; color: #57534e; margin-top: 2px;">${safeCompany}</div>` : ''}</td>
                       ${score ? `<td align="right">
-                        <span style="display: inline-block; background-color: ${heat.bg}; color: ${heat.text}; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px;">🚨 ${escapeHtml(score.tier)} · ${score.total}</span>
+                        <span style="display: inline-block; background-color: ${heat.bg}; color: ${heat.text}; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px;">${escapeHtml(score.tier)}</span>
                       </td>` : ''}
                     </tr>
                   </table>
@@ -521,70 +534,65 @@ async function getAppConfig() {
  *
  * Returns { matched, assigneeId, secondaryId, ccEmails, reason }.
  */
-async function resolveLeadRouting({ branch, department }) {
-  const no = (reason) => ({ matched: false, assigneeId: null, secondaryId: null, ccEmails: [], reason });
-
-  if (!branch)     return no('no-branch');
-  if (!department) return no('no-department');
-
+async function resolveLeadRouting({ branch, department, zip }) {
+  const no = (reason, b) => ({ matched: false, assigneeId: null, secondaryId: null, ccEmails: [], reason, branch: b || branch || '' });
   const config = await getAppConfig();
-  const table = config.leadRouting || {};
-
-  // Exact key first; fall back to a case-insensitive department match so a form
-  // sending "service" instead of "Service" still routes.
-  let entry = table[routingKey(branch, department)];
-  if (!entry) {
-    const wanted = routingKey(branch, department).toLowerCase();
-    const hit = Object.keys(table).find(k => k.toLowerCase() === wanted);
-    if (hit) entry = table[hit];
+  const plan = planRouting(config, { branch, department, zip });
+  if (!plan.matched) {
+    // Unrouted, but if the branch is known its manager still hears about it.
+    const mgr = plan.branchManagerId ? await availableUser(plan.branchManagerId) : null;
+    return { ...no(plan.reason, plan.branch), ccEmails: mgr && mgr.email ? [mgr.email] : [] };
   }
-  if (!entry) return no('no-routing-entry');
 
-  const primaryId = (entry.primaryUserId || '').trim();
-  if (!primaryId) return no('no-primary-set');
-
-  // The primary must still be a real, available user. Someone deleted or put on
-  // leave after being configured here would otherwise silently own the lead.
-  let userDoc;
+  // The assignee must still be a real, available user. Someone deleted or put
+  // on leave after being configured here would otherwise silently own the lead.
+  let primary;
   try {
-    userDoc = await db.collection('users').doc(primaryId).get();
+    const doc = await db.collection('users').doc(plan.assigneeId).get();
+    if (!doc.exists) return no('primary-user-missing', plan.branch);
+    primary = doc.data() || {};
   } catch (err) {
-    console.error('[routing] Failed to load primary user', primaryId, err);
-    return no('primary-lookup-failed');
+    console.error('[routing] Failed to load primary user', plan.assigneeId, err);
+    return no('primary-lookup-failed', plan.branch);
   }
-  if (!userDoc.exists) return no('primary-user-missing');
-  const user = userDoc.data() || {};
-  if (user.onLeaveOfAbsence) return no('primary-on-leave');
+  if (primary.onLeaveOfAbsence) return no('primary-on-leave', plan.branch);
 
-  // Local Backup is a user now, not an email. They get the lead in their My Open
-  // and are CC'd — but only if the account still resolves. An unavailable backup
-  // is dropped rather than blocking the whole route, since the primary is the one
-  // who actually owns the lead.
-  let secondaryId = null;
-  let secondaryEmail = null;
-  const backupId = (entry.backupUserId || '').trim();
-  if (backupId && backupId !== primaryId) {
-    try {
-      const backupDoc = await db.collection('users').doc(backupId).get();
-      if (backupDoc.exists) {
-        const backup = backupDoc.data() || {};
-        if (!backup.onLeaveOfAbsence) {
-          secondaryId = backupId;
-          if (backup.email) secondaryEmail = backup.email;
-        } else {
-          console.log(`[routing] Backup ${backupId} is on leave — skipping secondary`);
-        }
-      }
-    } catch (err) {
-      console.error('[routing] Failed to load backup user', backupId, err);
-    }
+  // Backup, shared-area partners (Marion County: the other branch's sales rep)
+  // and the branch manager are copied. Anyone unavailable is dropped rather than
+  // blocking the route — the assignee is the one who owns the lead.
+  const backup = plan.backupId ? await availableUser(plan.backupId) : null;
+  const partners = [];
+  for (const id of plan.partnerIds) {
+    const u = await availableUser(id);
+    if (u) partners.push({ id, ...u });
   }
+  const manager = plan.branchManagerId && plan.branchManagerId !== plan.assigneeId ? await availableUser(plan.branchManagerId) : null;
 
-  const ccEmails = [secondaryEmail, entry.cc1, entry.cc2, entry.cc3]
-    .map(e => (e || '').trim())
-    .filter(e => e && e.includes('@'));
+  // One secondary slot on the lead: the backup, else the first shared partner.
+  const secondaryId = backup ? plan.backupId : (partners[0] ? partners[0].id : null);
+  const ccEmails = [
+    backup && backup.email, ...partners.map(p => p.email), manager && manager.email, ...plan.ccEmails
+  ].map(e => String(e || '').trim()).filter((e, i, arr) => e.includes('@') && arr.indexOf(e) === i);
 
-  return { matched: true, assigneeId: primaryId, secondaryId, ccEmails, reason: 'routed' };
+  return {
+    matched: true, assigneeId: plan.assigneeId, secondaryId, ccEmails, reason: 'routed',
+    branch: plan.branch, via: plan.via, partnerIds: partners.map(p => p.id),
+    branchManagerId: manager ? plan.branchManagerId : null
+  };
+}
+
+// A user who exists and isn't on leave, or null.
+async function availableUser(id) {
+  if (!id) return null;
+  try {
+    const doc = await db.collection('users').doc(id).get();
+    if (!doc.exists) return null;
+    const u = doc.data() || {};
+    return u.onLeaveOfAbsence ? null : u;
+  } catch (err) {
+    console.error('[routing] Failed to load user', id, err);
+    return null;
+  }
 }
 
 async function getNotificationRecipients(key) {
@@ -786,7 +794,7 @@ function buildNewLeadEmailHtml({ lead, leadUrl, score }) {
 
   // Heat tier color
   const tierColors = {
-    Urgent: { bg: '#ffece5', text: '#851a00' },
+    Hot: { bg: '#ffe4e6', text: '#9f1239' },
     Warm: { bg: '#fef3c7', text: '#92400e' },
     Cool: { bg: '#dbeafe', text: '#1e40af' },
     Cold: { bg: '#f1f5f9', text: '#475569' }
@@ -835,7 +843,7 @@ function buildNewLeadEmailHtml({ lead, leadUrl, score }) {
                     <tr>
                       <td style="font-size: 18px; font-weight: 700; color: #1c1917;">${safeName}${safeCompany ? `<div style="font-size: 13px; font-weight: 500; color: #57534e; margin-top: 2px;">${safeCompany}</div>` : ''}</td>
                       ${score ? `<td align="right">
-                        <span style="display: inline-block; background-color: ${heat.bg}; color: ${heat.text}; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px;">🚨 ${escapeHtml(score.tier)} · ${score.total}</span>
+                        <span style="display: inline-block; background-color: ${heat.bg}; color: ${heat.text}; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px;">${escapeHtml(score.tier)}</span>
                       </td>` : ''}
                     </tr>
                   </table>
@@ -941,6 +949,13 @@ async function getServiceAreaRules() {
  * For a more accurate score, store the lead's score in Firestore when it's computed client-side
  * and read it here.
  */
+// The rep-set temperature (Hot / Warm / Cold), shown on alert emails when set.
+// Replaced the computed heat score in Oct 2026.
+function temperatureBadge(lead) {
+  const t = (lead && (lead.temperature || (lead.deal && lead.deal.temperature))) || '';
+  return ['Hot', 'Warm', 'Cold'].includes(t) ? { tier: t } : null;
+}
+
 async function quickScore(lead) {
   let total = 0;
   // Service area — read from config/app so the email agrees with the app.
@@ -995,7 +1010,7 @@ async function sendAssignmentNotification({ lead, leadId, assigneeId, logTag, cc
   }
 
   // Compose
-  const score = await quickScore(lead);
+  const score = temperatureBadge(lead);
   const leadUrl = `${CRM_URL.value()}?lead=${encodeURIComponent(leadId)}`;
   const html = buildAssignmentEmailHtml({ rep, lead, leadUrl, score });
   const subject = `New lead assigned: ${lead.customerName || 'Unnamed'}`;
@@ -1110,7 +1125,7 @@ async function sendNewLeadAlert({ lead, leadId, logTag }) {
     return;
   }
 
-  const score = await quickScore(lead);
+  const score = temperatureBadge(lead);
   const leadUrl = `${CRM_URL.value()}?lead=${encodeURIComponent(leadId)}`;
   const html = buildNewLeadEmailHtml({ lead, leadUrl, score });
   const subject = `New lead to assign: ${lead.customerName || 'Unnamed'}`;
@@ -1186,7 +1201,8 @@ exports.onLeadCreate = onDocumentCreated(
     try {
       const routing = await resolveLeadRouting({
         branch: lead.branch,
-        department: lead.department
+        department: lead.department,
+        zip: lead.zip
       });
       if (routing.matched) ccEmails = routing.ccEmails;
     } catch (err) {
@@ -2764,6 +2780,132 @@ exports.restoreLoaLeadsForUser = onCall(
 );
 
 /* ===================== HEALTH CHECK ===================== */
+
+/* ===================== DAILY REMINDERS ===================== */
+// Weekday mornings (Indianapolis time): each rep gets one email listing
+//   - their assigned leads still in New (make contact), and
+//   - their deals completed 30 days ago (send the customer a follow-up).
+// Rules in reminderRules.js. Either list can be switched off in Settings →
+// Notifications (notifications.contactRemindersEnabled / followUpRemindersEnabled).
+function buildReminderEmailHtml({ repName, sections, crmUrl }) {
+  const block = (sec) => `
+        <tr><td style="padding: 18px 28px 6px;">
+          <div style="font-size: 16px; font-weight: 700; color: #1c1917;">${escapeHtml(sec.title)}</div>
+          <div style="font-size: 13px; color: #57534e; margin-top: 2px;">${escapeHtml(sec.intro)}</div>
+        </td></tr>
+        ${sec.rows.map(r => `<tr><td style="padding: 6px 28px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #fafaf9; border: 1px solid #e7e5e4; border-radius: 6px;">
+            <tr><td style="padding: 10px 14px;">
+              <a href="${r.url}" style="font-size: 14px; font-weight: 600; color: #1c1917; text-decoration: none;">${escapeHtml(r.name)}</a>
+              <div style="font-size: 12px; color: #78716c; margin-top: 2px;">${escapeHtml(r.sub)}</div>
+            </td></tr>
+          </table>
+        </td></tr>`).join('')}`;
+  return `<!DOCTYPE html>
+<html><body style="margin: 0; padding: 0; background-color: #f5f5f4; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #f5f5f4; padding: 24px 0;">
+    <tr><td align="center">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; overflow: hidden;">
+        <tr><td style="background-color: #1c1917; padding: 20px 28px;">
+          <div style="color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">BOBCAT OF INDY</div>
+          <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">LMT · Daily reminder</div>
+        </td></tr>
+        <tr><td style="padding: 24px 28px 0;">
+          <div style="font-size: 20px; font-weight: 700; color: #1c1917;">Good morning, ${escapeHtml(repName || 'there')}</div>
+        </td></tr>
+        ${sections.map(block).join('')}
+        <tr><td align="center" style="padding: 22px 28px 8px;">
+          <a href="${crmUrl}" style="display: inline-block; background-color: #d62b00; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-weight: 600; font-size: 14px;">Open the LMT</a>
+        </td></tr>
+        <tr><td style="padding: 16px 28px 26px; text-align: center; color: #a8a29e; font-size: 11px;">
+          Leads stop appearing here once they leave New. Follow-up reminders are sent once per deal.
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+}
+
+exports.dailyLeadReminders = onSchedule(
+  {
+    schedule: '0 8 * * 1-5',
+    timeZone: 'America/Indiana/Indianapolis',
+    region: 'us-central1',
+    secrets: [RESEND_API_KEY]
+  },
+  async () => {
+    const now = Date.now();
+    const config = await getAppConfig();
+    const notif = config.notifications || {};
+    const contactOn = notif.contactRemindersEnabled !== false;
+    const followOn = notif.followUpRemindersEnabled !== false;
+    if (!contactOn && !followOn) { console.log('[reminders] Both reminders switched off in Settings'); return; }
+
+    const load = async (status) => (await db.collection('leads').where('status', '==', status).get())
+      .docs.map(d => ({ id: d.id, ...d.data() }));
+    const uncontacted = contactOn ? (await load('New')).filter(l => needsContactReminder(l, now)) : [];
+    const followUps = followOn ? (await load('Completed')).filter(l => needsFollowUpReminder(l, now)) : [];
+
+    const contactBy = groupByAssignee(uncontacted);
+    const followBy = groupByAssignee(followUps);
+    const reps = [...new Set([...Object.keys(contactBy), ...Object.keys(followBy)])];
+    if (!reps.length) { console.log('[reminders] Nothing to remind anyone about'); return; }
+
+    const crm = CRM_URL.value();
+    const link = (id) => `${crm}?lead=${encodeURIComponent(id)}`;
+    const resend = new Resend(RESEND_API_KEY.value());
+    let sent = 0;
+    for (const repId of reps) {
+      let rep;
+      try {
+        const doc = await db.collection('users').doc(repId).get();
+        rep = doc.exists ? doc.data() : null;
+      } catch (err) { console.error('[reminders] user lookup failed', repId, err); }
+      if (!rep || !rep.email || rep.onLeaveOfAbsence) { console.log(`[reminders] Skipping ${repId} — no email or on leave`); continue; }
+
+      const sections = [];
+      const c = contactBy[repId] || [];
+      if (c.length) sections.push({
+        title: `Make contact (${c.length})`,
+        intro: c.length === 1 ? 'This lead is assigned to you and still in New.' : 'These leads are assigned to you and still in New.',
+        rows: c.map(l => ({
+          name: l.customerName || l.companyName || 'Unnamed lead',
+          sub: [l.companyName && l.customerName ? l.companyName : '', l.phone, l.contactEmail,
+                `assigned ${daysSince(l.dateAssigned || l.createdDate, now)} day(s) ago`].filter(Boolean).join(' · '),
+          url: link(l.id)
+        }))
+      });
+      const f = followBy[repId] || [];
+      if (f.length) sections.push({
+        title: `Send a follow-up (${f.length})`,
+        intro: 'These deals were completed about 30 days ago — a good time to check in with the customer.',
+        rows: f.map(l => ({
+          name: l.customerName || l.companyName || 'Unnamed lead',
+          sub: [l.salesRequest && l.salesRequest.model, l.phone, l.contactEmail,
+                `completed ${fmtDateTime(new Date(completedAtOf(l)).toISOString())}`].filter(Boolean).join(' · '),
+          url: link(l.id)
+        }))
+      });
+      const subject = [c.length ? `${c.length} lead${c.length === 1 ? '' : 's'} to contact` : '', f.length ? `${f.length} follow-up${f.length === 1 ? '' : 's'}` : '']
+        .filter(Boolean).join(' · ');
+      try {
+        const result = await resend.emails.send({
+          from: EMAIL_FROM.value(), to: rep.email, subject: `Reminder: ${subject}`,
+          html: buildReminderEmailHtml({ repName: rep.name, sections, crmUrl: crm })
+        });
+        if (result.error) { console.error(`[reminders] Resend error for ${rep.email}:`, result.error); continue; }
+        sent++;
+        // Follow-ups are sent once per deal.
+        for (const l of f) {
+          await db.collection('leads').doc(l.id).update({ followUpReminderSentAt: new Date(now).toISOString() });
+        }
+      } catch (err) {
+        console.error(`[reminders] Failed for ${rep.email}:`, err);
+      }
+    }
+    console.log(`[reminders] Sent ${sent} reminder email(s): ${uncontacted.length} uncontacted lead(s), ${followUps.length} follow-up(s)`);
+  }
+);
 
 exports.health = onRequest({ region: 'us-central1' }, (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });

@@ -1,76 +1,101 @@
 // src/lib/pipeline.js
 //
-// Bobcat of Indy's four-step sales pipeline. This is the one place that says
-// which status belongs to which step. Everything else — the dashboards, their
-// counts, the status dropdowns, the tests — reads it from here.
+// Bobcat of Indy's lead management. This is the one place that says which
+// status belongs to which tab. Everything else — the sidebar, its counts, the
+// status dropdowns, the tests — reads it from here.
 //
-//   Incoming -> Working -> Sales Request -> Completed
+//   New -> Working (Working, Pending) -> Prospect (Prospect, Dead, Unqualified,
+//   Lost) / Wanted -> Completed
 //
-// Indy's own words for a sale are used throughout: a deal that closes is
-// "Completed" (the older forks call it "Won"). A rep setting a Working lead to
-// Completed is really saying "we got it" — that opens the Sales Submittal and
-// the lead goes to Sales Request. It only reaches the Completed step once the
-// back office finishes the submittal.
+// Reworked Oct 2026 after Indy's process meeting. Leads, Sales Submittals and
+// Sales Requests are three separate processes that can be tied together:
+//   - Completed means a done deal, nothing else. Choosing Completed opens the
+//     Sales Submittal; the lead goes straight to Completed and the submittal
+//     joins the back office's own queue (`lead.salesRequest.status`).
+//   - Dead, Unqualified and Lost live under Prospect, filterable by type, so
+//     they stay a resource to come back to.
 //
-// A lead's step is DERIVED from its status, never stored. That is what makes
-// "when a lead moves on it leaves the previous step" automatic: one status,
-// therefore exactly one step, with no second field to fall out of sync and no
-// migration if the mapping changes.
+// A lead's tab is DERIVED from its status, never stored: one status, exactly
+// one tab, nothing to fall out of sync.
 //
 // Pure module on purpose — no React, no Firebase — so scripts/test-helpers.mjs
-// can import it under plain node. Indy-only: the other forks do not have steps.
+// can import it under plain node.
 
-export const STAGE_INCOMING      = 'incoming';
+export const STAGE_INCOMING      = 'incoming';    // labelled "New"; id kept for diffing with Atlanta
 export const STAGE_WORKING       = 'working';
-export const STAGE_SALES_REQUEST = 'sales-request';
+export const STAGE_PROSPECT      = 'prospect';
+export const STAGE_WANTED        = 'wanted';
 export const STAGE_COMPLETED     = 'completed';
-export const STAGE_JUNK          = 'junk';   // not a step; Junk keeps its own tab
+export const STAGE_JUNK          = 'junk';   // not a tab; Junk is a sub-tab of New
+// The old third step. No longer a lead step (Sales Submittals are their own
+// queue); kept so colours and accents keyed on it still resolve.
+export const STAGE_SALES_REQUEST = 'sales-request';
 
-export const NEW_STATUS           = 'New';
-export const WORKING_STATUS       = 'Working';
-// Was 'Sales Request' until Oct 2026 — renamed so it isn't confused with the
-// Back Office Sales Requests (deliveries, demos…). See LEGACY_STATUS_RENAMES.
-export const SALES_REQUEST_STATUS = 'Sales Submittal';
+export const NEW_STATUS       = 'New';
+export const WORKING_STATUS   = 'Working';
+export const PENDING_STATUS   = 'Pending';
+export const PROSPECT_STATUS  = 'Prospect';
+export const WANTED_STATUS    = 'Wanted';
 // The status a finished sale ends in. Named WON_STATUS so the shared report
 // code reads the same across forks; Indy's value is 'Completed'.
-export const WON_STATUS           = 'Completed';
-export const LOST_STATUS          = 'Lost';
-// Indy's Prospect sheet marks prospects that went nowhere as "Dead" — kept as
-// its own closed status at Erin's request, separate from Lost and Unqualified.
-export const DEAD_STATUS          = 'Dead';
+export const WON_STATUS       = 'Completed';
+export const LOST_STATUS      = 'Lost';
+export const DEAD_STATUS      = 'Dead';
+export const UNQUALIFIED_STATUS = 'Unqualified';
+export const JUNK_STATUS      = 'Junk';
+// Retired lead statuses, still recognised on old leads (see LEGACY_STATUS_RENAMES).
+export const SALES_REQUEST_STATUS = 'Sales Submittal';
 export const CANCELLED_STATUS     = 'Cancelled';
-export const JUNK_STATUS          = 'Junk';
 
 export const PIPELINE_STAGES = [
   {
     id: STAGE_INCOMING,
-    label: 'Incoming',
+    label: 'New',
     view: 'stage-incoming',
-    blurb: 'Every new lead lands here. Review it, fill in what is missing, assign a rep.',
+    blurb: 'Every new lead lands here. Assign it and make contact.',
     statuses: [NEW_STATUS]
   },
   {
     id: STAGE_WORKING,
     label: 'Working',
     view: 'stage-working',
-    blurb: 'Assigned to a rep and being worked.',
-    statuses: [WORKING_STATUS, 'Prospect', 'Pending', 'Want']
+    blurb: 'Being worked by a rep, including deals pending.',
+    statuses: [WORKING_STATUS, PENDING_STATUS]
   },
   {
-    id: STAGE_SALES_REQUEST,
-    label: 'Sales Submittals',
-    view: 'stage-sales-request',
-    blurb: 'Sold by the rep. The sales submittal is with the back office.',
-    statuses: [SALES_REQUEST_STATUS]
+    id: STAGE_PROSPECT,
+    label: 'Prospect',
+    view: 'stage-prospect',
+    blurb: 'Prospects to come back to, and leads that went dead, unqualified or lost.',
+    statuses: [PROSPECT_STATUS, DEAD_STATUS, UNQUALIFIED_STATUS, LOST_STATUS]
+  },
+  {
+    id: STAGE_WANTED,
+    label: 'Wanted',
+    view: 'stage-wanted',
+    blurb: 'Customers waiting on a unit that isn’t available yet.',
+    statuses: [WANTED_STATUS]
   },
   {
     id: STAGE_COMPLETED,
     label: 'Completed',
     view: 'stage-completed',
-    blurb: 'Finished: completed sales, lost, unqualified, dead or cancelled.',
-    statuses: [WON_STATUS, LOST_STATUS, 'Unqualified', DEAD_STATUS, CANCELLED_STATUS]
+    blurb: 'Done deals.',
+    statuses: [WON_STATUS]
   }
 ];
+
+// The Prospect tab's type buttons. "Prospect" is the default view and holds
+// prospects added by hand as well as leads a rep moved to Prospect.
+export const PROSPECT_TYPES = [
+  { id: 'prospect',    label: 'Prospect',    status: PROSPECT_STATUS },
+  { id: 'dead',        label: 'Dead',        status: DEAD_STATUS },
+  { id: 'unqualified', label: 'Unqualified', status: UNQUALIFIED_STATUS },
+  { id: 'lost',        label: 'Lost',        status: LOST_STATUS }
+];
+// Moving a lead into any of these asks for keywords (Cat, CTL, …) so the
+// prospect list can be searched later.
+export const PROSPECT_GROUP_STATUSES = PROSPECT_TYPES.map(t => t.status);
 
 // Every status the pipeline needs, in display order, Junk last.
 export const PIPELINE_STATUSES = [
@@ -78,29 +103,37 @@ export const PIPELINE_STATUSES = [
   JUNK_STATUS
 ];
 
-export const PIPELINE_CLOSED_STATUSES = [
-  ...PIPELINE_STAGES.find(s => s.id === STAGE_COMPLETED).statuses,
-  JUNK_STATUS
-];
+// "Closed" = finished for good: archived 30 days on, never stale. Only done
+// deals and junk. Dead / Unqualified / Lost stay live under Prospect.
+export const PIPELINE_CLOSED_STATUSES = [WON_STATUS, JUNK_STATUS];
 
-// Statuses the older forks used. Indy never offers them, but a lead carrying one
-// (a CSV import, a lead copied across) still has to land in a sensible step.
+// Statuses the older forks (or earlier Indy drafts) used. A lead carrying one
+// still has to land in a sensible tab.
 export const LEGACY_STATUS_STAGE = {
   Contacted:     STAGE_INCOMING,
   Qualified:     STAGE_WORKING,
   Quoted:        STAGE_WORKING,
-  Wants:         STAGE_WORKING,     // Indy's first draft of the pipeline
-  Won:           STAGE_COMPLETED,   // what every other fork calls Completed
-  'No Decision': STAGE_COMPLETED,
-  'Sales Request': STAGE_SALES_REQUEST   // renamed Sales Submittal, Oct 2026
+  Want:          STAGE_WANTED,
+  Wants:         STAGE_WANTED,
+  Won:           STAGE_COMPLETED,
+  'No Decision': STAGE_PROSPECT,
+  'Sales Request': STAGE_COMPLETED,
+  'Sales Submittal': STAGE_COMPLETED,
+  Cancelled:     STAGE_PROSPECT
 };
 
 // Statuses that were renamed. Leads still storing the old name are shown under
 // the new one on read and rewritten once by an admin (App.jsx); Settings and
 // staleness thresholds heal in ensurePipelineStatuses.
+//   Sales Request / Sales Submittal -> Completed: the submittal now has its own
+//   queue, so the lead itself is a done deal (its submittal stays Open).
 export const LEGACY_STATUS_RENAMES = {
   Qualified: WORKING_STATUS,
-  'Sales Request': SALES_REQUEST_STATUS
+  Want: WANTED_STATUS,
+  Wants: WANTED_STATUS,
+  'Sales Request': WON_STATUS,
+  'Sales Submittal': WON_STATUS,
+  Cancelled: LOST_STATUS
 };
 export function renamedStatus(status) {
   return Object.prototype.hasOwnProperty.call(LEGACY_STATUS_RENAMES, status) ? LEGACY_STATUS_RENAMES[status] : status;
@@ -117,14 +150,9 @@ export function stageForView(view) {
 }
 
 /**
- * Which step a status belongs to.
- *
- * Order matters: the fixed mapping wins, then legacy names, then anything an
- * admin marked closed in Settings goes to Completed. An unknown open status —
- * one an admin added — falls back to Incoming, so a lead is never in no step.
- *
- * @param {string} status
- * @param {string[]} [closedStatuses] config.closedStatuses
+ * Which tab a status belongs to. The fixed mapping wins, then legacy names,
+ * then anything an admin marked closed in Settings goes to Completed. An
+ * unknown open status — one an admin added — falls back to New.
  */
 export function stageOfStatus(status, closedStatuses = PIPELINE_CLOSED_STATUSES) {
   if (status === JUNK_STATUS) return STAGE_JUNK;
@@ -141,94 +169,55 @@ export function stageOfLead(lead, closedStatuses) {
 }
 
 /**
- * The statuses a lead can be moved to from where it is now. This is what keeps
- * the flow one-directional in the dropdowns:
- *
- *   Incoming       -> any Working status, or Lost / Unqualified if it falls through
- *   Working        -> other Working statuses, Completed (which opens the Sales
- *                     Submittal and lands in Sales Request), Lost, Unqualified
- *   Sales Request  -> Completed, back to Working, or Cancelled
- *   Completed      -> other completed statuses, or reopen into Working
- *
- * Only admins (the back office) can mark a Sales Request lead Completed — pass
- * { isAdmin: false } for a rep.
- *
- * Junk is offered everywhere except Sales Request, and a junked lead can go
- * anywhere (restoring it). Custom statuses an admin added are appended so they
- * stay reachable. The current status is always included so a <select> can show it.
- *
- * @param {string} current  the lead's current status
- * @param {string[]} allStatuses  config.statuses
- * @param {string[]} [closedStatuses]  config.closedStatuses
+ * The statuses a lead can be moved to. Leads move freely between the tabs —
+ * a prospect can come back to Working, a Wanted customer can buy — with two
+ * rules: Completed opens the Sales Submittal (completesViaSalesRequest), and
+ * Junk is offered everywhere. Custom statuses an admin added are appended.
+ * The current status is always included so a <select> can show it.
  */
-export function statusOptionsFor(current, allStatuses = PIPELINE_STATUSES, closedStatuses = PIPELINE_CLOSED_STATUSES, { isAdmin = true } = {}) {
-  const stage = stageOfStatus(current, closedStatuses);
-  // Closing out a submittal is the back office's call (admins); a rep can pull
-  // it back to Working or cancel it, but not mark it Completed.
-  if (stage === STAGE_SALES_REQUEST && !isAdmin) {
-    return [SALES_REQUEST_STATUS, WORKING_STATUS, CANCELLED_STATUS];
-  }
-  const working   = STAGE_BY_ID[STAGE_WORKING].statuses;
-  const fellThrough = [LOST_STATUS, 'Unqualified', DEAD_STATUS];
-  const completed = STAGE_BY_ID[STAGE_COMPLETED].statuses;
-
-  let base;
-  switch (stage) {
-    case STAGE_INCOMING:      base = [NEW_STATUS, ...working, ...fellThrough, JUNK_STATUS]; break;
-    // Completed from Working is intercepted by the app and routed through the
-    // Sales Submittal — see completesViaSalesRequest().
-    case STAGE_WORKING:       base = [...working, WON_STATUS, ...fellThrough, JUNK_STATUS]; break;
-    case STAGE_SALES_REQUEST: base = [SALES_REQUEST_STATUS, WON_STATUS, WORKING_STATUS, CANCELLED_STATUS]; break;
-    case STAGE_COMPLETED:     base = [...completed, WORKING_STATUS, JUNK_STATUS]; break;
-    default:                  base = PIPELINE_STATUSES.slice(); // junk: restore anywhere
-  }
-
+export function statusOptionsFor(current, allStatuses = PIPELINE_STATUSES, closedStatuses = PIPELINE_CLOSED_STATUSES /*, opts */) {
+  const base = PIPELINE_STATUSES.slice();
   const custom = (Array.isArray(allStatuses) ? allStatuses : [])
     .filter(s => !PIPELINE_STATUSES.includes(s) && !LEGACY_STATUS_STAGE[s]);
-  const out = [...base, ...(stage === STAGE_SALES_REQUEST ? [] : custom)];
+  const out = [...base.filter(s => s !== JUNK_STATUS), ...custom, JUNK_STATUS];
   if (current && !out.includes(current)) out.unshift(current);
   return out.filter((s, i) => out.indexOf(s) === i);
 }
 
-/**
- * True when moving a lead from `from` to `to` means "the rep made the sale":
- * Completed chosen on a lead that is still being worked (Incoming or Working).
- * The app opens the Sales Submittal instead of writing Completed, and the lead
- * goes to Sales Request. From Sales Request, Completed is the back office
- * closing it out and is written as-is.
- */
-/** Only admins close a submittal out (Sales Request -> Completed). */
-export function canCloseSalesRequest(fromStatus, toStatus, isAdmin, closedStatuses = PIPELINE_CLOSED_STATUSES) {
-  if (stageOfStatus(fromStatus, closedStatuses) !== STAGE_SALES_REQUEST) return true;
-  return toStatus !== WON_STATUS || !!isAdmin;
-}
-
-export function completesViaSalesRequest(from, to, closedStatuses = PIPELINE_CLOSED_STATUSES) {
-  if (to !== WON_STATUS && to !== SALES_REQUEST_STATUS) return false;
-  const stage = stageOfStatus(from, closedStatuses);
-  return stage === STAGE_INCOMING || stage === STAGE_WORKING;
+/** Kept for callers from the old flow: anyone may now set any status. */
+export function canCloseSalesRequest() {
+  return true;
 }
 
 /**
- * Statuses offered by a dashboard's bulk "Set status…" menu. Anything that
- * needs a form filled in one lead at a time is left out: Sales Request, and
- * Completed on the steps where it would open the Sales Submittal.
+ * True when moving a lead to `to` means "the rep made the sale": Completed
+ * chosen on a lead that isn't Completed yet. The app opens the Sales Submittal
+ * first; on submit the lead is written as Completed.
  */
-export function bulkStatusOptionsFor(stageId, allStatuses, closedStatuses, opts = {}) {
-  const stage = STAGE_BY_ID[stageId];
-  if (!stage) return [];
-  return statusOptionsFor(stage.statuses[0], allStatuses, closedStatuses, opts)
-    .filter(s => s !== SALES_REQUEST_STATUS)
-    .filter(s => !(s === WON_STATUS && completesViaSalesRequest(stage.statuses[0], s, closedStatuses)));
+export function completesViaSalesRequest(from, to) {
+  return to === WON_STATUS && from !== WON_STATUS;
+}
+
+/** True when moving into the Prospect group from outside it (asks for keywords). */
+export function entersProspectGroup(from, to) {
+  return PROSPECT_GROUP_STATUSES.includes(to) && !PROSPECT_GROUP_STATUSES.includes(from);
+}
+
+/**
+ * Statuses offered by a tab's bulk "Set status…" menu. Completed is left out —
+ * it needs a Sales Submittal filled in one lead at a time.
+ */
+export function bulkStatusOptionsFor(stageId, allStatuses, closedStatuses) {
+  if (!STAGE_BY_ID[stageId]) return [];
+  return statusOptionsFor(null, allStatuses, closedStatuses).filter(s => s !== WON_STATUS);
 }
 
 /**
  * Stored config replaces the defaults rather than merging, so a project whose
  * Settings were saved before these statuses existed would be missing them. This
  * puts the pipeline statuses back in order, keeps any custom ones an admin
- * added, drops the legacy names, and makes sure every Completed status counts as
- * closed. Thresholds are only added where the key is absent — an admin's value
- * is never overwritten.
+ * added, drops the legacy names, and sets the closed list. Thresholds are only
+ * added where the key is absent — an admin's value is never overwritten.
  */
 export function ensurePipelineStatuses(config, defaultThresholds = {}) {
   if (!config) return config;
@@ -237,8 +226,6 @@ export function ensurePipelineStatuses(config, defaultThresholds = {}) {
   const statuses = [...PIPELINE_STATUSES.filter(s => s !== JUNK_STATUS), ...custom, JUNK_STATUS];
 
   const storedClosed = Array.isArray(config.closedStatuses) ? config.closedStatuses : [];
-  // A pipeline status that isn't a Completed one can never be closed — that
-  // would hide a Working lead in the Completed dashboard.
   const customClosed = storedClosed.filter(s => custom.includes(s));
   const closedStatuses = [...PIPELINE_CLOSED_STATUSES, ...customClosed];
 
@@ -247,10 +234,11 @@ export function ensurePipelineStatuses(config, defaultThresholds = {}) {
   if (out.staleness && out.staleness.thresholds) {
     const th = { ...out.staleness.thresholds };
     let added = false;
-    // A renamed status keeps the threshold someone set under its old name.
+    // A renamed status keeps the threshold someone set under its old name —
+    // unless the new name is a closed one (Completed is never stale).
     for (const [oldName, newName] of Object.entries(LEGACY_STATUS_RENAMES)) {
       if (Object.prototype.hasOwnProperty.call(th, oldName)) {
-        if (!Object.prototype.hasOwnProperty.call(th, newName)) th[newName] = th[oldName];
+        if (!Object.prototype.hasOwnProperty.call(th, newName) && !PIPELINE_CLOSED_STATUSES.includes(newName)) th[newName] = th[oldName];
         delete th[oldName]; added = true;
       }
     }
@@ -263,9 +251,9 @@ export function ensurePipelineStatuses(config, defaultThresholds = {}) {
 }
 
 /**
- * Who sees a lead in a dashboard. Admins see everything. A rep sees leads
- * assigned to them (primary or secondary) — plus, in Incoming only, leads nobody
- * owns yet, so they can pick them up.
+ * Who sees a lead in a tab. Admins see everything. A rep sees leads assigned
+ * to them (primary or secondary) — plus, in New only, leads nobody owns yet,
+ * so they can pick them up.
  */
 export function isLeadVisibleInStage(lead, stageId, viewer) {
   if (!lead || !viewer) return false;
@@ -276,6 +264,39 @@ export function isLeadVisibleInStage(lead, stageId, viewer) {
 
 export function isUnassigned(lead) {
   return !lead || !lead.assignedTo || lead.assignedTo === 'u_1';
+}
+
+/* ===================== TEMPERATURE ===================== */
+// Set by the rep by hand (Hot / Warm / Cold) and filterable like a status.
+// Replaced the computed heat score in Oct 2026. Stored as `lead.temperature`;
+// leads from before then kept it in `lead.deal.temperature`, read as a fallback.
+export const TEMPERATURES = ['Hot', 'Warm', 'Cold'];
+export function leadTemperature(lead) {
+  if (!lead) return '';
+  const t = lead.temperature || (lead.deal && lead.deal.temperature) || '';
+  return TEMPERATURES.includes(t) ? t : '';
+}
+
+/* ===================== SALES SUBMITTAL QUEUE ===================== */
+// A submittal is its own process: Open until the back office completes it,
+// whatever the lead's status. Submittals made before Oct 2026 had no status of
+// their own — a lead that had already reached Completed was finished by the
+// back office then, so it reads as Complete; anything else is Open.
+export const SUBMITTAL_OPEN = 'Open';
+export const SUBMITTAL_COMPLETE = 'Complete';
+export function submittalStatus(lead) {
+  const sr = lead && lead.salesRequest;
+  if (!sr) return null;
+  if (sr.status === SUBMITTAL_OPEN || sr.status === SUBMITTAL_COMPLETE) return sr.status;
+  return lead.status === WON_STATUS && !lead._migratedFrom ? SUBMITTAL_COMPLETE : SUBMITTAL_OPEN;
+}
+
+/* ===================== PROSPECT KEYWORDS ===================== */
+// Free text the rep adds when a lead goes to Prospect (or a prospect is added):
+// "Cat, CTL, needs trailer". Split into tags for display and search.
+export function prospectKeywordList(lead) {
+  const raw = (lead && lead.prospectKeywords) || '';
+  return String(raw).split(/[,;\n]+/).map(s => s.trim()).filter(Boolean);
 }
 
 /* ===================== DEAL DETAILS ===================== */
@@ -296,7 +317,6 @@ export const DEAL_FIELDS = [
   { key: 'other',             label: 'Other',                  type: 'text',   placeholder: 'Trailer, compactor, …' },
   { key: 'newUsed',           label: 'New / Used',             type: 'select', options: ['New', 'Used', 'Either'] },
   { key: 'includeAttachment', label: 'Include Attachment?',    type: 'select', options: ['Yes', 'No'] },
-  { key: 'temperature',       label: 'Temperature',            type: 'select', options: ['Hot', 'Warm', 'Cold'] },
   { key: 'dateQuoted',        label: 'Date Quoted',            type: 'date' },
   { key: 'location',          label: 'Location',               type: 'text',   placeholder: 'City, County' },
   { key: 'competitor',        label: 'Competitor',             type: 'text',   placeholder: 'Kubota, Deere, CAT, …' }

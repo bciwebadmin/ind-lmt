@@ -137,62 +137,84 @@ Watch the direction when porting. Note that in BMH only ~19 of its 97
 `text-stone-900` occurrences are on brand fills; the rest are ordinary dark text
 on white. A blind swap in either direction breaks the UI and still builds.
 
-## The four-step pipeline (Indy only)
+## Lead management (Indy only — reworked Oct 2026)
 
-Indy works leads through four steps, each its own dashboard, with a picker
-(`home` view) as the landing screen:
+After Indy's process meeting, **Leads, Sales Submittals and Sales Requests are
+three separate processes that can be tied together.** Leads live in five tabs:
 
-  **Incoming** (New) → **Working** (Working, Prospect, Pending, Want) →
-  **Sales Submittals** (Sales Submittal) → **Completed** (Completed, Lost,
-  Unqualified, Dead, Cancelled)
+  **New** (New) · **Working** (Working, Pending) · **Prospect** (Prospect, Dead,
+  Unqualified, Lost) · **Wanted** (Wanted) · **Completed** (Completed only)
 
-The third step and its status were called **Sales Request** until Oct 2026;
-renamed **Sales Submittals** / **Sales Submittal** so they aren't confused with
-the Back Office **Sales Requests** (deliveries, demos…, standalone or on a
-lead). Internal ids (`STAGE_SALES_REQUEST`, `stage-sales-request`,
-`SALES_REQUEST_STATUS`, `lead.salesRequest`, `sendSalesRequestEmail`) keep the
-old name on purpose. Leads still storing `'Sales Request'` are shown as the new
-name on read (`LEGACY_STATUS_RENAMES` → `normalizeLeadStatus`) and rewritten
-once by the first admin to load the app; Settings and staleness thresholds heal
-in `ensurePipelineStatuses`.
-
-Indy calls a finished sale **Completed** (other forks: Won). `WON_STATUS` holds
-`'Completed'` so shared report code still reads the same. Choosing Completed on
-a lead still being worked means "sale made": it opens the **Sales Submittal**
-(`SalesRequestModal`) and lands the lead in Sales Request
-(`completesViaSalesRequest`). Only an admin — the back office — can then mark it
-Completed (`canCloseSalesRequest`, enforced in the menus and in `updateLead`).
-Lost asks for a reason and competitor (`LostDealModal`).
-
-Field lists all live in `pipeline.js`, taken from Indy's Smartsheet exports:
-`DEAL_FIELDS` (lead.deal — one section on every lead, the tracker's columns do
-not vary by status), `LOST_FIELDS`, `SALES_REQUEST_FIELDS` (the rep's half of the
-submittal, `showIf` for conditional questions, `pruneHiddenAnswers` on save) and
-`BACK_OFFICE_FIELDS` (lead.salesRequest.backOffice, admin-only).
-
-- `src/lib/pipeline.js` is the single source of truth for which status is in
-  which step, which moves each step allows, and who sees what. It is pure, so
-  `scripts/test-helpers.mjs` imports it directly. Change the mapping there.
-- A lead's step is **derived from its status**, never stored. That is what
-  guarantees a lead is in exactly one step; do not add a `stage` field.
-- `ensurePipelineStatuses()` heals a stored `config/app` that predates the
-  pipeline (stored config replaces defaults — see below). Pipeline statuses
-  cannot be removed in Settings; they come back on the next read.
-- Guards live in `updateLead`, so every path (row, bulk, panel) obeys them:
-  entering Working needs an assigned rep, and Sales Submittal can only be
-  entered through `SalesRequestModal`, which supplies `lead.salesRequest`.
+- `src/lib/pipeline.js` is the single source of truth (`PIPELINE_STAGES`). It
+  is pure, so `scripts/test-helpers.mjs` imports it directly. A lead's tab is
+  **derived from its status**, never stored — do not add a `stage` field.
+  Stage ids keep their old names for diffing with Atlanta (`STAGE_INCOMING` is
+  labelled New; `STAGE_SALES_REQUEST` is no longer a tab).
+- **Completed = a done deal.** Choosing it opens the Sales Submittal
+  (`SalesRequestModal`, `completesViaSalesRequest`); on submit the lead is
+  Completed (`completedAt` stamped) and the submittal joins the Back Office
+  **Sales Submittals** queue with its own status (`lead.salesRequest.status`:
+  Open / Complete, `submittalStatus()`). Only admins complete or reopen a
+  submittal; that never changes the lead's status.
+- **Prospect** holds manual prospects plus leads set to Dead, Unqualified or
+  Lost, with type buttons (`PROSPECT_TYPES`, Prospect is default). Moving into
+  that group asks for **keywords** (`lead.prospectKeywords`, `LostDealModal`,
+  which also asks Lost's reason). Keywords are searchable in the tab and in
+  global search.
+- Only Completed and Junk are "closed" (`PIPELINE_CLOSED_STATUSES`): archived
+  after 30 days, never stale. Dead / Unqualified / Lost stay live in Prospect.
+- Status moves are free between tabs (`statusOptionsFor`); entering Working
+  still needs an assigned rep (guard in `updateLead`).
+- **Temperature** (Hot / Warm / Cold) is set by hand: `lead.temperature`,
+  read with `leadTemperature()` (falls back to the old `lead.deal.temperature`).
+  Quick-link chips above every tab, a column with inline select, a filter, a
+  picker on the lead page, and the Reports chart. The computed heat score and
+  Settings → Scoring were removed (`scoreLead` is still defined, unused).
+- + New offers Lead, **Prospect** and **Want** (Add Lead preset to that
+  status, owned by whoever adds it), Sales Submittal, Sales Request, Trade-In,
+  Finance Deal.
+- Renamed statuses (`LEGACY_STATUS_RENAMES`): Want→Wanted, Sales Request /
+  Sales Submittal→Completed (submittal stays Open), Cancelled→Lost,
+  Qualified→Working. Leads still storing an old name are shown under the new
+  one (`normalizeLeadStatus`) and rewritten once by the first admin to load
+  the app; Settings and staleness thresholds heal in `ensurePipelineStatuses`.
+- Field lists, from Indy's Smartsheet exports: `DEAL_FIELDS` (lead.deal),
+  `LOST_FIELDS`, `SALES_REQUEST_FIELDS` (rep's half of the submittal) and
+  `BACK_OFFICE_FIELDS` (admin-only). `sendSalesRequestEmail` re-reads the lead
+  and emails `notifications.salesRequestEmails`; its field list is copied in
+  `functions/index.js` and a test fails if they drift.
 - Visibility: admins see every lead; reps see leads where they are primary or
-  secondary, plus unassigned leads in Incoming only.
-- Submitting a sales request calls the `sendSalesRequestEmail` callable with
-  just the lead id. The server re-reads the lead and emails
-  `notifications.salesRequestEmails` (Settings → Sales Requests), cc and
-  reply-to the rep. The form's field list is copied in `functions/index.js`
-  (`SALES_REQUEST_FIELDS`); a test fails if the two drift.
-- The old Leads / My Open / My Closed / All Closed / My Created views are gone
-  (`RETIRED_VIEWS`); those ids redirect to the picker. My Created became the
-  **Created by me** toggle on every step dashboard (`createdByUserId`). A rep
-  also sees leads they entered but handed off; those rows are watch-only
-  (`watchOnly` — no checkbox, no inline assign/status, "Created by you" tag).
+  secondary, plus unassigned leads in New. A rep also sees leads they entered
+  but handed off, watch-only (`watchOnly`). **Created by me** toggle on every tab.
+- Lead page tabs: Overview, Sales Submittal (with its status), Sales Requests,
+  Trade-Ins, Finance, **Quotes** (the lead's files — renamed from Files),
+  Notes & Activity.
+
+## Routing and reminders (Oct 2026)
+
+`functions/routingRules.js` (pure, tested) decides; `resolveLeadRouting` in
+index.js checks the users are real and not on leave.
+
+- Per branch + department (`config.leadRouting`): Local Primary (the
+  department person) is assigned; Local Backup is secondary; **`zipSplits`**
+  ("By Zip": first matching ZIP list picks the rep instead of the primary —
+  5-digit exact, 3-digit prefix); CC 1–3.
+- **`config.branchManagers[branch]`** is copied on every alert for that branch,
+  routed or not.
+- **`config.sharedAreas`** (Marion County: Indy + Indy North, Sales): a lead in
+  those ZIPs is assigned by its own branch and the other branch's routed rep
+  becomes secondary and is copied. Settings has a one-click Marion County
+  default; the ZIP list is duplicated in App.jsx and routingRules.js and a test
+  fails if they drift.
+- No branch on the form but a ZIP split claims the ZIP → that branch.
+- Equipment leads use the **Sales** department (Erin's call).
+- `dailyLeadReminders` (scheduled, weekdays 8:00 Indianapolis, us-central1):
+  one email per rep listing their assigned leads still in New (until they leave
+  New) and deals completed 30–45 days ago (once each, `followUpReminderSentAt`).
+  Rules in `functions/reminderRules.js`. Toggles: Settings → Notifications →
+  Daily Reminders. **Needs Cloud Scheduler** — see SETUP.md.
+- Alert emails show the rep-set temperature (when set) instead of a heat score.
+- Text alerts for sales leads are planned (Twilio) — not built yet.
 
 ## Navigation
 
@@ -223,7 +245,7 @@ shared by the Back Office lists and the lead page tabs (`RecordTab`), so a
 trade-in can be approved, or a request checked off, from the customer's page.
 
 Old views moved rather than removed — `MOVED_VIEWS` maps them, and `goTo` /
-the `?view=` redirect follow the map: Junk → a tab on Incoming, Archived → a
+the `?view=` redirect follow the map: Junk → a tab on New, Archived → a
 tab on Completed, Import / Scoring / Lead Routing → tabs in Settings
 (`SETTINGS_TABS`). Tabs use `SubTabs`.
 
@@ -291,8 +313,8 @@ The full Smartsheet → LMT map is in the Claude project,
 const closedStatuses = getClosedStatuses(config);   // always use the helper
 ```
 
-- **Open:** New, Working, Prospect, Pending, Want, Sales Submittal
-- **Closed:** Completed, Lost, Unqualified, Dead, Cancelled → the Completed step
+- **Open:** New, Working, Pending, Prospect, Dead, Unqualified, Lost, Wanted
+- **Closed:** Completed (done deals) → archived after 30 days
 - **Junk:** its own tab, excluded from every dashboard and all report metrics
 
 "Working" was renamed from "Qualified"; `LEGACY_WORKING_STATUS` still maps the
@@ -302,7 +324,7 @@ overrides the normal activity-based staleness clock.
 Two field names are deliberately stale, kept so the forks stay diffable. Do not
 "fix" them — it would require a Firestore migration:
 
-- `config.scoringRules.tiers.hot` backs the label **Urgent**
+- `config.scoringRules` is still stored but unused since temperature replaced the heat score
 - `serviceArea.texasPrefixes` holds **Indiana** prefixes (`46`, `47`)
 
 ## Branches
