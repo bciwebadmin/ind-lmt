@@ -455,7 +455,7 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
       'Indy::Sales': { primaryUserId: 'drew' },
       'Indy North::Sales': { primaryUserId: 'todd', zipSplits: [{ userId: 'chris', zips: '46077, 46250' }] }
     },
-    sharedAreas: [{ name: 'Marion County', department: 'Sales', branches: ['Indy', 'Indy North'], zips: R.MARION_COUNTY_ZIPS.join(', ') }]
+    sharedAreas: [{ name: 'Marion County', branches: ['Indy', 'Indy North'], zips: R.MARION_COUNTY_ZIPS.join(', ') }]
   };
   const plan = (o) => R.planRouting(cfg, o);
   check('zip: exact and prefix', R.zipMatches('46011', '46011') && R.zipMatches('46099', '460') && !R.zipMatches('46199', '460'));
@@ -477,7 +477,11 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   p = plan({ branch: 'Indy North', department: 'Sales', zip: '46201' });
   check('routing: Marion County Indy North lead also goes to Indy', p.assigneeId === 'todd' && JSON.stringify(p.partnerIds) === JSON.stringify(['drew']));
   check('routing: outside Marion County, no partner', plan({ branch: 'Indy', department: 'Sales', zip: '46143' }).partnerIds.length === 0);
-  check('routing: shared area is per department', plan({ branch: 'Indy', department: 'Parts', zip: '46201' }).partnerIds.length === 0);
+  check('routing: shared area is sales only', plan({ branch: 'Indy', department: 'Parts', zip: '46201' }).partnerIds.length === 0);
+  const withPartsSplit = { ...cfg, leadRouting: { ...cfg.leadRouting, 'Anderson::Parts': { primaryUserId: 'melvin', zipSplits: [{ userId: 'zed', zips: '460' }] } } };
+  check('routing: ZIP splits ignored for non-sales departments', R.planRouting(withPartsSplit, { branch: 'Anderson', department: 'Parts', zip: '46011' }).assigneeId === 'melvin');
+  check('routing: no branch + parts lead is not placed by ZIP', R.planRouting(withPartsSplit, { branch: '', department: 'Parts', zip: '46011' }).reason === 'no-branch');
+  check('routing: "sales" in any case counts as Sales', R.planRouting(cfg, { branch: 'Anderson', department: 'SALES', zip: '46040' }).assigneeId === 'max');
   check('routing: case-insensitive department', plan({ branch: 'Anderson', department: 'parts', zip: '' }).assigneeId === 'melvin');
   const unrouted = plan({ branch: 'Indy', department: 'Service', zip: '' });
   check('routing: unrouted lead still names its branch manager', !unrouted.matched && unrouted.reason === 'no-routing-entry' && unrouted.branchManagerId === 'rob');

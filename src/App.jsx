@@ -6856,7 +6856,8 @@ function LeadRoutingView({ config, onSave, onCreateUser, canEdit = true }) {
             entry={getRoutingEntry(config, activeBranch, department)}
             users={assignableUsers}
             onChange={(slotKey, value) => updateSlot(activeBranch, department, slotKey, value)}
-            onZipSplitsChange={(splits) => updateSlot(activeBranch, department, 'zipSplits', splits)}
+            onZipSplitsChange={String(department).toLowerCase() === 'sales'
+              ? (splits) => updateSlot(activeBranch, department, 'zipSplits', splits) : null}
             onAddNew={(slotKey) => setAddingFor({ branch: activeBranch, department, slotKey })}
           />
         ))}
@@ -6866,7 +6867,8 @@ function LeadRoutingView({ config, onSave, onCreateUser, canEdit = true }) {
 
       <div className="text-[11px] text-stone-400 leading-relaxed px-1">
         A lead is matched by its own department field against the names below, so these must match the
-        department values your web forms send. Equipment leads use the Sales department.
+        department values your web forms send. Equipment leads use the Sales department; ZIP splits and
+        shared areas apply to Sales leads only.
       </div>
 
       {addingFor && (
@@ -7230,7 +7232,7 @@ function ZipSplitsEditor({ splits, users, onChange }) {
     <div className="grid grid-cols-1 sm:grid-cols-[150px_1fr] gap-1.5 sm:gap-3 sm:items-start pt-2 border-t border-stone-100">
       <div className="pt-1.5">
         <div className="text-xs font-medium text-stone-700">Split by ZIP</div>
-        <div className="text-[10px] text-stone-400 leading-tight mt-0.5">A matching ZIP goes to that rep instead of the Local Primary</div>
+        <div className="text-[10px] text-stone-400 leading-tight mt-0.5">Sales leads only. A matching ZIP goes to that rep instead of the Local Primary</div>
       </div>
       <div className="space-y-2">
         {splits.map((s, i) => (
@@ -7283,7 +7285,7 @@ function SharedAreasCard({ config, onSave, departments }) {
     <div className="bg-white border border-stone-200 rounded-lg overflow-hidden">
       <div className="px-5 py-3 border-b border-stone-200 bg-stone-50">
         <div className="text-sm font-semibold text-stone-900">Shared Areas</div>
-        <div className="text-xs text-stone-500">ZIPs that more than one location covers. A lead from one goes to every listed location&rsquo;s rep: its own location&rsquo;s rep is assigned, the others see it too and are copied.</div>
+        <div className="text-xs text-stone-500"><span className="font-semibold text-stone-700">Sales leads only.</span> ZIPs that more than one location covers. A sales lead from one goes to every listed location&rsquo;s sales rep: its own location&rsquo;s rep is assigned, the others see it too and are copied.</div>
       </div>
       <div className="p-5 space-y-4">
         {areas.map((a, i) => (
@@ -7291,11 +7293,6 @@ function SharedAreasCard({ config, onSave, departments }) {
             <div className="flex flex-col md:flex-row gap-2">
               <input value={a.name || ''} onChange={e => set(i, { name: e.target.value })} placeholder="Area name" aria-label="Area name"
                 className="md:w-56 px-2.5 py-1.5 border border-stone-200 rounded text-sm"/>
-              <select value={a.department || ''} onChange={e => set(i, { department: e.target.value })} aria-label="Department"
-                className="md:w-40 px-2.5 py-1.5 border border-stone-200 rounded text-sm bg-white">
-                <option value="">Any department</option>
-                {departments.map(d => <option key={d} value={d}>{d}</option>)}
-              </select>
               <button type="button" onClick={() => save(areas.filter((_, j) => j !== i))}
                 className="md:ml-auto text-xs text-stone-500 hover:text-rose-700 inline-flex items-center gap-1"><Trash2 size={12}/> Remove</button>
             </div>
@@ -7313,9 +7310,9 @@ function SharedAreasCard({ config, onSave, departments }) {
         ))}
         <div className="flex flex-wrap gap-3">
           {!hasMarion && branches.includes('Indy') && branches.includes('Indy North') && (
-            <button type="button" onClick={() => save([...areas, { name: 'Marion County', department: 'Sales', branches: ['Indy', 'Indy North'], zips: MARION_COUNTY_ZIPS }])}
+            <button type="button" onClick={() => save([...areas, { name: 'Marion County', branches: ['Indy', 'Indy North'], zips: MARION_COUNTY_ZIPS }])}
               className="text-xs px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white font-semibold rounded-md inline-flex items-center gap-1.5">
-              <Plus size={12}/> Add Marion County (Indy + Indy North sales)
+              <Plus size={12}/> Add Marion County (Indy + Indy North)
             </button>
           )}
           <button type="button" onClick={() => save([...areas, { name: '', department: '', branches: [], zips: '' }])}

@@ -10,9 +10,17 @@
 //   cc1..cc3        extra addresses copied on the alert
 // Per branch (config.branchManagers[branch]): the branch manager, copied on
 // every alert for that branch.
-// Shared areas (config.sharedAreas): [{ name, zips, department, branches }] —
-// a lead in one of those ZIPs for that department goes to the routed rep of
-// EVERY listed branch (Marion County: Indy and Indy North sales).
+// Shared areas (config.sharedAreas): [{ name, zips, branches }] — a SALES lead
+// in one of those ZIPs goes to the routed sales rep of EVERY listed branch
+// (Marion County: Indy and Indy North).
+
+// ZIP-based assignment (splits and shared areas) applies to SALES leads only —
+// equipment sales are split by territory; parts, rental, service and supplies
+// always go to the department person (Erin, Oct 2026).
+const SALES_DEPARTMENT = 'Sales';
+function isSales(department) {
+  return String(department || '').trim().toLowerCase() === SALES_DEPARTMENT.toLowerCase();
+}
 
 // "46201, 46107\n462" -> ['46201', '46107', '462']. 3-4 digit entries are
 // prefixes; 5-digit entries are exact.
@@ -41,10 +49,11 @@ function findEntry(table, branch, department) {
   return hit ? table[hit] : null;
 }
 
-// Who an entry assigns a lead to: the matching ZIP split, else the primary.
-function entryAssignee(entry, zip) {
+// Who an entry assigns a lead to: for a sales lead, the matching ZIP split;
+// otherwise (or with no match) the primary.
+function entryAssignee(entry, zip, department = SALES_DEPARTMENT) {
   if (!entry) return { userId: '', via: 'none' };
-  const splits = Array.isArray(entry.zipSplits) ? entry.zipSplits : [];
+  const splits = isSales(department) && Array.isArray(entry.zipSplits) ? entry.zipSplits : [];
   for (const s of splits) {
     if (s && s.userId && zipMatches(zip, s.zips)) return { userId: s.userId, via: 'zip' };
   }
@@ -54,6 +63,7 @@ function entryAssignee(entry, zip) {
 // A lead with no branch but a ZIP that one branch's split (for this
 // department) claims belongs to that branch. First match in branch order.
 function branchFromZip(config, department, zip) {
+  if (!isSales(department)) return '';
   const table = (config && config.leadRouting) || {};
   for (const branch of (config && config.branches) || []) {
     const entry = findEntry(table, branch, department);
@@ -65,11 +75,11 @@ function branchFromZip(config, department, zip) {
 
 // Shared areas this lead falls in: the OTHER branches whose rep also gets it.
 function sharedPartnerBranches(config, branch, department, zip) {
+  if (!isSales(department)) return [];
   const areas = (config && Array.isArray(config.sharedAreas)) ? config.sharedAreas : [];
   const out = [];
   for (const a of areas) {
     if (!a || !Array.isArray(a.branches) || !a.branches.includes(branch)) continue;
-    if (a.department && String(a.department).toLowerCase() !== String(department || '').toLowerCase()) continue;
     if (!zipMatches(zip, a.zips)) continue;
     for (const b of a.branches) if (b !== branch && !out.includes(b)) out.push(b);
   }
@@ -92,10 +102,10 @@ function planRouting(config, { branch, department, zip }) {
   base.branchManagerId = (managers[b] || '').trim();
   const entry = findEntry(table, b, department);
   if (!entry) return { ...base, reason: 'no-routing-entry' };
-  const { userId, via } = entryAssignee(entry, zip);
+  const { userId, via } = entryAssignee(entry, zip, department);
   if (!userId) return { ...base, reason: 'no-primary-set' };
   const partnerIds = sharedPartnerBranches(config, b, department, zip)
-    .map(pb => entryAssignee(findEntry(table, pb, department), zip).userId)
+    .map(pb => entryAssignee(findEntry(table, pb, department), zip, department).userId)
     .filter(id => id && id !== userId);
   const ccEmails = [entry.cc1, entry.cc2, entry.cc3].map(e => String(e || '').trim()).filter(e => e.includes('@'));
   const backupId = (entry.backupUserId || '').trim();
@@ -120,5 +130,5 @@ const MARION_COUNTY_ZIPS = [
 
 module.exports = {
   parseZipList, zipMatches, routingKey, findEntry, entryAssignee, branchFromZip,
-  sharedPartnerBranches, planRouting, MARION_COUNTY_ZIPS
+  sharedPartnerBranches, planRouting, isSales, SALES_DEPARTMENT, MARION_COUNTY_ZIPS
 };

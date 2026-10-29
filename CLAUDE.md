@@ -201,7 +201,9 @@ index.js checks the users are real and not on leave.
   5-digit exact, 3-digit prefix); CC 1–3.
 - **`config.branchManagers[branch]`** is copied on every alert for that branch,
   routed or not.
-- **`config.sharedAreas`** (Marion County: Indy + Indy North, Sales): a lead in
+- **ZIP-based rules are Sales-only** (Erin): `zipSplits`, ZIP → branch, and
+  shared areas are ignored for Parts, Rental, Service and Supplies (`isSales`).
+- **`config.sharedAreas`** (Marion County: Indy + Indy North): a sales lead in
   those ZIPs is assigned by its own branch and the other branch's routed rep
   becomes secondary and is copied. Settings has a one-click Marion County
   default; the ZIP list is duplicated in App.jsx and routingRules.js and a test
