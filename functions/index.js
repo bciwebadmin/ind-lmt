@@ -20,9 +20,68 @@ const { canonical, intakeStatus, intakeSource, closedStatusesFrom, canLinkResubm
 const { planRouting } = require('./routingRules');
 const { needsContactReminder, needsFollowUpReminder, followUpDateDue, indyToday, completedAtOf, daysSince, groupByAssignee } = require('./reminderRules');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
+const selfRepair = require('./selfRepairRules');
 
 admin.initializeApp();
 const db = admin.firestore();
+
+/* ===================== SELF-REPAIR: SERVER ERROR CAPTURE ===================== */
+// Every console.error in these functions is also counted as an incident
+// (incidents/{fingerprint}), which the hourly health check turns into a GitHub
+// issue for the repair agent. Best-effort: it never throws, never logs through
+// itself, and writes at most a few times a minute per instance.
+const originalConsoleError = console.error.bind(console);
+const recentIncidentWrites = new Map(); // fingerprint -> ms
+let incidentWritesThisMinute = 0;
+let incidentMinute = 0;
+
+function errorParts(args) {
+  const err = args.find(a => a instanceof Error);
+  const text = args.map(a => (a instanceof Error ? a.message : typeof a === 'string' ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })()))
+    .join(' ').slice(0, 2000);
+  return { message: text, stack: err && err.stack ? String(err.stack).slice(0, 8000) : '' };
+}
+
+async function recordIncident({ source, tag = '', message, stack = '', kind = 'code', extra = {} }) {
+  const id = selfRepair.fingerprint({ source, tag, message, stack });
+  const ref = db.collection('incidents').doc(id);
+  const now = new Date().toISOString();
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) {
+      tx.set(ref, { id, source, tag, kind, message: String(message).slice(0, 2000), stack: String(stack).slice(0, 8000),
+        count: 1, firstSeen: now, lastSeen: now, status: 'open', ...extra });
+      return;
+    }
+    const cur = snap.data();
+    const patch = { count: (cur.count || 0) + 1, lastSeen: now, ...extra };
+    if (cur.status === 'resolved') { patch.status = 'open'; if (cur.issueNumber) patch.reopened = true; }
+    tx.update(ref, patch);
+  });
+  return id;
+}
+
+console.error = (...args) => {
+  originalConsoleError(...args);
+  try {
+    const { message, stack } = errorParts(args);
+    if (!message || selfRepair.isNoise(message, stack)) return;
+    const tag = selfRepair.tagOf(args[0]);
+    if (tag === 'self-repair') return; // our own failures must not feed themselves
+    const fp = selfRepair.fingerprint({ source: 'server', tag, message, stack });
+    const t = Date.now();
+    if (t - (recentIncidentWrites.get(fp) || 0) < 60e3) return;
+    const minute = Math.floor(t / 60e3);
+    if (minute !== incidentMinute) { incidentMinute = minute; incidentWritesThisMinute = 0; }
+    if (++incidentWritesThisMinute > 10) return;
+    recentIncidentWrites.set(fp, t);
+    recordIncident({ source: 'server', tag, message, stack, extra: { function: process.env.K_SERVICE || process.env.FUNCTION_TARGET || '' } })
+      .catch(err => originalConsoleError('[self-repair] could not record incident:', err && err.message));
+  } catch (err) {
+    originalConsoleError('[self-repair] console hook failed:', err && err.message);
+  }
+};
+process.on('unhandledRejection', (reason) => { console.error('[unhandled] Unhandled promise rejection:', reason); });
 
 // Shared secret for Zapier authorization. Set via:
 //   firebase functions:secrets:set INTAKE_SECRET
@@ -31,6 +90,16 @@ const INTAKE_SECRET   = defineSecret('INTAKE_SECRET');
 // Resend API key for sending email notifications. Set via:
 //   firebase functions:secrets:set RESEND_API_KEY
 const RESEND_API_KEY  = defineSecret('RESEND_API_KEY');
+
+// GitHub token the self-repair loop files issues with — a fine-grained PAT
+// from a person's account with Issues read/write on the repo. Set via:
+//   firebase functions:secrets:set GITHUB_ISSUES_TOKEN
+// Set it to "none" to run the health checks without filing issues.
+const GITHUB_ISSUES_TOKEN = defineSecret('GITHUB_ISSUES_TOKEN');
+const GITHUB_REPO = defineString('GITHUB_REPO', {
+  default: 'bciwebadmin/ind-lmt',
+  description: 'owner/name of the GitHub repo the self-repair loop files issues in.'
+});
 
 // Configurable sender + CRM URL. These can be overridden without redeploying:
 //   firebase functions:config:set ...      (legacy)
@@ -2920,6 +2989,209 @@ exports.dailyLeadReminders = onSchedule(
       }
     }
     console.log(`[reminders] Sent ${sent} reminder email(s): ${datesDue.length} follow-up date(s), ${uncontacted.length} uncontacted lead(s), ${followUps.length} 30-day follow-up(s)`);
+  }
+);
+
+/* ===================== SELF-REPAIR LOOP ===================== */
+// See CLAUDE.md → "Self-repair loop". Detect (client reports, the console.error
+// hook above, the hourly health check) → triage (fingerprint, ignore noise) →
+// hand off (GitHub issue; `auto-repair` starts the AI agent, capped per day;
+// configuration problems get `needs-human`) → verify (quiet for a week closes
+// the issue, a recurrence reopens it).
+
+// The app writes a raw crash report; this folds it into incidents/{fingerprint}
+// and deletes the raw report.
+exports.onErrorReportCreate = onDocumentCreated(
+  { document: 'errorReports/{reportId}', region: 'us-south1' },
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+    const r = snap.data() || {};
+    try {
+      const message = String(r.message || '').slice(0, 2000);
+      const stack = String(r.stack || '').slice(0, 8000);
+      if (!message || selfRepair.isNoise(message, stack)) return;
+      await recordIncident({
+        source: 'client', tag: String(r.kind || '').slice(0, 40), message, stack,
+        extra: { build: String(r.build || '').slice(0, 64), view: String(r.view || '').slice(0, 80), lastUserId: String(r.userId || '').slice(0, 128) }
+      });
+    } catch (err) {
+      originalConsoleError('[self-repair] Could not record client report:', err);
+    } finally {
+      await snap.ref.delete().catch(() => {});
+    }
+  }
+);
+
+async function probeFunction(probe) {
+  const projectId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT || 'ind-lmt';
+  const url = selfRepair.probeUrl(probe, projectId);
+  const label = `${probe.name} can be reached`;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    const res = await fetch(url, probe.method === 'GET' ? { signal: ctrl.signal } : {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: {} }), signal: ctrl.signal
+    });
+    clearTimeout(timer);
+    const body = await res.text();
+    const r = probe.kind === 'callable'
+      ? selfRepair.callableProbeResult(res.status, res.headers.get('content-type'), body)
+      : selfRepair.httpProbeResult(res.status, res.headers.get('content-type'), body);
+    return { id: `fn-${probe.name}`, group: 'Functions', label, ok: r.ok, severity: 'error',
+      detail: r.ok ? '' : `${probe.name} answered HTTP ${res.status} (${r.problem}).`,
+      fix: r.ok ? '' : (selfRepair.FIX_FOR[r.problem] || selfRepair.FIX_FOR['unexpected-response'])(probe.name, probe.region) };
+  } catch (err) {
+    return { id: `fn-${probe.name}`, group: 'Functions', label, ok: false, severity: 'error',
+      detail: `Could not reach ${probe.name}: ${err.message}`, fix: selfRepair.FIX_FOR['unexpected-response'](probe.name, probe.region) };
+  }
+}
+
+async function checkEmailDomain() {
+  const from = EMAIL_FROM.value();
+  const domain = (from.match(/@([^>\s]+)/) || [])[1] || '';
+  const base = { id: 'email-domain', group: 'Email', label: `Sending domain ${domain || '(none)'} is verified in Resend`, severity: 'error' };
+  try {
+    const res = await fetch('https://api.resend.com/domains', { headers: { Authorization: `Bearer ${RESEND_API_KEY.value()}` } });
+    const body = await res.json().catch(() => ({}));
+    // A "sending access" key can't list domains — not a fault, just unknowable.
+    if (res.status === 401 && /restricted/i.test(JSON.stringify(body))) return { ...base, ok: true, skipped: true, detail: 'The Resend key can only send, so the domain could not be checked.' };
+    if (res.status === 401 || res.status === 403) return { ...base, ok: false, detail: 'Resend rejected the API key.', fix: 'Create a new key in Resend and run `firebase functions:secrets:set RESEND_API_KEY`, then redeploy functions.' };
+    if (!res.ok) return { ...base, ok: false, severity: 'warning', detail: `Resend answered HTTP ${res.status}.` };
+    const d = (body.data || []).find(x => x.name === domain);
+    if (!d) return { ...base, ok: false, detail: `${domain} is not set up in Resend, so every email fails.`, fix: `Add ${domain} in Resend → Domains and add its DNS records, or change EMAIL_FROM in functions/.env.ind-lmt.` };
+    if (d.status !== 'verified') return { ...base, ok: false, detail: `${domain} is "${d.status}" in Resend.`, fix: 'Check the DNS records in Resend → Domains.' };
+    return { ...base, ok: true, detail: '' };
+  } catch (err) {
+    return { ...base, ok: false, severity: 'warning', detail: `Could not reach Resend: ${err.message}` };
+  }
+}
+
+function githubToken() {
+  try { const t = (GITHUB_ISSUES_TOKEN.value() || '').trim(); return t.length > 10 ? t : ''; } catch { return ''; }
+}
+
+async function github(method, path, body) {
+  const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO.value()}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${githubToken()}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'ind-lmt-self-repair', 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`GitHub ${method} ${path}: HTTP ${res.status} ${data.message || ''}`);
+  return data;
+}
+
+// Turn open incidents into GitHub issues, close quiet ones, reopen ones that came back.
+async function processIncidents({ failingHealthIds, now }) {
+  const today = indyToday(now);
+  const stateRef = db.collection('selfRepair').doc('state');
+  const state = (await stateRef.get()).data() || {};
+  const canFile = !!githubToken();
+  const snap = await db.collection('incidents').where('status', '==', 'open').get();
+  const summary = { filed: 0, aiFiled: 0, resolved: 0, reopened: 0, skipped: canFile ? 0 : snap.size };
+  let aiToday = state.day === today ? (state.aiIssuesFiled || 0) : 0;
+
+  for (const doc of snap.docs) {
+    const inc = { id: doc.id, ...doc.data() };
+    const { action, ai } = selfRepair.incidentAction(inc, { day: today, aiIssuesFiled: aiToday }, today, now, { failingHealthIds });
+    try {
+      if (action === 'resolve') {
+        if (canFile && inc.issueNumber) {
+          await github('POST', `/issues/${inc.issueNumber}/comments`, { body: inc.source === 'health' ? 'The health check passes again — closing.' : `No new occurrences for ${selfRepair.RESOLVE_AFTER_DAYS} days — closing. It reopens automatically if the error comes back.` });
+          await github('PATCH', `/issues/${inc.issueNumber}`, { state: 'closed', state_reason: 'completed' });
+        }
+        await doc.ref.update({ status: 'resolved', resolvedAt: new Date(now).toISOString(), reopened: false });
+        summary.resolved++;
+      } else if (action === 'reopen' && canFile) {
+        await github('PATCH', `/issues/${inc.issueNumber}`, { state: 'open' });
+        await github('POST', `/issues/${inc.issueNumber}/comments`, { body: `This came back (${inc.count} occurrences in total, last ${inc.lastSeen}). The earlier fix didn't hold.` });
+        await doc.ref.update({ reopened: false });
+        summary.reopened++;
+      } else if (action === 'file' && canFile) {
+        const labels = ai ? ['auto-repair'] : (inc.kind === 'config' ? ['needs-human'] : ['auto-error']);
+        const issue = await github('POST', '/issues', { title: selfRepair.issueTitle(inc), body: selfRepair.issueBody(inc, { ai }), labels });
+        await doc.ref.update({ issueNumber: issue.number, issueUrl: issue.html_url, issueFiledAt: new Date(now).toISOString(), sentToAgent: !!ai });
+        summary.filed++;
+        if (ai) { aiToday++; summary.aiFiled++; }
+      }
+    } catch (err) {
+      originalConsoleError(`[self-repair] ${action} failed for ${inc.id}:`, err.message);
+    }
+  }
+  await stateRef.set({ day: today, aiIssuesFiled: aiToday, lastRunAt: new Date(now).toISOString() }, { merge: true });
+  return summary;
+}
+
+async function runHealthCheck({ trigger }) {
+  const now = Date.now();
+  const config = await getAppConfig();
+  const users = (await db.collection('users').get()).docs.map(d => ({ id: d.id, ...d.data() }));
+
+  const checks = [];
+  checks.push(...await Promise.all(selfRepair.PROBES.map(probeFunction)));
+  checks.push(await checkEmailDomain());
+  const problems = selfRepair.configChecks(config, users);
+  for (const p of problems) checks.push({ id: `cfg-${p.id}`, group: 'Settings', label: p.title, ok: false, severity: p.severity, detail: p.detail, fix: '' });
+  if (!problems.length) checks.push({ id: 'cfg-ok', group: 'Settings', label: 'Settings and lead routing look complete', ok: true, severity: 'warning', detail: '' });
+  checks.push({ id: 'github-token', group: 'Self-repair', label: 'GitHub issue filing is set up', ok: !!githubToken(), severity: 'warning',
+    detail: githubToken() ? '' : 'GITHUB_ISSUES_TOKEN is not set, so problems are listed here but no issues are filed.', fix: 'See SETUP.md → "Self-repair loop".' });
+
+  // Failing checks become incidents (configuration → needs-human issues).
+  for (const c of checks.filter(c => !c.ok && c.id !== 'github-token' && !c.skipped)) {
+    const ref = db.collection('incidents').doc(`health-${c.id}`);
+    const cur = await ref.get();
+    const nowIso = new Date(now).toISOString();
+    const fields = { message: c.label, title: c.label, fix: [c.detail, c.fix].filter(Boolean).join('\n\n'), lastSeen: nowIso };
+    if (!cur.exists) {
+      await ref.set({ id: `health-${c.id}`, source: 'health', kind: 'config', checkId: c.id, tag: c.group, count: 1, firstSeen: nowIso, status: 'open', ...fields });
+    } else {
+      const d = cur.data();
+      const patch = { ...fields, count: (d.count || 0) + 1 };
+      if (d.status === 'resolved') { patch.status = 'open'; if (d.issueNumber) patch.reopened = true; }
+      await ref.update(patch);
+    }
+  }
+  const failingHealthIds = checks.filter(c => !c.ok && !c.skipped).map(c => c.id);
+  const incidents = await processIncidents({ failingHealthIds, now });
+
+  const status = selfRepair.healthStatus(checks);
+  const key = selfRepair.alertKey(checks);
+  const latestRef = db.collection('health').doc('latest');
+  const prev = (await latestRef.get()).data() || {};
+  await latestRef.set({ checkedAt: new Date(now).toISOString(), trigger, status, alertKey: key, checks, incidents });
+
+  // Email the Settings list only when the set of failing checks changes.
+  const to = ((config.notifications || {}).systemAlertEmails || []).filter(e => String(e).includes('@'));
+  if (to.length && key !== (prev.alertKey || '') && !(status === 'ok' && !prev.alertKey)) {
+    const failing = checks.filter(c => !c.ok);
+    const crm = CRM_URL.value();
+    const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#111">
+      <h2 style="margin:0 0 8px">${status === 'ok' ? 'All LMT health checks pass again' : 'LMT health check found a problem'}</h2>
+      ${failing.length ? `<ul>${failing.map(c => `<li><b>${escapeHtml(c.label)}</b>${c.detail ? ` — ${escapeHtml(c.detail)}` : ''}</li>`).join('')}</ul>` : '<p>Everything that was failing is fixed.</p>'}
+      <p><a href="${crm}?view=settings&tab=health">Open System Health</a></p></div>`;
+    try {
+      const result = await new Resend(RESEND_API_KEY.value()).emails.send({ from: EMAIL_FROM.value(), to, subject: status === 'ok' ? 'LMT: all health checks pass' : `LMT health: ${failing.length} problem${failing.length === 1 ? '' : 's'}`, html });
+      if (result.error) originalConsoleError('[self-repair] alert email failed:', result.error);
+    } catch (err) { originalConsoleError('[self-repair] alert email failed:', err.message); }
+  }
+  console.log(`[self-repair] Health ${status}: ${checks.filter(c => !c.ok).length} failing; issues filed ${incidents.filed} (${incidents.aiFiled} to the agent), resolved ${incidents.resolved}, reopened ${incidents.reopened}`);
+  return { status, checks, incidents };
+}
+
+exports.systemHealthCheck = onSchedule(
+  { schedule: '17 * * * *', timeZone: 'America/Indiana/Indianapolis', region: 'us-central1', secrets: [RESEND_API_KEY, GITHUB_ISSUES_TOKEN], timeoutSeconds: 300 },
+  async () => { await runHealthCheck({ trigger: 'schedule' }); }
+);
+
+exports.runHealthCheckNow = onCall(
+  { region: 'us-south1', secrets: [RESEND_API_KEY, GITHUB_ISSUES_TOKEN], timeoutSeconds: 300 },
+  async (request) => {
+    if (!request.auth?.uid) throw new HttpsError('unauthenticated', 'Sign in first.');
+    const caller = await db.collection('users').doc(request.auth.uid).get();
+    if (!caller.exists || caller.data().role !== 'admin') throw new HttpsError('permission-denied', 'Only admins can run the health check.');
+    const r = await runHealthCheck({ trigger: `manual:${request.auth.uid}` });
+    return { status: r.status, failing: r.checks.filter(c => !c.ok).length, incidents: r.incidents };
   }
 );
 

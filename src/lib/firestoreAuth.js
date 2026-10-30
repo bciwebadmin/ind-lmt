@@ -193,3 +193,9 @@ export async function adminResetUserPasswordViaFunction({ targetUid }) {
   const result = await fn({ targetUid });
   return result.data;
 }
+// Settings → System Health → "Run health check now" (admins).
+export async function runHealthCheckNowViaFunction() {
+  const fn = httpsCallable(fns, 'runHealthCheckNow', { timeout: 300000 });
+  const res = await fn({});
+  return res?.data || {};
+}

@@ -1,0 +1,68 @@
+# .github/workflows/auto-repair.yml
+#
+# Self-repair loop, step 3: the AI repair agent. See CLAUDE.md → "Self-repair loop".
+#
+# Starts when the LMT's hourly health check files an issue labelled
+# `auto-repair` (or a person adds that label), and when someone with write
+# access mentions @claude in an issue or pull request comment.
+#
+# The agent works on a claude/… branch and never merges: a person reviews the
+# change and opens / merges the pull request, and only then does deploy.yml
+# ship it. auto-repair-check.yml rejects any agent change to protected files.
+#
+# Needs: the Claude GitHub App installed on the repo, and the repo secret
+# ANTHROPIC_API_KEY (SETUP.md → "Self-repair loop").
+
+name: Auto-repair
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+# One repair at a time, so two agents never edit the same code at once.
+concurrency:
+  group: claude-auto-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'auto-repair') ||
+      (github.event_name != 'issues' && contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix functions
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          label_trigger: auto-repair
+          trigger_phrase: '@claude'
+          branch_prefix: claude/
+          claude_args: |
+            --max-turns 40
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(npm run build),Bash(node scripts/test-helpers.mjs),Bash(node scripts/verify-invariants.mjs),Bash(node --check functions/index.js),Bash(node --check:*),Bash(npx vite build --sourcemap hidden --outDir /tmp/lmt-map),Bash(node scripts/map-stack.mjs:*),Bash(git status),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*)"
+            --append-system-prompt "You are the repair agent for the Bobcat of Indy LMT. Read CLAUDE.md first, especially 'Self-repair loop'. Make the smallest safe fix with a check in scripts/test-helpers.mjs that fails before and passes after. Never edit .github/, firestore.rules, storage.rules, firebase.json, .firebaserc or functions/.env*. If the cause is configuration, permissions or data rather than code, change nothing and explain the fix for a person. Write your final comment in plain English for a non-developer: what broke, why, what you changed, how you tested it."

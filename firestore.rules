@@ -133,6 +133,42 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    /* ===================== SELF-REPAIR LOOP ===================== */
+    // See CLAUDE.md → "Self-repair loop". The app reports its own crashes:
+    // create-only, the reporter's own uid, bounded fields. The
+    // onErrorReportCreate function folds each into incidents/ and deletes it.
+    match /errorReports/{reportId} {
+      allow create: if isSignedIn()
+                    && request.resource.data.keys().hasOnly(['message', 'stack', 'kind', 'build', 'view', 'userId', 'url', 'userAgent', 'at'])
+                    && request.resource.data.userId == request.auth.uid
+                    && isString(request.resource.data.message, 2000)
+                    && (!('stack' in request.resource.data) || (request.resource.data.stack is string && request.resource.data.stack.size() <= 8000))
+                    && (!('kind' in request.resource.data) || (request.resource.data.kind is string && request.resource.data.kind.size() <= 40))
+                    && (!('build' in request.resource.data) || (request.resource.data.build is string && request.resource.data.build.size() <= 64))
+                    && (!('view' in request.resource.data) || (request.resource.data.view is string && request.resource.data.view.size() <= 80))
+                    && (!('url' in request.resource.data) || (request.resource.data.url is string && request.resource.data.url.size() <= 300))
+                    && (!('userAgent' in request.resource.data) || (request.resource.data.userAgent is string && request.resource.data.userAgent.size() <= 300))
+                    && (!('at' in request.resource.data) || (request.resource.data.at is string && request.resource.data.at.size() <= 40));
+      allow read, update, delete: if false;
+    }
+
+    // Written by the functions; admins see them in Settings → System Health
+    // and may only mute / unmute an incident.
+    match /incidents/{incidentId} {
+      allow read:   if isAdmin();
+      allow update: if isAdmin() && changed().hasOnly(['status', 'mutedBy', 'mutedAt'])
+                    && request.resource.data.status in ['open', 'muted'];
+      allow create, delete: if false;
+    }
+    match /health/{docId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+    match /selfRepair/{docId} {
+      allow read:  if isAdmin();
+      allow write: if false;
+    }
+
     /* ===================== EVERYTHING ELSE ===================== */
     // Firestore denies unmatched paths by default; this states it outright so a
     // future collection is a deliberate decision rather than an oversight.

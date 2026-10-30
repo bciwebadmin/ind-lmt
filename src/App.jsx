@@ -25,8 +25,10 @@ import {
   saveConfigDoc, saveUserDoc, deleteUserDoc,
   addAccessRequestDoc, deleteAccessRequestDoc,
   subscribeToRecords, addRecordDoc, updateRecordDoc,
-  addAttachmentRecords, removeAttachmentRecord
+  addAttachmentRecords, removeAttachmentRecord,
+  subscribeToHealth, subscribeToIncidents, setIncidentMuted
 } from './lib/firestoreData';
+import { setErrorContext } from './lib/errorReporter';
 
 import {
   signInWithCredentials, signOutCurrent, watchAuthState,
@@ -35,7 +37,8 @@ import {
   adminResetUserPasswordViaFunction,
   sendImportSummaryEmailViaFunction,
   sendSalesRequestEmailViaFunction,
-  sendRecordEmailViaFunction
+  sendRecordEmailViaFunction,
+  runHealthCheckNowViaFunction
 } from './lib/firestoreAuth';
 import { nearestBranchForZip } from './lib/branchRouting';
 import {
@@ -143,7 +146,8 @@ const SETTINGS_TABS = [
   ['general',       'General'],
   ['notifications', 'Notifications'],
   ['routing',       'Lead Routing'],
-  ['import',        'Import CSV']
+  ['import',        'Import CSV'],
+  ['health',        'System Health']
 ];
 
 // Empty-state copy for each step dashboard.
@@ -1208,6 +1212,10 @@ export default function BobcatIndyCRM() {
     return users.find(u => u.id === currentUserId && !u.isSystem) || null;
   }, [currentUserId, users]);
 
+  // Crash reports say who was signed in and on which screen (self-repair loop).
+  useEffect(() => { setErrorContext({ userId: currentUserId || '' }); }, [currentUserId]);
+  useEffect(() => { setErrorContext({ view: selectedLead ? `${view}/lead` : view }); }, [view, selectedLead]);
+
   // accessRequests is admin-read-only (see firestore.rules) and only the Users tab
   // consumes it, so a rep subscribing just left a permission-denied listener
   // retrying in the background.
@@ -2043,7 +2051,10 @@ export default function BobcatIndyCRM() {
   const [settingsTab, setSettingsTab] = useState(() => {
     try {
       const v = new URLSearchParams(window.location.search).get('view');
-      return MOVED_VIEWS[v] && MOVED_VIEWS[v][0] === 'settings' ? MOVED_VIEWS[v][1] : 'general';
+      if (MOVED_VIEWS[v] && MOVED_VIEWS[v][0] === 'settings') return MOVED_VIEWS[v][1];
+      // ?view=settings&tab=health — the link in the health alert email.
+      const t = new URLSearchParams(window.location.search).get('tab');
+      return v === 'settings' && SETTINGS_TABS.some(([k]) => k === t) ? t : 'general';
     } catch { return 'general'; }
   });
   // Follow a retired view id to its new home (e.g. after a role change).
@@ -2572,6 +2583,10 @@ export default function BobcatIndyCRM() {
                 )}
                 {settingsTab === 'import' && (
                   <ImportView config={configWithUsers} onImport={importLeads} leads={pipelineLeads}/>
+                )}
+                {settingsTab === 'health' && (
+                  <SystemHealthView config={configWithUsers} currentUserId={currentUser.id} showToast={showToast}
+                    onOpenNotifications={() => setSettingsTab('notifications')}/>
                 )}
               </>
             )}
@@ -7771,6 +7786,24 @@ function NotificationsConfigCard({ config, onSave }) {
           })}
       </div>
 
+      {/* ---- System alerts (systemHealthCheck) ---- */}
+      <div className="px-5 py-4 border-t border-stone-100">
+        <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">System Alerts</div>
+        <div className="text-xs text-stone-500 mb-3">
+          Email these people when the hourly health check finds something broken &mdash; a function the app can&rsquo;t reach,
+          email that can&rsquo;t send, a routing slot pointing at someone who left &mdash; and again when it&rsquo;s fixed.
+          Details are in Settings &rarr; System Health.
+          {listOf('systemAlertEmails').length === 0 && (
+            <span className="block mt-1 text-amber-700">No recipients yet &mdash; problems only show in System Health.</span>
+          )}
+        </div>
+        <EmailRecipientList
+          recipients={listOf('systemAlertEmails')}
+          onChange={(list) => persistNotifications({ systemAlertEmails: list })}
+          emptyHint="No recipients yet — add whoever looks after the LMT."
+        />
+      </div>
+
       {/* ---- Sales requests ---- */}
       <div className="px-5 py-4 border-t border-stone-100">
         <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">Sales Submittals</div>
@@ -10203,6 +10236,161 @@ function GlobalSearch({ scope, users = [], stepLabelOf, onOpenLead, onOpenRecord
           <button type="button" onClick={() => { setMobileOpen(false); setOpen(false); setQ(''); }} className="md:hidden ml-2 text-sm text-stone-600 shrink-0">Cancel</button>
         )}
         {panel}
+      </div>
+    </div>
+  );
+}
+
+/* ===================== SYSTEM HEALTH (self-repair loop) ===================== */
+// Settings → System Health. What the hourly systemHealthCheck found, the
+// incidents it is tracking and the GitHub issues it filed. See CLAUDE.md →
+// "Self-repair loop".
+const HEALTH_TONE = {
+  ok:      { label: 'All checks pass',     cls: 'bg-emerald-50 border-emerald-200 text-emerald-800', Icon: CheckCircle2 },
+  warning: { label: 'Needs attention',     cls: 'bg-amber-50 border-amber-200 text-amber-800',       Icon: AlertTriangle },
+  error:   { label: 'Something is broken', cls: 'bg-rose-50 border-rose-200 text-rose-800',          Icon: AlertCircle }
+};
+const INCIDENT_WHERE = { client: 'App', server: 'Server', health: 'Health check' };
+
+function HealthFix({ text }) {
+  // FIX_FOR text is markdown-ish: prose plus ``` fenced commands.
+  const parts = String(text || '').split(/```(?:\w+)?\n?/);
+  return (
+    <div className="mt-1.5 space-y-1.5">
+      {parts.map((p, i) => p.trim() && (i % 2
+        ? <pre key={i} className="text-[11px] bg-stone-900 text-stone-100 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">{p.trim()}</pre>
+        : <div key={i} className="text-xs text-stone-600 whitespace-pre-wrap">{p.trim().replace(/`/g, '')}</div>))}
+    </div>
+  );
+}
+
+function SystemHealthView({ config, currentUserId, onOpenNotifications, showToast }) {
+  const [health, setHealth] = useState(undefined);
+  const [incidents, setIncidents] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => subscribeToHealth(setHealth), []);
+  useEffect(() => subscribeToIncidents(setIncidents), []);
+
+  const runNow = async () => {
+    setRunning(true);
+    try {
+      const r = await runHealthCheckNowViaFunction();
+      showToast(r.failing ? `Health check done — ${r.failing} problem${r.failing === 1 ? '' : 's'}` : 'Health check done — all clear', r.failing ? 'error' : 'success');
+    } catch (e) {
+      showToast(`Couldn't run the health check: ${e && e.message ? e.message : 'unknown error'}`, 'error');
+    } finally { setRunning(false); }
+  };
+  const mute = async (inc, muted) => {
+    try { await setIncidentMuted(inc.id, muted, currentUserId); }
+    catch { showToast('Could not update that incident', 'error'); }
+  };
+
+  const recipients = (config.notifications?.systemAlertEmails || []).filter(e => String(e).includes('@'));
+  const checks = (health && health.checks) || [];
+  const failing = checks.filter(c => !c.ok);
+  const groups = [...new Set(checks.map(c => c.group))];
+  const tone = HEALTH_TONE[(health && health.status) || 'ok'];
+  const visibleIncidents = incidents.filter(i => showAll || i.status === 'open');
+
+  return (
+    <div className="max-w-4xl space-y-4">
+      <div className="bg-white border border-stone-200 rounded-lg p-5">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">System Health</div>
+            <div className="text-xs text-stone-500 mt-0.5 max-w-xl">
+              Every hour the LMT checks its own functions, email setup and settings, and collects errors from the app and server.
+              Code errors are sent to the repair agent as GitHub issues (at most 3 a day); setup problems are filed for a person to fix.
+            </div>
+          </div>
+          <button type="button" onClick={runNow} disabled={running}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-md bg-brand-600 text-white text-sm font-semibold hover:bg-brand-700 disabled:opacity-60">
+            <RefreshCw size={14} className={running ? 'animate-spin' : ''}/> {running ? 'Checking…' : 'Run health check now'}
+          </button>
+        </div>
+        {health === undefined ? (
+          <div className="text-sm text-stone-500 mt-4">Loading…</div>
+        ) : !health ? (
+          <div className="mt-4 text-sm text-stone-600 bg-stone-50 border border-stone-200 rounded-md p-3">
+            No health check has run yet. It runs every hour once the functions are deployed — or press <span className="font-semibold">Run health check now</span>.
+          </div>
+        ) : (
+          <div className={`mt-4 border rounded-md px-3 py-2.5 flex items-center gap-2 text-sm ${tone.cls}`}>
+            <tone.Icon size={16}/>
+            <span className="font-semibold">{tone.label}</span>
+            <span className="opacity-80">· {failing.length ? `${failing.length} failing` : `${checks.length} checks`} · last checked {fmtDateTime(health.checkedAt)}{String(health.trigger || '').startsWith('manual') ? ' (run by hand)' : ''}</span>
+          </div>
+        )}
+        {!recipients.length && (
+          <div className="mt-3 text-xs text-amber-700">
+            No one gets health alert emails yet. <button type="button" onClick={onOpenNotifications} className="underline font-semibold">Add recipients in Notifications</button>.
+          </div>
+        )}
+      </div>
+
+      {health && groups.map(g => (
+        <div key={g} className="bg-white border border-stone-200 rounded-lg">
+          <div className="px-5 py-2.5 border-b border-stone-100 text-xs uppercase tracking-widest font-semibold text-stone-500">{g}</div>
+          <ul className="divide-y divide-stone-100">
+            {checks.filter(c => c.group === g).map(c => (
+              <li key={c.id} className="px-5 py-2.5 flex items-start gap-2.5">
+                {c.ok
+                  ? <CheckCircle2 size={16} className="text-emerald-600 mt-0.5 shrink-0" aria-label="Passing"/>
+                  : c.severity === 'error'
+                    ? <AlertCircle size={16} className="text-rose-600 mt-0.5 shrink-0" aria-label="Failing"/>
+                    : <AlertTriangle size={16} className="text-amber-600 mt-0.5 shrink-0" aria-label="Warning"/>}
+                <div className="min-w-0 flex-1">
+                  <div className={`text-sm ${c.ok ? 'text-stone-700' : 'text-stone-900 font-medium'}`}>{c.label}</div>
+                  {(c.detail && (!c.ok || c.skipped)) && <div className="text-xs text-stone-500 mt-0.5">{c.detail}</div>}
+                  {!c.ok && c.fix && <HealthFix text={c.fix}/>}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+
+      <div className="bg-white border border-stone-200 rounded-lg">
+        <div className="px-5 py-2.5 border-b border-stone-100 flex items-center justify-between gap-3">
+          <div className="text-xs uppercase tracking-widest font-semibold text-stone-500">Errors &amp; incidents</div>
+          <label className="flex items-center gap-1.5 text-xs text-stone-600 cursor-pointer select-none">
+            <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} className="accent-brand-500"/> Show resolved and muted
+          </label>
+        </div>
+        {visibleIncidents.length === 0 ? (
+          <div className="px-5 py-6 text-sm text-stone-500">{incidents.length ? 'Nothing open.' : 'No errors recorded.'}</div>
+        ) : (
+          <ul className="divide-y divide-stone-100">
+            {visibleIncidents.map(inc => (
+              <li key={inc.id} className="px-5 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-xs text-stone-500">
+                      <span className="font-semibold text-stone-700">{INCIDENT_WHERE[inc.source] || inc.source}</span>
+                      {inc.tag ? ` · ${inc.tag}` : ''} · {inc.count || 1}× · last {fmtDateTime(inc.lastSeen)}
+                      {inc.status !== 'open' && <span className="ml-1.5 px-1.5 py-0.5 rounded bg-stone-100 text-stone-600 font-semibold">{inc.status === 'muted' ? 'Muted' : 'Resolved'}</span>}
+                    </div>
+                    <div className="text-sm text-stone-900 mt-0.5 break-words">{String(inc.message || inc.title || '').slice(0, 240)}</div>
+                    <div className="text-xs mt-1">
+                      {inc.issueUrl
+                        ? <a href={inc.issueUrl} target="_blank" rel="noreferrer" className="text-brand-700 hover:underline font-semibold">
+                            Issue #{inc.issueNumber}{inc.sentToAgent ? ' · sent to the repair agent' : inc.kind === 'config' ? ' · for a person to fix' : ''}
+                          </a>
+                        : <span className="text-stone-500">{inc.kind === 'config' ? 'Issue filed on the next hourly run' : (inc.count || 1) < 2 ? 'Waiting to see if it happens again' : 'Issue filed on the next hourly run'}</span>}
+                    </div>
+                  </div>
+                  {inc.status !== 'resolved' && (
+                    <button type="button" onClick={() => mute(inc, inc.status !== 'muted')}
+                      className="text-xs text-stone-600 hover:text-stone-900 border border-stone-200 rounded px-2 py-1 shrink-0">
+                      {inc.status === 'muted' ? 'Unmute' : 'Mute'}
+                    </button>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );

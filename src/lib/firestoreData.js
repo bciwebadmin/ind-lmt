@@ -5,7 +5,7 @@
 
 import {
   collection, doc, addDoc, updateDoc, deleteDoc, setDoc,
-  onSnapshot, query, orderBy, writeBatch, getDocs, arrayUnion, arrayRemove
+  onSnapshot, query, orderBy, limit, writeBatch, getDocs, arrayUnion, arrayRemove
 } from 'firebase/firestore';
 import { db } from '../firebase';
 
@@ -167,4 +167,30 @@ export async function addAttachmentRecords(collectionName, id, records) {
 
 export async function removeAttachmentRecord(collectionName, id, record) {
   await updateDoc(doc(db, collectionName, id), { attachments: arrayRemove(record) });
+}
+
+/* ===================== SELF-REPAIR / SYSTEM HEALTH ===================== */
+// Crash reports from the browser. Create-only (firestore.rules); the
+// onErrorReportCreate function folds each one into incidents/{fingerprint}.
+export async function addErrorReportDoc(report) {
+  await addDoc(collection(db, 'errorReports'), report);
+}
+
+// Admin only. health/latest is written by the hourly systemHealthCheck.
+export function subscribeToHealth(callback) {
+  return onSnapshot(doc(db, 'health', 'latest'), (snap) => callback(snap.exists() ? snap.data() : null),
+    (err) => { console.warn('subscribeToHealth error:', err.code || err); callback(null); });
+}
+
+export function subscribeToIncidents(callback) {
+  const q = query(collection(db, 'incidents'), orderBy('lastSeen', 'desc'), limit(50));
+  return onSnapshot(q, (snap) => callback(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+    (err) => { console.warn('subscribeToIncidents error:', err.code || err); callback([]); });
+}
+
+// Admins may only mute / unmute (firestore.rules).
+export async function setIncidentMuted(id, muted, userId) {
+  await updateDoc(doc(db, 'incidents', id), muted
+    ? { status: 'muted', mutedBy: userId || '', mutedAt: new Date().toISOString() }
+    : { status: 'open', mutedBy: '', mutedAt: '' });
 }

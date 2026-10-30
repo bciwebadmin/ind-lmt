@@ -578,6 +578,83 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('email: Indianapolis date', M.indyToday(Date.parse('2026-10-30T02:00:00Z')) === '2026-10-29');
 }
 
+/* ---------- self-repair loop (functions/selfRepairRules.js) ---------- */
+{
+  const { createRequire } = await import('node:module');
+  const S = createRequire(import.meta.url)('../functions/selfRepairRules.js');
+  const fnSrc = readFileSync(join(root, 'functions/index.js'), 'utf8');
+
+  // Triage
+  check('repair: offline blips are noise', S.isNoise('TypeError: Failed to fetch') && S.isNoise('FirebaseError: client is offline'));
+  check('repair: extension errors are noise', S.isNoise('x is undefined', 'at foo (chrome-extension://abc/content.js:1:1)'));
+  check('repair: real errors are not noise', !S.isNoise("Cannot read properties of undefined (reading 'status')", 'at LeadsView (App.jsx:10:2)'));
+  check('repair: ids, numbers and quotes normalised', S.normalizeMessage('Lead "abc" 123 not found for bob@x.com at https://a.b/c') === 'Lead <str> <n> not found for <email> at <url>', S.normalizeMessage('Lead "abc" 123 not found for bob@x.com at https://a.b/c'));
+  const a = S.fingerprint({ source: 'server', tag: 'intake', message: 'Lead q9w8e7r6t5y4u3i2 failed (3 tries)', stack: 'Error\n    at resolveLeadRouting (/workspace/index.js:612:11)' });
+  const b = S.fingerprint({ source: 'server', tag: 'intake', message: 'Lead zz9988776655443322 failed (5 tries)', stack: 'Error\n    at resolveLeadRouting (/workspace/index.js:640:3)' });
+  const c = S.fingerprint({ source: 'server', tag: 'reminders', message: 'Lead q9w8e7r6t5y4u3i2 failed (3 tries)', stack: '' });
+  check('repair: same bug, same fingerprint', a === b, `${a} ${b}`);
+  check('repair: different tag, different fingerprint', a !== c);
+  check('repair: client fingerprint survives a redeploy',
+    S.fingerprint({ source: 'client', message: 'x is undefined', stack: 'at Xe (https://h/assets/index-B1x9Qa7c.js:41:2318)' }) ===
+    S.fingerprint({ source: 'client', message: 'x is undefined', stack: 'at Qr (https://h/assets/index-Zz88Kq1d.js:44:10)' }));
+  check('repair: tag from "[tag]" prefix', S.tagOf('[intake] Routing lookup failed') === 'intake' && S.tagOf('plain') === '');
+  check('repair: fingerprint is a safe doc id', /^[a-z]+-[a-z0-9]+$/.test(a), a);
+
+  // Hand-off decisions
+  const today = '2026-10-29';
+  check('repair: one-off error waits', S.issueDecision({ kind: 'code', count: 1 }, {}, today).file === false);
+  check('repair: repeat error goes to the agent', JSON.stringify(S.issueDecision({ kind: 'code', count: 2 }, {}, today)) === JSON.stringify({ file: true, ai: true, reason: 'code-error' }));
+  check('repair: daily cap files without the agent', JSON.stringify(S.issueDecision({ kind: 'code', count: 5 }, { day: today, aiIssuesFiled: 3 }, today)) === JSON.stringify({ file: true, ai: false, reason: 'daily-ai-cap' }));
+  check('repair: cap resets the next day', S.issueDecision({ kind: 'code', count: 5 }, { day: '2026-10-28', aiIssuesFiled: 3 }, today).ai === true);
+  check('repair: config problems never go to the agent', JSON.stringify(S.issueDecision({ kind: 'config', count: 1 }, {}, today)) === JSON.stringify({ file: true, ai: false, reason: 'config-needs-human' }));
+  check('repair: not filed twice', S.issueDecision({ kind: 'code', count: 9, issueNumber: 4, status: 'open' }, {}, today).file === false);
+  const now = Date.parse('2026-10-29T12:00:00Z');
+  check('repair: quiet a week resolves', S.shouldResolve({ status: 'open', lastSeen: '2026-10-21T12:00:00Z' }, now) && !S.shouldResolve({ status: 'open', lastSeen: '2026-10-25T12:00:00Z' }, now));
+  const act = (inc, opts) => S.incidentAction(inc, {}, today, now, opts).action;
+  check('repair: muted incidents are left alone', act({ status: 'muted', kind: 'code', count: 9 }) === 'mute');
+  check('repair: recurrence reopens the issue', act({ status: 'open', kind: 'code', count: 9, issueNumber: 7, reopened: true, lastSeen: '2026-10-29T11:00:00Z' }) === 'reopen');
+  check('repair: health incident resolves when the check stops failing',
+    act({ status: 'open', source: 'health', checkId: 'fn-intake', kind: 'config', issueNumber: 3 }, { failingHealthIds: [] }) === 'resolve' &&
+    act({ status: 'open', source: 'health', checkId: 'fn-intake', kind: 'config', issueNumber: 3 }, { failingHealthIds: ['fn-intake'] }) === 'none');
+  check('repair: new health problem is filed', act({ status: 'open', source: 'health', checkId: 'x', kind: 'config', count: 1 }, { failingHealthIds: ['x'] }) === 'file');
+
+  // Probes — the Oct 2026 welcome-email outage looked like this.
+  const googleHtml = '<html><head><title>401 Unauthorized</title></head><body>Your client does not have permission</body></html>';
+  check('repair: running callable = ok', S.callableProbeResult(401, 'application/json', '{"error":{"message":"Sign in first.","status":"UNAUTHENTICATED"}}').ok);
+  check('repair: missing invoker permission detected', S.callableProbeResult(403, 'text/html', googleHtml).problem === 'not-invokable' && S.callableProbeResult(401, 'text/html', googleHtml).problem === 'not-invokable');
+  check('repair: undeployed callable detected', S.callableProbeResult(404, 'text/html', 'Not Found').problem === 'not-deployed');
+  check('repair: intake answering 401 JSON = ok', S.httpProbeResult(401, 'application/json; charset=utf-8', '{"ok":false,"error":"Unauthorized"}').ok);
+  check('repair: intake blocked by Google detected', S.httpProbeResult(403, 'text/html', googleHtml).problem === 'not-invokable');
+  check('repair: invoker fix names the service in lower case', S.FIX_FOR['not-invokable']('sendWelcomeEmail', 'us-south1').includes('gcloud run services add-iam-policy-binding sendwelcomeemail --region=us-south1'));
+  const exported = [...fnSrc.matchAll(/^exports\.(\w+) = (onRequest|onCall)\(/gm)].map(m => m[1]).sort();
+  const probed = S.PROBES.map(p => p.name).sort();
+  check('repair: every HTTP function is probed', JSON.stringify(exported) === JSON.stringify(probed), `exported ${exported} vs probed ${probed}`);
+  for (const p of S.PROBES) {
+    const m = fnSrc.match(new RegExp(`exports\\.${p.name} = on\\w+\\(\\s*\\{[^]*?region: '([\\w-]+)'`));
+    check(`repair: probe region for ${p.name}`, m && m[1] === p.region, m ? m[1] : 'no region');
+  }
+  check('repair: status is the worst failing check', S.healthStatus([{ ok: true }]) === 'ok' && S.healthStatus([{ ok: false, severity: 'warning' }]) === 'warning' && S.healthStatus([{ ok: false, severity: 'warning' }, { ok: false, severity: 'error' }]) === 'error');
+  check('repair: alert only when the failing set changes', S.alertKey([{ id: 'b', ok: false }, { id: 'a', ok: false }, { id: 'c', ok: true }]) === 'a,b');
+
+  // Config checks
+  const users = [{ id: 'u_1' }, { id: 'drew', name: 'Drew' }, { id: 'todd', name: 'Todd', onLeaveOfAbsence: true }];
+  const good = { notifications: { newLeadEmails: ['a@b.com'], salesRequestEmails: ['c@d.com'] }, leadRouting: { 'Indy::Sales': { primaryUserId: 'drew' } }, branchManagers: { Indy: 'drew' } };
+  check('repair: complete config passes', S.configChecks(good, users).length === 0, JSON.stringify(S.configChecks(good, users)));
+  check('repair: unsaved settings caught', S.configChecks({}, users)[0].id === 'config-missing');
+  const bad = { notifications: {}, leadRouting: { 'Indy::Sales': { primaryUserId: 'gone', zipSplits: [{ userId: 'todd', zips: '462' }] } }, branchManagers: { Columbus: 'nobody' } };
+  const ids = S.configChecks(bad, [{ id: 'drew' }, users[2]]).map(x => x.id);
+  check('repair: config problems found', ['u1-missing', 'no-new-lead-recipients', 'no-submittal-recipients', 'routing-missing-Indy::Sales-Local Primary', 'routing-leave-Indy::Sales-ZIP split rep', 'manager-missing-Columbus'].every(i => ids.includes(i)), ids.join(' '));
+  check('repair: switched-off new lead alerts need no list', !S.configChecks({ ...good, notifications: { newLeadAlertsEnabled: false, salesRequestEmails: ['c@d.com'] } }, users).length);
+
+  // Issue text
+  const inc = { id: 'client-abc', source: 'client', kind: 'code', message: "Cannot read properties of undefined (reading 'status')", stack: 'at Xe (index.js:1:2)', count: 3, firstSeen: 'f', lastSeen: 'l', build: 'abc123', view: 'stage-incoming' };
+  check('repair: title says where', S.issueTitle(inc).startsWith('[auto] App: Cannot read'));
+  const body = S.issueBody(inc, { ai: true });
+  check('repair: agent body carries the guard rails', body.includes('Never edit `.github/`') && body.includes('Fixes #') && body.includes('`abc123`') && body.includes('scripts/map-stack.mjs'));
+  check('repair: capped body explains how to start the agent', S.issueBody(inc, { ai: false }).includes('Add the `auto-repair` label'));
+  check('repair: config body is not for the agent', S.issueBody({ ...inc, kind: 'config', source: 'health' }, { ai: false }).includes('not sent to the repair agent'));
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

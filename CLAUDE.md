@@ -244,6 +244,57 @@ index.js checks the users are real and not on leave.
 - Alert emails show the rep-set temperature (when set) instead of a heat score.
 - Text alerts for sales leads are planned (Twilio) — not built yet.
 
+## Self-repair loop (Oct 2026)
+
+The LMT watches itself and hands code bugs to an AI repair agent. A person
+always reviews and merges; nothing the agent writes deploys on its own.
+Pure rules (tested) in `functions/selfRepairRules.js`; I/O in index.js.
+
+1. **Detect.**
+   - Browser: `src/lib/errorReporter.js` + the `ErrorBoundary` in `main.jsx`
+     write `errorReports/` (create-only, own uid, bounded fields — see
+     firestore.rules). `onErrorReportCreate` folds each into
+     `incidents/{fingerprint}` and deletes it. Reports carry the build id
+     (`__BUILD__` = the commit, from vite.config.js) and the screen.
+   - Server: index.js wraps `console.error` — every logged error becomes an
+     incident (deduped, ≤10 writes/min/instance). **Log real failures with
+     `console.error('[tag] …', err)`**; the `[tag]` becomes the incident tag.
+     Use `console.warn` for things that are not bugs. `[self-repair]` errors
+     are never recorded (no feedback loop).
+   - `systemHealthCheck` (hourly at :17, us-central1; `runHealthCheckNow` is
+     the admin button): probes every HTTP function unauthenticated (an HTML
+     401/403 = the Cloud Run invoker permission is missing — the Oct 2026
+     welcome-email outage), checks the Resend domain, and runs
+     `configChecks` (unsaved settings, missing `u_1`, empty alert lists,
+     routing slots pointing at deleted / on-leave users). Writes
+     `health/latest`; emails `notifications.systemAlertEmails` only when the
+     set of failing checks changes.
+2. **Triage.** `fingerprint()` normalises ids, numbers and build hashes so one
+   bug is one incident; `IGNORE_PATTERNS` drops offline blips, extensions and
+   stale-chunk errors.
+3. **Hand off** (in the hourly run). Code errors seen ≥2 times get a GitHub
+   issue labelled **`auto-repair`**, which starts `.github/workflows/auto-repair.yml`
+   (claude-code-action) — at most 3 a day (`selfRepair/state`); beyond that
+   they're labelled `auto-error` for a person to send on. Health/config
+   problems get **`needs-human`** with the exact fix. Issues are filed with the
+   `GITHUB_ISSUES_TOKEN` secret (a person's fine-grained PAT — the action
+   ignores bot-made issues). Token "none" = record only.
+4. **Verify.** No recurrence for 7 days closes the issue; a recurrence reopens
+   it. Health issues close as soon as the check stops failing. Admins can mute
+   an incident in Settings → System Health.
+
+Rules for the repair agent (also in the issue body and the workflow prompt):
+smallest fix with a failing-then-passing check in `scripts/test-helpers.mjs`;
+build, invariants, tests and `node --check functions/index.js` must pass;
+**never edit `.github/`, `firestore.rules`, `storage.rules`, `firebase.json`,
+`.firebaserc` or `functions/.env*`** (`auto-repair-check.yml` fails the PR if
+a `claude/` branch does); config/permission/data causes get a written fix,
+not code. Browser stacks are minified — `scripts/map-stack.mjs` maps them to
+`src/` lines (usage at the top of the file).
+
+Keep `PROBES` in step with the `onCall`/`onRequest` exports — a test fails if
+one is added without a probe or with the wrong region.
+
 ## Navigation
 
 Sidebar (`Sidebar`): **+ New** menu (`NEW_MENU`: lead, sales request, trade-in,

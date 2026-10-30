@@ -1,0 +1,50 @@
+# .github/workflows/auto-repair-check.yml
+#
+# Self-repair loop, step 4: checks every pull request before a person merges it.
+#   - Repair-agent branches (claude/…) may not touch protected files.
+#   - Every pull request must build and pass the checks deploy.yml runs.
+# Turn on branch protection for main with this check required
+# (SETUP.md → "Self-repair loop") so nothing unchecked reaches the live LMT.
+
+name: PR checks
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  protected-files:
+    if: startsWith(github.head_ref, 'claude/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Repair agent left protected files alone
+        run: |
+          changed=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          echo "$changed"
+          bad=$(echo "$changed" | grep -E '^(\.github/|firestore\.rules$|storage\.rules$|firebase\.json$|\.firebaserc$|functions/\.env)' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::The repair agent changed protected files — a person must make these changes:"
+            echo "$bad"
+            exit 1
+          fi
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm ci --prefix functions
+      - run: npm run build
+      - run: node --check functions/index.js
+      - run: node scripts/verify-invariants.mjs
+      - run: node scripts/test-helpers.mjs

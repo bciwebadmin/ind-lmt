@@ -104,6 +104,48 @@ gcloud projects add-iam-policy-binding ind-lmt --member="serviceAccount:github-d
 ```
 
 Without the role, the GitHub deploy of functions fails on that one function.
+The hourly `systemHealthCheck` (self-repair loop, below) needs the same.
+
+## 4c. Self-repair loop
+
+The LMT checks itself every hour and files GitHub issues; code bugs go to an
+AI repair agent that proposes a fix for a person to review. How it works:
+CLAUDE.md → "Self-repair loop". Set-up, once, in this order:
+
+1. **GitHub token for filing issues.** On a person's GitHub account (not a
+   bot — the agent ignores bot-made issues): Settings → Developer settings →
+   Fine-grained tokens → Generate. Repository access: only
+   `bciwebadmin/ind-lmt`. Permissions: **Issues: Read and write**. Then:
+
+   ```powershell
+   firebase functions:secrets:set GITHUB_ISSUES_TOKEN
+   ```
+
+   Paste the token. **Do this before pushing** — the deploy fails while the
+   secret doesn't exist. Not ready for GitHub yet? Enter `none`: the health
+   checks and System Health tab still work, nothing is filed. Fine-grained
+   tokens expire; System Health shows a failing check if filing stops.
+2. **Labels.** In the repo: Issues → Labels → New label: `auto-repair`,
+   `needs-human`, `auto-error`.
+3. **The repair agent.** Install the Claude GitHub App on the repo
+   (https://github.com/apps/claude), then repo Settings → Secrets and
+   variables → Actions → New repository secret `ANTHROPIC_API_KEY` (from
+   console.anthropic.com → API keys; set a monthly spend limit there).
+4. **Workflows.** Copy `auto-repair.yml` and `auto-repair-check.yml` into
+   `.github/workflows/`.
+5. **Rules.** The new collections need the updated rules:
+
+   ```powershell
+   firebase deploy --only firestore:rules
+   ```
+6. **Branch protection (recommended).** Repo Settings → Branches → add a rule
+   for `main`: require a pull request, and require the `build-and-test` check.
+7. **Alert recipients.** In the LMT: Settings → Notifications → System Alerts.
+8. **Check it.** Settings → System Health → Run health check now. Every line
+   should be green; anything red shows its fix.
+
+Cost: the agent only runs on a new issue (≤3 a day) or an `@claude` comment;
+each run is billed to the API key.
 
 ## 5. Bootstrap the first admin and `u_1`
 
@@ -217,8 +259,10 @@ What the endpoint does:
 - [ ] CSV import template is `ind-lmt-import-template.csv` (Settings → Import CSV)
 - [ ] Attach a file to a lead and open it again — proves Storage and its rules
 - [ ] Approve a test access request — temp password starts `IND-`
-- [ ] Node runtime: Node 20 is decommissioned 30 October 2026 — bump
-      `engines.node` and both workflows' `node-version:` before then
+- [ ] Settings → System Health: Run health check now — all green
+- [x] Node runtime: functions run on Node 22 (`engines.node`); set
+      `node-version: 22` in `deploy.yml` too (Node 20 is decommissioned
+      30 October 2026)
 
 ---
 
