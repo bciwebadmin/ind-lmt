@@ -55,7 +55,7 @@ async function recordIncident({ source, tag = '', message, stack = '', kind = 'c
     }
     const cur = snap.data();
     const patch = { count: (cur.count || 0) + 1, lastSeen: now, ...extra };
-    if (cur.status === 'resolved') { patch.status = 'open'; if (cur.issueNumber) patch.reopened = true; }
+    if (cur.status === 'resolved') { patch.status = 'open'; patch.alertedAt = ''; if (cur.issueNumber) patch.reopened = true; }
     tx.update(ref, patch);
   });
   return id;
@@ -96,10 +96,10 @@ const RESEND_API_KEY  = defineSecret('RESEND_API_KEY');
 //   firebase functions:secrets:set GITHUB_ISSUES_TOKEN
 // Set it to "none" to run the health checks without filing issues.
 const GITHUB_ISSUES_TOKEN = defineSecret('GITHUB_ISSUES_TOKEN');
-const GITHUB_REPO = defineString('GITHUB_REPO', {
-  default: 'bciwebadmin/ind-lmt',
-  description: 'owner/name of the GitHub repo the self-repair loop files issues in.'
-});
+// The repo issues are filed in. A plain constant on purpose: a defineString
+// param needs a value in functions/.env.ind-lmt, and the non-interactive CI
+// deploy fails without one even when a default is given.
+const GITHUB_REPO = 'bciwebadmin/ind-lmt';
 
 // Configurable sender + CRM URL. These can be overridden without redeploying:
 //   firebase functions:config:set ...      (legacy)
@@ -3072,7 +3072,7 @@ function githubToken() {
 }
 
 async function github(method, path, body) {
-  const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO.value()}${path}`, {
+  const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}${path}`, {
     method,
     headers: { Authorization: `Bearer ${githubToken()}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'ind-lmt-self-repair', 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined
@@ -3090,11 +3090,13 @@ async function processIncidents({ failingHealthIds, now }) {
   const canFile = !!githubToken();
   const snap = await db.collection('incidents').where('status', '==', 'open').get();
   const summary = { filed: 0, aiFiled: 0, resolved: 0, reopened: 0, skipped: canFile ? 0 : snap.size };
+  const alerts = []; // code errors for the "new errors" email (errorAlertKind)
   let aiToday = state.day === today ? (state.aiIssuesFiled || 0) : 0;
 
   for (const doc of snap.docs) {
     const inc = { id: doc.id, ...doc.data() };
     const { action, ai } = selfRepair.incidentAction(inc, { day: today, aiIssuesFiled: aiToday }, today, now, { failingHealthIds });
+    const alertKind = selfRepair.errorAlertKind(inc, action);
     try {
       if (action === 'resolve') {
         if (canFile && inc.issueNumber) {
@@ -3108,19 +3110,26 @@ async function processIncidents({ failingHealthIds, now }) {
         await github('POST', `/issues/${inc.issueNumber}/comments`, { body: `This came back (${inc.count} occurrences in total, last ${inc.lastSeen}). The earlier fix didn't hold.` });
         await doc.ref.update({ reopened: false });
         summary.reopened++;
+        if (alertKind) alerts.push({ ...inc, alertKind });
       } else if (action === 'file' && canFile) {
         const labels = ai ? ['auto-repair'] : (inc.kind === 'config' ? ['needs-human'] : ['auto-error']);
         const issue = await github('POST', '/issues', { title: selfRepair.issueTitle(inc), body: selfRepair.issueBody(inc, { ai }), labels });
         await doc.ref.update({ issueNumber: issue.number, issueUrl: issue.html_url, issueFiledAt: new Date(now).toISOString(), sentToAgent: !!ai });
         summary.filed++;
         if (ai) { aiToday++; summary.aiFiled++; }
+        Object.assign(inc, { issueNumber: issue.number, issueUrl: issue.html_url, sentToAgent: !!ai });
+      }
+      // Email about it even when GitHub filing is off or failed.
+      if (alertKind && action === 'file') {
+        await doc.ref.update({ alertedAt: new Date(now).toISOString() });
+        alerts.push({ ...inc, alertKind, sentToAgent: !!(canFile && ai) });
       }
     } catch (err) {
       originalConsoleError(`[self-repair] ${action} failed for ${inc.id}:`, err.message);
     }
   }
   await stateRef.set({ day: today, aiIssuesFiled: aiToday, lastRunAt: new Date(now).toISOString() }, { merge: true });
-  return summary;
+  return { ...summary, alerts };
 }
 
 async function runHealthCheck({ trigger }) {
@@ -3154,6 +3163,9 @@ async function runHealthCheck({ trigger }) {
   }
   const failingHealthIds = checks.filter(c => !c.ok && !c.skipped).map(c => c.id);
   const incidents = await processIncidents({ failingHealthIds, now });
+  const alerts = incidents.alerts || [];
+  delete incidents.alerts;
+  const to = ((config.notifications || {}).systemAlertEmails || []).filter(e => String(e).includes('@'));
 
   const status = selfRepair.healthStatus(checks);
   const key = selfRepair.alertKey(checks);
@@ -3161,8 +3173,27 @@ async function runHealthCheck({ trigger }) {
   const prev = (await latestRef.get()).data() || {};
   await latestRef.set({ checkedAt: new Date(now).toISOString(), trigger, status, alertKey: key, checks, incidents });
 
+  // New code errors: one digest per run to the same list (Settings toggle).
+  if (to.length && alerts.length && (config.notifications || {}).errorAlertsEnabled !== false) {
+    const crm = CRM_URL.value();
+    const where = (i) => i.source === 'client' ? 'In the app' : `On the server${i.tag ? ` (${i.tag})` : ''}`;
+    const next = (i) => i.issueUrl
+      ? `<a href="${i.issueUrl}">Issue #${i.issueNumber}</a> — ${i.sentToAgent ? 'the repair agent is working on a fix; you\'ll review it before it goes live.' : 'not sent to the repair agent (daily limit reached). Add the auto-repair label to send it.'}`
+      : 'No GitHub issue (issue filing isn\'t set up) — see System Health.';
+    const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#111">
+      <h2 style="margin:0 0 8px">${escapeHtml(selfRepair.errorAlertSubject(alerts).replace(/^LMT: /, ''))}</h2>
+      ${alerts.map(i => `<div style="border:1px solid #e7e5e4;border-radius:6px;padding:10px 12px;margin:0 0 10px">
+        <div style="font-size:12px;color:#57534e">${where(i)} · ${i.count || 1} times · ${i.alertKind === 'back' ? '<b style="color:#b91c1c">came back</b>' : 'new'}${i.view ? ` · screen ${escapeHtml(i.view)}` : ''}</div>
+        <div style="margin:4px 0;font-family:Consolas,monospace;font-size:13px">${escapeHtml(String(i.message || '').slice(0, 300))}</div>
+        <div style="font-size:13px">${next(i)}</div></div>`).join('')}
+      <p><a href="${crm}?view=settings&tab=health">Open System Health</a></p></div>`;
+    try {
+      const result = await new Resend(RESEND_API_KEY.value()).emails.send({ from: EMAIL_FROM.value(), to, subject: selfRepair.errorAlertSubject(alerts), html });
+      if (result.error) originalConsoleError('[self-repair] error alert email failed:', result.error);
+    } catch (err) { originalConsoleError('[self-repair] error alert email failed:', err.message); }
+  }
+
   // Email the Settings list only when the set of failing checks changes.
-  const to = ((config.notifications || {}).systemAlertEmails || []).filter(e => String(e).includes('@'));
   if (to.length && key !== (prev.alertKey || '') && !(status === 'ok' && !prev.alertKey)) {
     const failing = checks.filter(c => !c.ok);
     const crm = CRM_URL.value();

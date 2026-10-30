@@ -226,6 +226,28 @@ function incidentAction(incident, state, today, now = Date.now(), { failingHealt
   return d.file ? { action: 'file', ai: d.ai, reason: d.reason } : { action: 'none', reason: d.reason };
 }
 
+/**
+ * Should this incident go in the "new errors" alert email this run?
+ * Code errors only (health/config problems have their own alert), once each:
+ * when it first qualifies for an issue, and again if it comes back after
+ * being resolved (recordIncident clears alertedAt then).
+ * Returns '' | 'new' | 'back'.
+ */
+function errorAlertKind(incident, action) {
+  if (!incident || incident.source === 'health') return '';
+  if (action === 'reopen') return 'back';
+  if (action !== 'file' || incident.alertedAt) return '';
+  return incident.resolvedAt ? 'back' : 'new';
+}
+
+function errorAlertSubject(items) {
+  const n = items.length;
+  const back = items.filter(i => i.alertKind === 'back').length;
+  if (!n) return '';
+  if (back === n) return `LMT: ${n === 1 ? 'an error came back' : `${n} errors came back`}`;
+  return `LMT: ${n} new error${n === 1 ? '' : 's'} found${back ? ` (${back} came back)` : ''}`;
+}
+
 function issueTitle(incident) {
   const where = incident.source === 'client' ? 'App' : incident.source === 'health' ? 'Health check' : `Server${incident.tag ? ` [${incident.tag}]` : ''}`;
   return `[auto] ${where}: ${String(incident.message || incident.title || 'error').slice(0, 90)}`;
@@ -266,5 +288,6 @@ module.exports = {
   RESOLVE_AFTER_DAYS, MAX_AI_ISSUES_PER_DAY, MIN_OCCURRENCES_FOR_ISSUE,
   isNoise, normalizeMessage, topFrame, fingerprint, tagOf, issueDecision, shouldResolve,
   callableProbeResult, httpProbeResult, PROBES, probeUrl, healthStatus, alertKey, incidentAction,
+  errorAlertKind, errorAlertSubject,
   FIX_FOR, configChecks, issueTitle, issueBody
 };

@@ -282,6 +282,10 @@ Pure rules (tested) in `functions/selfRepairRules.js`; I/O in index.js.
 4. **Verify.** No recurrence for 7 days closes the issue; a recurrence reopens
    it. Health issues close as soon as the check stops failing. Admins can mute
    an incident in Settings → System Health.
+5. **Tell people.** The same `systemAlertEmails` list gets one "new errors"
+   digest per hourly run for code errors that just qualified for an issue or
+   came back (`errorAlertKind`, `alertedAt` stamps each once; cleared when a
+   resolved incident recurs). Toggle: `notifications.errorAlertsEnabled`.
 
 Rules for the repair agent (also in the issue body and the workflow prompt):
 smallest fix with a failing-then-passing check in `scripts/test-helpers.mjs`;

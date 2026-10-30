@@ -7802,6 +7802,17 @@ function NotificationsConfigCard({ config, onSave }) {
           onChange={(list) => persistNotifications({ systemAlertEmails: list })}
           emptyHint="No recipients yet — add whoever looks after the LMT."
         />
+        <label className="flex items-start gap-3 pt-3 cursor-pointer select-none">
+          <input type="checkbox" checked={config.notifications?.errorAlertsEnabled !== false}
+            onChange={(e) => persistNotifications({ errorAlertsEnabled: e.target.checked })} className="accent-brand-500 mt-0.5"/>
+          <span>
+            <span className="text-sm font-medium text-stone-800">Email about new errors</span>
+            <span className="block text-xs text-stone-500">
+              When an error in the app or server happens more than once (or comes back after being fixed), with the GitHub issue
+              and whether the repair agent is on it. At most one email an hour; each error is emailed once.
+            </span>
+          </span>
+        </label>
       </div>
 
       {/* ---- Sales requests ---- */}

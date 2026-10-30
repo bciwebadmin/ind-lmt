@@ -646,6 +646,13 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('repair: config problems found', ['u1-missing', 'no-new-lead-recipients', 'no-submittal-recipients', 'routing-missing-Indy::Sales-Local Primary', 'routing-leave-Indy::Sales-ZIP split rep', 'manager-missing-Columbus'].every(i => ids.includes(i)), ids.join(' '));
   check('repair: switched-off new lead alerts need no list', !S.configChecks({ ...good, notifications: { newLeadAlertsEnabled: false, salesRequestEmails: ['c@d.com'] } }, users).length);
 
+  // New-error alert emails
+  check('repair: alert once when an error first gets an issue', S.errorAlertKind({ source: 'server', kind: 'code', count: 2 }, 'file') === 'new' && S.errorAlertKind({ source: 'server', count: 2, alertedAt: 'x' }, 'file') === '');
+  check('repair: alert when an error comes back', S.errorAlertKind({ source: 'client', issueNumber: 4, reopened: true }, 'reopen') === 'back' && S.errorAlertKind({ source: 'client', resolvedAt: 'x', count: 3 }, 'file') === 'back');
+  check('repair: health problems use their own alert', S.errorAlertKind({ source: 'health', kind: 'config' }, 'file') === '');
+  check('repair: no alert for waiting or resolving', S.errorAlertKind({ source: 'server', count: 1 }, 'none') === '' && S.errorAlertKind({ source: 'server' }, 'resolve') === '');
+  check('repair: alert subjects', S.errorAlertSubject([{ alertKind: 'new' }]) === 'LMT: 1 new error found' && S.errorAlertSubject([{ alertKind: 'new' }, { alertKind: 'back' }]) === 'LMT: 2 new errors found (1 came back)' && S.errorAlertSubject([{ alertKind: 'back' }]) === 'LMT: an error came back');
+
   // Issue text
   const inc = { id: 'client-abc', source: 'client', kind: 'code', message: "Cannot read properties of undefined (reading 'status')", stack: 'at Xe (index.js:1:2)', count: 3, firstSeen: 'f', lastSeen: 'l', build: 'abc123', view: 'stage-incoming' };
   check('repair: title says where', S.issueTitle(inc).startsWith('[auto] App: Cannot read'));
