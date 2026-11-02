@@ -121,8 +121,15 @@ CLAUDE.md → "Self-repair loop". Set-up, once, in this order:
    firebase functions:secrets:set GITHUB_ISSUES_TOKEN
    ```
 
-   Paste the token. **Do this before pushing** — the deploy fails while the
-   secret doesn't exist. Not ready for GitHub yet? Enter `none`: the health
+   Paste the token, then let the functions read it (the GitHub deploy account
+   isn't allowed to grant this itself — true for any new secret):
+
+   ```powershell
+   gcloud secrets add-iam-policy-binding GITHUB_ISSUES_TOKEN --project=ind-lmt --member="serviceAccount:9450023146-compute@developer.gserviceaccount.com" --role=roles/secretmanager.secretAccessor
+   ```
+
+   **Do both before pushing** — otherwise the deploy fails with
+   `secretmanager.secrets.setIamPolicy denied`. Not ready for GitHub yet? Enter `none`: the health
    checks and System Health tab still work, nothing is filed. Fine-grained
    tokens expire; System Health shows a failing check if filing stops.
 2. **Labels.** In the repo: Issues → Labels → New label: `auto-repair`,

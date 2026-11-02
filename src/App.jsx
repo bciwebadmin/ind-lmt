@@ -2398,6 +2398,7 @@ export default function BobcatIndyCRM() {
             onChipFilter={applyChipFilter}
             leadOpen={!!selectedLead}
             addPreset={addPreset}
+            onAdd={handleNew}
             search={
               <GlobalSearch
                 scope={searchScope}
@@ -2953,6 +2954,15 @@ const NEW_MENU = [
   { kind: 'finance',     label: 'Finance Deal',    hint: 'For the finance team’s tracker',     icon: Briefcase }
 ];
 
+// The tabs that get their own "Add …" button in the top bar, so a rep on New,
+// Prospect or Wanted doesn't have to go back to + New (Erin, Nov 2026). Each
+// maps to a + New kind; the label comes from NEW_MENU.
+const STAGE_ADD_KIND = {
+  [STAGE_INCOMING]: 'lead',
+  [STAGE_PROSPECT]: 'prospect',
+  [STAGE_WANTED]:   'want'
+};
+
 function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userRole, pendingCount, mobileOpen, onMobileClose, onNew, todoCount = 0 }) {
   const [newOpen, setNewOpen] = useState(false);
   // Groups, in order. Access is still decided centrally by canAccessView, and a
@@ -3100,9 +3110,13 @@ function welcomeEmailReason(err) {
 }
 
 /* ===================== TOP BAR ===================== */
-function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter, search = null, leadOpen = false, addPreset = null }) {
+function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, onMobileMenuOpen, onChipFilter, search = null, leadOpen = false, addPreset = null, onAdd = null }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const stage = stageForView(view);
+  // "Add Lead / Prospect / Want" on those three tabs; hidden while a lead page is open.
+  const addItem = stage && onAdd && !leadOpen
+    ? NEW_MENU.find(m => m.kind === STAGE_ADD_KIND[stage.id]) || null
+    : null;
   const titles = {
     [HOME_VIEW]: 'Dashboard',
     todo: 'To Do',
@@ -3174,6 +3188,16 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
         </div>
 
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
+          {addItem && (
+            <button
+              onClick={() => onAdd(addItem.kind)}
+              title={`Add ${addItem.label}`}
+              aria-label={`Add ${addItem.label}`}
+              className="flex items-center gap-1.5 px-2.5 md:px-3 py-2 md:py-1.5 rounded-md bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold">
+              <Plus size={16}/>
+              <span className="hidden sm:inline">Add {addItem.label}</span>
+            </button>
+          )}
           {search}
           {/* User menu — compact on mobile (avatar only), expanded on desktop */}
           <div className="relative">
