@@ -222,3 +222,35 @@ export async function seedTelematicsCodes(docs, existingIds = []) {
   }
   return todo.length;
 }
+
+// telematicsCases/{id} — cases on Carter's board.
+export function subscribeToTelematicsCases(callback, onError) {
+  return onSnapshot(collection(db, 'telematicsCases'),
+    (snap) => callback(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+    (err) => { console.warn('subscribeToTelematicsCases error:', err.code || err); if (onError) onError(err); });
+}
+
+export async function addTelematicsCase(shape) {
+  const ref = await addDoc(collection(db, 'telematicsCases'), shape);
+  return ref.id;
+}
+
+// History entries and notes are appended with arrayUnion, so two people
+// working the same case don't overwrite each other's.
+export async function updateTelematicsCase(id, patch = {}, { event = null, note = null } = {}) {
+  const data = { ...patch };
+  if (event) data.history = arrayUnion(event);
+  if (note) data.notes = arrayUnion(note);
+  await updateDoc(doc(db, 'telematicsCases', id), data);
+}
+
+// telematicsConfig/settings — destinations. May not exist yet (null).
+export function subscribeToTelematicsConfig(callback, onError) {
+  return onSnapshot(doc(db, 'telematicsConfig', 'settings'),
+    (snap) => callback(snap.exists() ? snap.data() : null),
+    (err) => { console.warn('subscribeToTelematicsConfig error:', err.code || err); if (onError) onError(err); });
+}
+
+export async function saveTelematicsConfig(patch) {
+  await setDoc(doc(db, 'telematicsConfig', 'settings'), patch, { merge: true });
+}

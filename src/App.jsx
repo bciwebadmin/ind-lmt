@@ -16,7 +16,8 @@ import {
   Trophy, Target, Printer, FileSpreadsheet, Eye, EyeOff, Copy, Menu,
   RotateCcw, CalendarOff, Archive, ArchiveX, Key, Route,
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
-  Inbox, Briefcase, ClipboardList, LayoutDashboard, ArrowRight, Activity
+  Inbox, Briefcase, ClipboardList, LayoutDashboard, ArrowRight, Activity,
+  Truck, Wrench, Package, ExternalLink
 } from 'lucide-react';
 
 import {
@@ -27,17 +28,24 @@ import {
   subscribeToRecords, addRecordDoc, updateRecordDoc,
   addAttachmentRecords, removeAttachmentRecord,
   subscribeToHealth, subscribeToIncidents, setIncidentMuted,
-  subscribeToTelematicsCodes, saveTelematicsCode, seedTelematicsCodes
+  subscribeToTelematicsCodes, saveTelematicsCode, seedTelematicsCodes,
+  subscribeToTelematicsCases, addTelematicsCase, updateTelematicsCase,
+  subscribeToTelematicsConfig, saveTelematicsConfig
 } from './lib/firestoreData';
 import {
   hasLeadAccess, hasTelematicsAccess, canOpenView, defaultViewFor, accessLabel, ACCESS_PRESETS,
-  TELEMATICS_CODES_VIEW, NO_ACCESS_VIEW
+  TELEMATICS_CODES_VIEW, TELEMATICS_BOARD_VIEW, TELEMATICS_SETTINGS_VIEW, NO_ACCESS_VIEW
 } from './lib/access';
 import {
   CODE_LEVELS, codeLevelLabel, reviewPatch, newCodeDoc, isValidCode, normalizeCode,
-  codeMatchesFilter, codeMatchesQuery, codeCounts, sortCodes
+  codeMatchesFilter, codeMatchesQuery, codeCounts, sortCodes, classifyCode,
+  CASE_TABS, caseTab, caseStatusLabel, caseCounts, sortCases, caseMatchesQuery,
+  WIN_TIERS, winTier, LOST_REASONS, CLOSE_REASONS, DESTINATION_KINDS, MAX_DESTINATION_RECIPIENTS,
+  resolveRecipients, destinationsForTier, suggestedDestination, destinationProblems, isEmail,
+  assetUrl, mapsUrl, startWorkingChange, winChange, loseChange, closeChange,
+  confirmWorkOrderChange, reopenChange, noteEntry, buildManualCase
 } from './lib/telematics';
-import { TELEMATICS_SEED_CODES, TELEMATICS_SEED_SOURCE } from './lib/telematicsSeed';
+import { TELEMATICS_SEED_CODES, TELEMATICS_SEED_SOURCE, TELEMATICS_SEED_DESTINATIONS } from './lib/telematicsSeed';
 import { setErrorContext } from './lib/errorReporter';
 
 import {
@@ -46,6 +54,7 @@ import {
   reassignUserLeadsViaFunction, restoreLoaLeadsForUserViaFunction,
   adminResetUserPasswordViaFunction,
   sendImportSummaryEmailViaFunction,
+  sendTelematicsHandoffViaFunction,
   sendSalesRequestEmailViaFunction,
   sendRecordEmailViaFunction,
   runHealthCheckNowViaFunction
@@ -1040,7 +1049,10 @@ export default function BobcatIndyCRM() {
     // Allow ?view=users or ?view=leads etc. via URL — used by email notifications
     try {
       const requested = new URLSearchParams(window.location.search).get('view');
-      const valid = [HOME_VIEW, 'todo', ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings', TELEMATICS_CODES_VIEW];
+      const valid = [HOME_VIEW, 'todo', ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings',
+        TELEMATICS_BOARD_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW];
+      // ?case=<id> (bump emails, step 4) opens the board.
+      if (new URLSearchParams(window.location.search).get('case')) return TELEMATICS_BOARD_VIEW;
       if (requested && valid.includes(requested)) return requested;
       if (requested && MOVED_VIEWS[requested]) return MOVED_VIEWS[requested][0];
     } catch { /* ignore */ }
@@ -1250,6 +1262,47 @@ export default function BobcatIndyCRM() {
       (data) => { setTelematicsCodes(data); setTelematicsCodesError(null); },
       (err) => setTelematicsCodesError(err && err.code ? err.code : 'error'));
   }, [telematicsAccess]);
+
+  // Telematics → Board (cases) and Settings (destinations). Settings is
+  // undefined while loading and null when it has never been saved.
+  const [telematicsCases, setTelematicsCases] = useState(null);
+  const [telematicsCasesError, setTelematicsCasesError] = useState(null);
+  const [telematicsSettings, setTelematicsSettings] = useState(undefined);
+  const [telematicsSettingsError, setTelematicsSettingsError] = useState(null);
+  useEffect(() => {
+    if (!telematicsAccess) {
+      setTelematicsCases(null); setTelematicsCasesError(null);
+      setTelematicsSettings(undefined); setTelematicsSettingsError(null);
+      return;
+    }
+    const unsubCases = subscribeToTelematicsCases(
+      (data) => { setTelematicsCases(data); setTelematicsCasesError(null); },
+      (err) => setTelematicsCasesError(err && err.code ? err.code : 'error'));
+    const unsubSettings = subscribeToTelematicsConfig(
+      (data) => { setTelematicsSettings(data); setTelematicsSettingsError(null); },
+      (err) => setTelematicsSettingsError(err && err.code ? err.code : 'error'));
+    return () => { unsubCases(); unsubSettings(); };
+  }, [telematicsAccess]);
+  const telematicsCodesById = useMemo(
+    () => Object.fromEntries((telematicsCodes || []).map(c => [c.code || c.id, c])), [telematicsCodes]);
+  const telematicsDestinations = useMemo(
+    () => (telematicsSettings && Array.isArray(telematicsSettings.destinations) ? telematicsSettings.destinations : []),
+    [telematicsSettings]);
+  const telematicsNewCount = useMemo(
+    () => (telematicsCases || []).filter(c => caseTab(c) === 'new').length, [telematicsCases]);
+
+  // The open case page. ?case=<id> opens one on arrival and stays in the URL
+  // while it is open, so a refresh (or a bump email link) reopens it.
+  const [selectedCaseId, setSelectedCaseId] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get('case'); } catch { return null; }
+  });
+  useEffect(() => {
+    try {
+      const url = new URL(window.location);
+      if (selectedCaseId) url.searchParams.set('case', selectedCaseId); else url.searchParams.delete('case');
+      window.history.replaceState({}, '', url.toString());
+    } catch { /* history unavailable */ }
+  }, [selectedCaseId]);
 
   // Crash reports say who was signed in and on which screen (self-repair loop).
   useEffect(() => { setErrorContext({ userId: currentUserId || '' }); }, [currentUserId]);
@@ -1685,6 +1738,69 @@ export default function BobcatIndyCRM() {
     } catch (e) {
       console.error('[telematics] seed failed', e);
       showToast('Could not load the starter list', 'error');
+    }
+  };
+
+  // Telematics → cases. `change` is { patch, event } from src/lib/telematics.js.
+  const changeCase = async (id, change, note = null) => {
+    try {
+      await updateTelematicsCase(id, change.patch, { event: change.event, note });
+      return true;
+    } catch (e) {
+      console.error('[telematics] case update failed', e);
+      showToast('Could not save the case', 'error');
+      return false;
+    }
+  };
+  const addCase = async (doc) => {
+    try {
+      const id = await addTelematicsCase(doc);
+      showToast('Case added');
+      setSelectedCaseId(id);
+      return true;
+    } catch (e) {
+      console.error('[telematics] case add failed', e);
+      showToast('Could not add the case', 'error');
+      return false;
+    }
+  };
+  // A note on a New case means Carter has picked it up: it moves to Working.
+  const addCaseNote = async (c, text) => {
+    const note = noteEntry(text, currentUser.id);
+    if (!note) return false;
+    const change = (c.status || 'new') === 'new'
+      ? startWorkingChange(currentUser.id, note.at)
+      : { patch: { updatedAt: note.at }, event: null };
+    return changeCase(c.id, change, note);
+  };
+  const sendCaseHandoff = async (id) => {
+    const r = await sendTelematicsHandoffViaFunction(id);
+    if (r.sent) { showToast(`Emailed ${r.to} ${r.to === 1 ? 'person' : 'people'}${r.cc ? ` (+${r.cc} cc)` : ''}`); return true; }
+    const why = {
+      'no-recipients':  'that destination has no one to email — add people in Telematics → Settings, then Send again',
+      'no-destination': 'that destination no longer exists in Telematics → Settings',
+      'not-invokable':  'the email function can’t be reached yet (see Settings → System Health)'
+    }[r.reason] || 'the email didn’t send — try Send again';
+    showToast(`Saved, but ${why}`, 'error');
+    return false;
+  };
+  const winCase = async (c, { tierId, destination, message }) => {
+    let change;
+    try { change = winChange({ tierId, destination, message }, currentUser.id); }
+    catch (e) { showToast(e.message, 'error'); return false; }
+    if (!(await changeCase(c.id, change))) return false;
+    await sendCaseHandoff(c.id);
+    return true;
+  };
+  const saveTelematicsSettings = async (patch) => {
+    try {
+      await saveTelematicsConfig({ ...patch, updatedAt: new Date().toISOString(), updatedBy: currentUser.id });
+      showToast('Telematics settings saved');
+      return true;
+    } catch (e) {
+      console.error('[telematics] settings save failed', e);
+      showToast('Could not save telematics settings', 'error');
+      return false;
     }
   };
 
@@ -2149,6 +2265,7 @@ export default function BobcatIndyCRM() {
   // Follow a retired view id to its new home (e.g. after a role change).
   const goTo = (v) => {
     if (selectedLead) { setSelectedLead(null); setFocusRecord(null); }
+    if (selectedCaseId) setSelectedCaseId(null);
     if (MOVED_VIEWS[v]) {
       const [to, tab] = MOVED_VIEWS[v];
       if (to === 'stage-incoming') setIncomingTab(tab);
@@ -2473,6 +2590,7 @@ export default function BobcatIndyCRM() {
           todoCount={todoCount}
           backOfficeCounts={{ submittals: openSubmittalCount, requests: openRequestCount, finance: openFinanceCount, tradeIns: pendingTradeInCount }}
           user={currentUser}
+          telematicsNewCount={telematicsNewCount}
           pendingCount={accessRequests.length}
           mobileOpen={mobileNavOpen}
           onMobileClose={() => setMobileNavOpen(false)}
@@ -2654,6 +2772,45 @@ export default function BobcatIndyCRM() {
                 onSetLevel={setTelematicsCodeLevel}
                 onAddCode={addTelematicsCode}
                 onSeed={seedTelematicsCodeList}
+              />
+            )}
+            {view === TELEMATICS_BOARD_VIEW && telematicsAccess && (() => {
+              const openCase = selectedCaseId ? (telematicsCases || []).find(c => c.id === selectedCaseId) : null;
+              if (selectedCaseId && telematicsCases === null && !telematicsCasesError) {
+                return <div className="text-sm text-stone-500 py-8">Loading the case…</div>;
+              }
+              if (openCase) {
+                return (
+                  <TelematicsCasePage
+                    c={openCase} codesById={telematicsCodesById} users={users}
+                    destinations={telematicsDestinations}
+                    onBack={() => setSelectedCaseId(null)}
+                    onAddNote={(text) => addCaseNote(openCase, text)}
+                    onStartWorking={() => changeCase(openCase.id, startWorkingChange(currentUser.id))}
+                    onWin={(args) => winCase(openCase, args)}
+                    onLose={(args) => changeCase(openCase.id, loseChange(args, currentUser.id))}
+                    onCloseCase={(args) => changeCase(openCase.id, closeChange(args, currentUser.id))}
+                    onConfirmWorkOrder={(args) => changeCase(openCase.id, confirmWorkOrderChange(args, currentUser.id))}
+                    onReopen={() => changeCase(openCase.id, reopenChange(currentUser.id))}
+                    onResend={() => sendCaseHandoff(openCase.id)}
+                    onOpenSettings={() => goTo(TELEMATICS_SETTINGS_VIEW)}
+                  />
+                );
+              }
+              return (
+                <TelematicsBoardView
+                  cases={telematicsCases} error={telematicsCasesError} isAdmin={currentUser.role === 'admin'}
+                  codesById={telematicsCodesById} codes={telematicsCodes || []}
+                  branches={config.branches || []} currentUser={currentUser}
+                  onOpen={(c) => setSelectedCaseId(c.id)}
+                  onAdd={addCase}
+                />
+              );
+            })()}
+            {view === TELEMATICS_SETTINGS_VIEW && telematicsAccess && (
+              <TelematicsSettingsView
+                settings={telematicsSettings} error={telematicsSettingsError} isAdmin={currentUser.role === 'admin'}
+                branches={config.branches || []} onSave={saveTelematicsSettings}
               />
             )}
             {view === NO_ACCESS_VIEW && <NoAccessView/>}
@@ -3063,7 +3220,7 @@ const STAGE_ADD_KIND = {
   [STAGE_WANTED]:   'want'
 };
 
-function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user, pendingCount, mobileOpen, onMobileClose, onNew, todoCount = 0 }) {
+function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user, pendingCount, mobileOpen, onMobileClose, onNew, todoCount = 0, telematicsNewCount = 0 }) {
   const [newOpen, setNewOpen] = useState(false);
   const userRole = user ? user.role : 'user';
   // + New only makes lead-side records.
@@ -3085,9 +3242,11 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
       { id: 'trade-ins', label: userRole === 'admin' ? 'Trade-In Approvals' : 'Trade-Ins', icon: RefreshCw,     badge: backOfficeCounts.tradeIns }
     ] },
     // A separate module (CLAUDE.md → "Telematics"); only shown to people with
-    // telematics access. The board joins Code List in step 2.
+    // telematics access.
     { title: 'Telematics', items: [
-      { id: TELEMATICS_CODES_VIEW, label: 'Code List', icon: Activity }
+      { id: TELEMATICS_BOARD_VIEW, label: 'Board', icon: Activity, badge: telematicsNewCount, badgeAccent: telematicsNewCount > 0 },
+      { id: TELEMATICS_CODES_VIEW, label: 'Code List', icon: ClipboardList },
+      { id: TELEMATICS_SETTINGS_VIEW, label: 'Telematics Settings', icon: SettingsIcon }
     ] },
     { title: null, items: [
       { id: 'reports',   label: 'Reports',            icon: BarChart3 }
@@ -3242,6 +3401,8 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
     users: 'Users', scoring: 'Scoring Rules', settings: 'Settings',
     'lead-routing': 'Lead Routing',
     [TELEMATICS_CODES_VIEW]: 'Critical Code List',
+    [TELEMATICS_BOARD_VIEW]: 'Telematics Board',
+    [TELEMATICS_SETTINGS_VIEW]: 'Telematics Settings',
     [NO_ACCESS_VIEW]: 'No access yet'
   };
 
@@ -3296,6 +3457,8 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
               {view === 'lead-routing' && 'Who each location and department routes leads to'}
               {view === 'settings' && 'Configure statuses, branches, departments, and lead sources'}
               {view === TELEMATICS_CODES_VIEW && 'Telematics · which Bobcat fault codes Carter should call on'}
+              {view === TELEMATICS_BOARD_VIEW && 'Critical fault codes to call on, and where each win was sent'}
+              {view === TELEMATICS_SETTINGS_VIEW && 'Who a win is emailed to, for each place Carter can send it'}
             </div>
           </div>
         </div>
@@ -5523,6 +5686,772 @@ function ImportView({ config, onImport, leads }) {
 }
 
 /* ===================== USERS VIEW ===================== */
+/* ===================== TELEMATICS — BOARD & CASES ===================== */
+// Carter's board (CLAUDE.md → "Telematics"). A case is one machine's critical
+// fault. Tabs derive from status (CASE_TABS). Winning a case saves the win and
+// emails that destination (sendTelematicsHandoff); the people it goes to come
+// from Telematics Settings, never typed in by Carter.
+const CASE_STATUS_TONE = {
+  new:       'bg-blue-50 text-blue-700 border-blue-200',
+  working:   'bg-violet-50 text-violet-700 border-violet-200',
+  sent:      'bg-orange-50 text-orange-800 border-orange-200',
+  completed: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  lost:      'bg-stone-100 text-stone-600 border-stone-200',
+  closed:    'bg-stone-100 text-stone-600 border-stone-200'
+};
+const WIN_TIER_ICON = { field: Truck, shop: Wrench, parts: Package };
+const TELEMATICS_ACCENT = { soft: 'bg-orange-50', text: 'text-orange-700' };
+
+function CaseStatusBadge({ status }) {
+  return (
+    <span className={`inline-block text-[10px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded border whitespace-nowrap ${CASE_STATUS_TONE[status || 'new'] || CASE_STATUS_TONE.new}`}>
+      {caseStatusLabel(status || 'new')}
+    </span>
+  );
+}
+
+// The code as the Code List classifies it — Critical / Non-critical / Ignore,
+// and whether anyone has reviewed it yet.
+function CaseCodeChip({ code, codesById }) {
+  if (!code) return <span className="text-stone-400">—</span>;
+  const k = classifyCode(code, codesById);
+  const tone = k.level === 'critical' ? 'text-rose-700' : k.level === 'noncritical' ? 'text-amber-800' : 'text-stone-500';
+  return (
+    <span className="whitespace-nowrap">
+      <span className="font-mono text-xs font-semibold text-stone-900">{k.code}</span>
+      <span className={`ml-1.5 text-[10px] uppercase tracking-widest font-bold ${tone}`}>{codeLevelLabel(k.level)}</span>
+      {!k.reviewed && <span className="ml-1 text-[10px] text-amber-700" title="Not reviewed on the Code List yet">•</span>}
+    </span>
+  );
+}
+
+const fmtWhen = (iso) => iso ? fmtDateTime(iso) : '—';
+const daysAgo = (iso) => {
+  if (!iso) return '';
+  const d = Math.floor((Date.now() - new Date(iso).getTime()) / 864e5);
+  return d <= 0 ? 'today' : d === 1 ? '1 day ago' : `${d} days ago`;
+};
+
+// "Field Service" when the tier and destination say the same thing, else
+// "Shop (in-house) → Anderson Service".
+function wonToLabel(tierId, destinationName) {
+  const t = winTier(tierId);
+  const label = t ? t.label : 'Won';
+  return destinationName && destinationName !== label ? `${label} → ${destinationName}` : label;
+}
+
+// What the row says about where the case stands.
+function caseOutcomeLine(c) {
+  const o = c.outcome || {};
+  if (o.result === 'won') {
+    const email = o.email && o.email.status === 'failed' ? ' · email not sent' : '';
+    return `${wonToLabel(o.tier, o.destinationName)} · ${daysAgo(o.sentAt)}${email}`;
+  }
+  if (o.result === 'lost') return `Lost · ${o.reason || ''}`;
+  if (c.closure) return `Closed · ${c.closure.reason || ''}`;
+  return '';
+}
+
+function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches, currentUser, onOpen, onAdd }) {
+  const [tab, setTab] = useState('new');
+  const [archiveFilter, setArchiveFilter] = useState('all');
+  const [q, setQ] = useState('');
+  const [adding, setAdding] = useState(false);
+  const list = cases || [];
+  const counts = useMemo(() => caseCounts(list), [list]);
+  const rows = useMemo(() => sortCases(list.filter(c =>
+    caseTab(c) === tab
+    && (tab !== 'archive' || archiveFilter === 'all' || c.status === archiveFilter)
+    && caseMatchesQuery(c, q))), [list, tab, archiveFilter, q]);
+
+  if (error) {
+    return (
+      <div className="max-w-2xl px-4 py-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-800 flex gap-2">
+        <AlertCircle size={16} className="shrink-0 mt-0.5"/>
+        <div>
+          The board couldn’t be loaded{error === 'permission-denied' ? ' (permission denied)' : ''}.
+          {isAdmin
+            ? <> If the latest Telematics rules haven’t been deployed yet, run <code className="font-mono text-xs bg-white px-1 rounded">firebase deploy --only firestore:rules</code>, then reload.</>
+            : ' Ask an admin to check your Telematics access.'}
+        </div>
+      </div>
+    );
+  }
+  if (cases === null) return <div className="text-sm text-stone-500 py-8">Loading the board…</div>;
+
+  return (
+    <div className="space-y-4">
+      <SubTabs value={tab} onChange={setTab} tabs={CASE_TABS.map(t => [t.id, t.label, counts[t.id]])}/>
+      <div className="flex flex-col sm:flex-row gap-2">
+        <div className="relative flex-1">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400"/>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search customer, serial, model, code, phone…"
+            className="w-full pl-8 pr-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
+        </div>
+        <button onClick={() => setAdding(true)}
+          className="px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md flex items-center justify-center gap-1.5">
+          <Plus size={14}/> Add case
+        </button>
+      </div>
+      {tab === 'archive' && (
+        <div className="flex gap-2">
+          {[['all', 'All'], ['lost', 'Lost'], ['closed', 'Closed']].map(([id, label]) => (
+            <button key={id} type="button" onClick={() => setArchiveFilter(id)} aria-pressed={archiveFilter === id}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${
+                archiveFilter === id ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {rows.length === 0 ? (
+        <div className="text-center py-14 border border-dashed border-stone-200 rounded-lg bg-white px-6">
+          <Activity size={28} className="mx-auto text-stone-300 mb-3"/>
+          <div className="text-sm font-semibold text-stone-700">
+            {q ? 'No cases match' : list.length ? `Nothing in ${CASE_TABS.find(t => t.id === tab).label}` : 'No cases yet'}
+          </div>
+          {!list.length && (
+            <div className="text-xs text-stone-500 mt-1 max-w-md mx-auto leading-relaxed">
+              Cases will arrive on their own from Bobcat’s critical fault code emails once intake is set up.
+              Until then, add one by hand with <b>Add case</b>.
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="hidden md:block bg-white border border-stone-200 rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-stone-50 text-[10px] uppercase tracking-widest text-stone-500">
+                <tr>
+                  <th className="text-left px-4 py-2.5 font-semibold">Fault started</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">Customer</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">Machine</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">Code</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">Branch</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-100">
+                {rows.map(c => (
+                  <tr key={c.id} onClick={() => onOpen(c)} className="cursor-pointer hover:bg-stone-50">
+                    <td className="px-4 py-2.5 text-xs text-stone-600 whitespace-nowrap">{fmtWhen(c.fault && c.fault.startAt)}</td>
+                    <td className="px-4 py-2.5">
+                      <div className="font-medium text-stone-900">{(c.customer && c.customer.name) || '—'}</div>
+                      {c.customer && c.customer.phone && <div className="text-xs text-stone-500 font-mono">{c.customer.phone}</div>}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <div className="text-stone-800">{c.model || '—'}</div>
+                      <div className="text-xs text-stone-500 font-mono">{c.serial}</div>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/>
+                      {c.fault && c.fault.summary && <div className="text-xs text-stone-500 truncate max-w-[240px]">{c.fault.summary}</div>}
+                    </td>
+                    <td className="px-4 py-2.5 text-stone-700">{c.branch || '—'}</td>
+                    <td className="px-4 py-2.5">
+                      <CaseStatusBadge status={c.status}/>
+                      {caseOutcomeLine(c) && <div className="text-[11px] text-stone-500 mt-0.5 max-w-[260px] truncate">{caseOutcomeLine(c)}</div>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="md:hidden space-y-2.5">
+            {rows.map(c => (
+              <button key={c.id} type="button" onClick={() => onOpen(c)}
+                className="w-full text-left p-3 bg-white border border-stone-200 rounded-lg space-y-1">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="font-semibold text-stone-900 text-sm">{(c.customer && c.customer.name) || '—'}</div>
+                  <CaseStatusBadge status={c.status}/>
+                </div>
+                <div className="text-xs text-stone-600">{[c.model, c.serial].filter(Boolean).join(' · ')}</div>
+                <div><CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/> <span className="text-xs text-stone-500">{c.fault && c.fault.summary}</span></div>
+                <div className="text-[11px] text-stone-500">{fmtWhen(c.fault && c.fault.startAt)}{c.branch ? ` · ${c.branch}` : ''}</div>
+                {caseOutcomeLine(c) && <div className="text-[11px] text-stone-500">{caseOutcomeLine(c)}</div>}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      {adding && (
+        <AddCaseModal codes={codes} codesById={codesById} branches={branches} currentUser={currentUser}
+          onCancel={() => setAdding(false)}
+          onSave={async (doc) => { if (await onAdd(doc)) setAdding(false); }}/>
+      )}
+    </div>
+  );
+}
+
+// A case entered by hand. Email intake (step 3) creates them automatically.
+function AddCaseModal({ codes = [], codesById = {}, branches = [], currentUser, onSave, onCancel }) {
+  const [f, setF] = useState({ customerName: '', phone: '', address: '', serial: '', model: '', hours: '',
+    code: '', summary: '', branch: '', city: '', lat: '', lng: '', note: '' });
+  const [errors, setErrors] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => setF(prev => {
+    const next = { ...prev, [k]: v };
+    // Picking a known code fills its summary.
+    if (k === 'code') {
+      const known = codesById[normalizeCode(v)];
+      if (known && (!prev.summary || prev.summary === (codesById[normalizeCode(prev.code)] || {}).summary)) next.summary = known.summary || '';
+    }
+    return next;
+  });
+  const save = async () => {
+    const { errors: errs, doc } = buildManualCase(f, currentUser.id);
+    setErrors(errs);
+    if (errs.length) return;
+    const note = noteEntry(f.note, currentUser.id, doc.createdAt);
+    if (note) doc.notes = [note];
+    setBusy(true);
+    try { await onSave(doc); } finally { setBusy(false); }
+  };
+  const input = (k, label, props = {}) => (
+    <label className="block">
+      <span className="text-xs font-semibold text-stone-600">{label}</span>
+      <input value={f[k]} onChange={e => set(k, e.target.value)} {...props}
+        className={`mt-1 w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white ${props.className || ''}`}/>
+    </label>
+  );
+  return (
+    <ModalShell label="Add telematics case" icon={Activity} accent={TELEMATICS_ACCENT} onCancel={() => { if (!busy) onCancel(); }}
+      title="Add a case" subtitle="For a fault code that didn’t come in by email. It starts in New."
+      footer={<>
+        <button onClick={onCancel} disabled={busy} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium">Cancel</button>
+        <button onClick={save} disabled={busy}
+          className="px-4 py-2 bg-brand-600 hover:bg-brand-700 disabled:opacity-60 text-white text-sm font-semibold rounded-md">
+          {busy ? 'Saving…' : 'Add case'}
+        </button>
+      </>}>
+      <div className="grid sm:grid-cols-2 gap-3">
+        {input('customerName', 'Customer *')}
+        {input('phone', 'Phone', { inputMode: 'tel' })}
+        <div className="sm:col-span-2">{input('address', 'Customer address')}</div>
+        {input('serial', 'Serial number *', { className: 'font-mono uppercase' })}
+        {input('model', 'Model', { placeholder: 'e.g. T770 T4' })}
+        {input('hours', 'Hours', { inputMode: 'decimal' })}
+        <label className="block">
+          <span className="text-xs font-semibold text-stone-600">Branch</span>
+          <select value={f.branch} onChange={e => set('branch', e.target.value)}
+            className="mt-1 w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white">
+            <option value="">—</option>
+            {branches.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        </label>
+        {input('code', 'Fault code', { list: 'telematics-code-options', className: 'font-mono uppercase', placeholder: 'e.g. M0217' })}
+        <datalist id="telematics-code-options">
+          {codes.map(c => <option key={c.code} value={c.code}>{c.summary}</option>)}
+        </datalist>
+        {input('summary', 'Fault summary')}
+        {input('city', 'Machine near (city)')}
+        <div className="grid grid-cols-2 gap-2">
+          {input('lat', 'Latitude', { inputMode: 'decimal' })}
+          {input('lng', 'Longitude', { inputMode: 'decimal' })}
+        </div>
+        <label className="block sm:col-span-2">
+          <span className="text-xs font-semibold text-stone-600">Note</span>
+          <textarea value={f.note} onChange={e => set('note', e.target.value)} rows={2}
+            className="mt-1 w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
+        </label>
+      </div>
+      {errors.length > 0 && (
+        <div className="text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md px-3 py-2 space-y-0.5">
+          {errors.map(e => <div key={e}>{e}</div>)}
+        </div>
+      )}
+    </ModalShell>
+  );
+}
+
+function CaseField({ label, children }) {
+  if (children === null || children === undefined || children === '' || children === false) return null;
+  return (
+    <div className="flex gap-3 py-1 text-sm">
+      <div className="w-32 shrink-0 text-stone-500">{label}</div>
+      <div className="min-w-0 text-stone-900 break-words">{children}</div>
+    </div>
+  );
+}
+
+function CaseCard({ title, children, action = null }) {
+  return (
+    <div className="bg-white border border-stone-200 rounded-lg">
+      <div className="px-4 py-2.5 border-b border-stone-100 flex items-center justify-between gap-2">
+        <div className="text-[11px] uppercase tracking-widest font-bold text-stone-500">{title}</div>
+        {action}
+      </div>
+      <div className="px-4 py-2">{children}</div>
+    </div>
+  );
+}
+
+const CASE_EVENT_LABEL = {
+  created: 'Case created', status: 'Started working', won: 'Won', lost: 'Lost', closed: 'Closed',
+  reopened: 'Reopened', emailed: 'Hand-off email', work_order: 'Work order confirmed', alert: 'Bobcat sent the code again'
+};
+
+function caseEventText(e) {
+  if (e.type === 'won') return `Won — ${wonToLabel(e.tier, e.destination)}`;
+  if (e.type === 'lost' || e.type === 'closed') return `${CASE_EVENT_LABEL[e.type]} — ${e.reason || ''}`;
+  if (e.type === 'emailed') return e.status === 'sent'
+    ? `Hand-off emailed to ${(e.to || []).join(', ')}${(e.cc || []).length ? ` (cc ${e.cc.join(', ')})` : ''}`
+    : `Hand-off email not sent${e.reason === 'no-recipients' ? ' — no one to send to' : ''}`;
+  if (e.type === 'work_order') return `Work order confirmed${e.number ? ` — ${e.number}` : ''}`;
+  if (e.type === 'created') return e.source === 'manual' ? 'Case added by hand' : 'Case created from Bobcat email';
+  return CASE_EVENT_LABEL[e.type] || e.type;
+}
+
+function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBack, onAddNote, onStartWorking, onWin, onLose,
+  onCloseCase, onConfirmWorkOrder, onReopen, onResend, onOpenSettings }) {
+  const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
+  const who = (id) => (userMap[id] && userMap[id].name) || (id ? 'Someone' : 'The LMT');
+  const [note, setNote] = useState('');
+  const [modal, setModal] = useState(null);   // 'win' | 'lost' | 'close' | 'wo'
+  const [busy, setBusy] = useState(false);
+  const run = async (fn) => { setBusy(true); try { return await fn(); } finally { setBusy(false); } };
+  const status = c.status || 'new';
+  const cust = c.customer || {}, loc = c.location || {}, fault = c.fault || {}, o = c.outcome || {};
+  const maps = mapsUrl(loc.lat, loc.lng);
+  const asset = assetUrl(c.serial);
+  const isOpenStatus = status === 'new' || status === 'working';
+  const timeline = [
+    ...(c.history || []).map(e => ({ ...e, kind: 'event' })),
+    ...(c.notes || []).map(n => ({ ...n, kind: 'note' }))
+  ].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+
+  const addNote = async () => { if (await run(() => onAddNote(note))) setNote(''); };
+  const btn = 'px-3 py-2 text-sm font-semibold rounded-md flex items-center justify-center gap-1.5 disabled:opacity-60';
+
+  return (
+    <div className="space-y-4">
+      <button onClick={onBack} className="text-sm text-stone-600 hover:text-stone-900 flex items-center gap-1">
+        <ChevronLeft size={14}/> Back to the board
+      </button>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="font-display text-2xl font-bold text-stone-900">{cust.name || 'Customer'}</h2>
+            <CaseStatusBadge status={status}/>
+          </div>
+          <div className="text-sm text-stone-600 mt-0.5">
+            {[c.model, c.serial].filter(Boolean).join(' · ')} · <CaseCodeChip code={fault.code} codesById={codesById}/> {fault.summary}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-3 gap-4 items-start">
+        <div className="md:col-span-2 space-y-4">
+          <CaseCard title="Fault">
+            <CaseField label="Code">{fault.code ? `${fault.severity ? `${fault.severity} - ` : ''}${fault.code}` : null}</CaseField>
+            <CaseField label="Summary">{fault.summary}</CaseField>
+            <CaseField label="Started">{fault.startAt ? fmtWhen(fault.startAt) : null}</CaseField>
+            {(fault.otherCodes || []).length > 0 && (
+              <CaseField label="Other codes">
+                {fault.otherCodes.map((x, i) => <div key={i}>{[x.severity, x.code, x.summary].filter(Boolean).join(' - ')}</div>)}
+              </CaseField>
+            )}
+            {c.alertCount > 1 && <CaseField label="Sent again">{`${c.alertCount - 1} more time${c.alertCount === 2 ? '' : 's'}, last ${fmtWhen(c.lastAlertAt)}`}</CaseField>}
+          </CaseCard>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <CaseCard title="Customer">
+              <CaseField label="Name">{cust.name}</CaseField>
+              <CaseField label="Phone">{cust.phone ? <a className="text-brand-700 hover:underline" href={`tel:${cust.phone.replace(/[^\d+]/g, '')}`}>{cust.phone}</a> : null}</CaseField>
+              <CaseField label="Address">{cust.address}</CaseField>
+              <CaseField label="Owner contact">{[cust.ownerContact, cust.ownerEmail].filter(Boolean).join(' · ')}</CaseField>
+            </CaseCard>
+            <CaseCard title="Machine"
+              action={asset ? <a href={asset} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand-700 hover:underline flex items-center gap-1">Bobcat portal <ExternalLink size={11}/></a> : null}>
+              <CaseField label="Model">{c.model}</CaseField>
+              <CaseField label="Serial">{c.serial ? <span className="font-mono">{c.serial}</span> : null}</CaseField>
+              <CaseField label="Hours">{c.hours != null ? String(c.hours) : null}</CaseField>
+              <CaseField label="Branch">{c.branch}</CaseField>
+            </CaseCard>
+          </div>
+          <CaseCard title="Location"
+            action={maps ? <a href={maps} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand-700 hover:underline flex items-center gap-1"><MapPin size={11}/> Open in Google Maps</a> : null}>
+            <CaseField label="Machine at">{loc.address}</CaseField>
+            <CaseField label="Near">{loc.city}</CaseField>
+            <CaseField label="Coordinates">{maps ? `${loc.lat}, ${loc.lng}` : null}</CaseField>
+            {!loc.address && !loc.city && !maps && <div className="text-sm text-stone-400 py-1">No location on this case.</div>}
+          </CaseCard>
+
+          <CaseCard title="Notes & activity">
+            <div className="py-2 space-y-2">
+              <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
+                placeholder={status === 'new' ? 'Log the call — adding a note moves the case to Working' : 'Log a call or a note'}
+                className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
+              <button onClick={addNote} disabled={busy || !note.trim()}
+                className="px-3 py-1.5 bg-stone-900 hover:bg-stone-800 disabled:bg-stone-300 text-white text-sm font-medium rounded-md">Add note</button>
+            </div>
+            <div className="divide-y divide-stone-100">
+              {timeline.map(e => (
+                <div key={e.id} className="py-2 text-sm">
+                  <div className="text-[11px] text-stone-500">{fmtWhen(e.at)} · {who(e.by)}</div>
+                  {e.kind === 'note'
+                    ? <div className="text-stone-900 whitespace-pre-wrap">{e.text}</div>
+                    : <div className="text-stone-600 italic">{caseEventText(e)}</div>}
+                </div>
+              ))}
+            </div>
+          </CaseCard>
+        </div>
+
+        {/* First on a phone, so Won / Lost is right under the header. */}
+        <div className="space-y-4 order-first md:order-none">
+          <CaseCard title="Outcome">
+            <div className="py-2 space-y-2">
+              {isOpenStatus && (
+                <>
+                  <button onClick={() => setModal('win')} disabled={busy} className={`${btn} w-full bg-brand-600 hover:bg-brand-700 text-white`}>
+                    <CheckCircle2 size={14}/> Won — send it on
+                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button onClick={() => setModal('lost')} disabled={busy} className={`${btn} border border-stone-200 hover:bg-stone-50 text-stone-700`}>Lost</button>
+                    <button onClick={() => setModal('close')} disabled={busy} className={`${btn} border border-stone-200 hover:bg-stone-50 text-stone-700`}>Close</button>
+                  </div>
+                  {status === 'new' && (
+                    <button onClick={() => run(onStartWorking)} disabled={busy} className={`${btn} w-full border border-stone-200 hover:bg-stone-50 text-stone-700`}>Start working</button>
+                  )}
+                </>
+              )}
+
+              {o.result === 'won' && (
+                <div className="text-sm space-y-1">
+                  <div className="font-semibold text-stone-900">Won — {wonToLabel(o.tier, o.destinationName)}</div>
+                  <div className="text-xs text-stone-500">{fmtWhen(o.sentAt)} by {who(o.sentBy)}</div>
+                  {o.message && <div className="text-xs text-stone-700 whitespace-pre-wrap bg-stone-50 border border-stone-100 rounded px-2 py-1.5">{o.message}</div>}
+                  <HandoffEmailState email={o.email}/>
+                  {o.email && o.email.status !== 'sent' && o.email.status !== 'pending' && (
+                    <div className="flex gap-2 flex-wrap pt-1">
+                      <button onClick={() => run(onResend)} disabled={busy} className={`${btn} bg-brand-600 hover:bg-brand-700 text-white`}><Send size={13}/> Send again</button>
+                      {o.email.reason === 'no-recipients' && <button onClick={onOpenSettings} className={`${btn} border border-stone-200 hover:bg-stone-50 text-stone-700`}>Settings</button>}
+                    </div>
+                  )}
+                  {o.email && o.email.status === 'sent' && (
+                    <button onClick={() => run(onResend)} disabled={busy} className="text-xs font-semibold text-brand-700 hover:underline">Send the email again</button>
+                  )}
+                </div>
+              )}
+              {status === 'sent' && (
+                <div className="pt-2 border-t border-stone-100 space-y-2">
+                  <div className="text-xs text-stone-500 leading-relaxed">
+                    Waiting for a work order on <span className="font-mono">{c.serial}</span>. The LMT will check the WIP for it automatically once that’s set up; until then, confirm it here.
+                  </div>
+                  <button onClick={() => setModal('wo')} disabled={busy} className={`${btn} w-full border border-stone-200 hover:bg-stone-50 text-stone-700`}>Work order opened</button>
+                </div>
+              )}
+              {c.workOrder && (
+                <div className="text-sm"><span className="text-stone-500">Work order</span> <span className="font-mono font-semibold">{c.workOrder.number || '—'}</span>
+                  <div className="text-xs text-stone-500">confirmed {fmtWhen(c.workOrder.confirmedAt)}{c.workOrder.source === 'manual' ? ` by ${who(c.workOrder.confirmedBy)}` : ' from the WIP'}</div></div>
+              )}
+              {o.result === 'lost' && status === 'lost' && (
+                <div className="text-sm"><div className="font-semibold text-stone-900">Lost — {o.reason}</div>
+                  {o.note && <div className="text-xs text-stone-600 whitespace-pre-wrap">{o.note}</div>}
+                  <div className="text-xs text-stone-500">{fmtWhen(o.at)} by {who(o.by)}</div></div>
+              )}
+              {status === 'closed' && c.closure && (
+                <div className="text-sm"><div className="font-semibold text-stone-900">Closed — {c.closure.reason}</div>
+                  {c.closure.note && <div className="text-xs text-stone-600 whitespace-pre-wrap">{c.closure.note}</div>}
+                  <div className="text-xs text-stone-500">{fmtWhen(c.closure.at)} by {who(c.closure.by)}</div></div>
+              )}
+              {!isOpenStatus && (
+                <button onClick={() => run(onReopen)} disabled={busy} className="text-xs font-semibold text-stone-600 hover:text-stone-900 flex items-center gap-1 pt-1">
+                  <RotateCcw size={12}/> Reopen (back to Working)
+                </button>
+              )}
+            </div>
+          </CaseCard>
+        </div>
+      </div>
+
+      {modal === 'win' && (
+        <WinCaseModal c={c} destinations={destinations} onOpenSettings={onOpenSettings}
+          onCancel={() => setModal(null)}
+          onSend={async (args) => { if (await run(() => onWin(args))) setModal(null); }}/>
+      )}
+      {modal === 'lost' && (
+        <CaseReasonModal title="Lost" subtitle="The customer didn’t take the service. Moves the case to the Archive." reasons={LOST_REASONS}
+          onCancel={() => setModal(null)}
+          onSave={async (args) => { if (await run(() => onLose(args))) setModal(null); }}/>
+      )}
+      {modal === 'close' && (
+        <CaseReasonModal title="Close the case" subtitle="Nothing to sell here. Moves the case to the Archive." reasons={CLOSE_REASONS}
+          onCancel={() => setModal(null)}
+          onSave={async (args) => { if (await run(() => onCloseCase(args))) setModal(null); }}/>
+      )}
+      {modal === 'wo' && (
+        <WorkOrderModal serial={c.serial} onCancel={() => setModal(null)}
+          onSave={async (args) => { if (await run(() => onConfirmWorkOrder(args))) setModal(null); }}/>
+      )}
+    </div>
+  );
+}
+
+function HandoffEmailState({ email }) {
+  if (!email) return null;
+  if (email.status === 'pending') return <div className="text-xs text-stone-500">Sending the email…</div>;
+  if (email.status === 'sent') return (
+    <div className="text-xs text-emerald-700"><CheckCircle2 size={11} className="inline -mt-0.5 mr-1"/>
+      Emailed {(email.to || []).join(', ')}{(email.cc || []).length ? `, cc ${email.cc.join(', ')}` : ''} · {fmtWhen(email.at)}</div>
+  );
+  const why = email.reason === 'no-recipients' ? `${email.destination || 'That destination'} has no one to email yet.`
+    : email.reason === 'no-destination' ? 'That destination was removed from Telematics Settings.'
+    : 'The email didn’t send.';
+  return <div className="text-xs text-rose-700"><AlertCircle size={11} className="inline -mt-0.5 mr-1"/>Not emailed. {why}</div>;
+}
+
+function WinCaseModal({ c, destinations = [], onSend, onCancel, onOpenSettings }) {
+  const [tierId, setTierId] = useState('field');
+  const [destId, setDestId] = useState(() => (suggestedDestination('field', c.branch, destinations) || {}).id || '');
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const options = destinationsForTier(tierId, destinations);
+  const dest = options.find(d => d.id === destId) || null;
+  const rec = dest ? resolveRecipients(dest) : { to: [], cc: [] };
+  const pickTier = (id) => { setTierId(id); setDestId((suggestedDestination(id, c.branch, destinations) || {}).id || ''); };
+  const send = async () => { setBusy(true); try { await onSend({ tierId, destination: dest, message }); } finally { setBusy(false); } };
+  const tier = winTier(tierId);
+  return (
+    <ModalShell label="Won" icon={CheckCircle2} accent={TELEMATICS_ACCENT} onCancel={() => { if (!busy) onCancel(); }}
+      title="Won — where does it go?" subtitle={`${(c.customer && c.customer.name) || 'This customer'} · ${[c.model, c.serial].filter(Boolean).join(' ')}`}
+      footer={<>
+        <button onClick={onCancel} disabled={busy} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium">Cancel</button>
+        <button onClick={send} disabled={busy || !dest || !rec.to.length}
+          className="px-4 py-2 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-md flex items-center gap-2">
+          <Send size={14}/> {busy ? 'Sending…' : dest ? `Send to ${dest.name}` : 'Send'}
+        </button>
+      </>}>
+      <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Won to">
+        {WIN_TIERS.map(t => {
+          const Icon = WIN_TIER_ICON[t.id];
+          const on = tierId === t.id;
+          return (
+            <button key={t.id} type="button" role="radio" aria-checked={on} onClick={() => pickTier(t.id)}
+              className={`p-3 rounded-md border text-left ${on ? 'border-brand-600 ring-2 ring-brand-500/30 bg-orange-50' : 'border-stone-200 hover:bg-stone-50'}`}>
+              <Icon size={16} className={on ? 'text-brand-700' : 'text-stone-500'}/>
+              <div className="text-sm font-semibold text-stone-900 mt-1">{t.label}</div>
+            </button>
+          );
+        })}
+      </div>
+      {options.length === 0 ? (
+        <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+          No {DESTINATION_KINDS.find(k => k.id === tier.destKind).label} destinations yet.{' '}
+          <button onClick={onOpenSettings} className="font-semibold underline">Add one in Telematics Settings</button>.
+        </div>
+      ) : (
+        <label className="block">
+          <span className="text-xs font-semibold text-stone-600">Send to</span>
+          <select value={destId} onChange={e => setDestId(e.target.value)}
+            className="mt-1 w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white">
+            {options.map(d => <option key={d.id} value={d.id}>{d.name}{d.branch && d.branch === c.branch ? ' (this branch)' : ''}</option>)}
+          </select>
+        </label>
+      )}
+      {dest && (
+        <div className="text-xs bg-stone-50 border border-stone-200 rounded-md px-3 py-2 space-y-0.5">
+          {rec.to.length ? <>
+            <div><span className="text-stone-500">To:</span> {rec.to.join(', ')}</div>
+            {rec.cc.length > 0 && <div><span className="text-stone-500">Cc:</span> {rec.cc.join(', ')}</div>}
+            {rec.promotedCc && <div className="text-stone-500">No one is set as To, so it goes To the CC.</div>}
+          </> : <div className="text-rose-700">{dest.name} has no one to email. <button onClick={onOpenSettings} className="font-semibold underline">Add people</button>.</div>}
+        </div>
+      )}
+      <label className="block">
+        <span className="text-xs font-semibold text-stone-600">Message for {dest ? dest.name : 'them'}</span>
+        <textarea value={message} onChange={e => setMessage(e.target.value)} rows={3}
+          placeholder="What the customer said, when they’re available… Your last few call notes are included too."
+          className="mt-1 w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
+      </label>
+      <div className="text-[11px] text-stone-500">
+        {tier.needsWorkOrder
+          ? 'The case moves to Sent to Service until a work order opens on this serial number.'
+          : 'Parts wins are complete once sent — there’s no work order to wait for.'}
+      </div>
+    </ModalShell>
+  );
+}
+
+function CaseReasonModal({ title, subtitle, reasons, onSave, onCancel }) {
+  const [reason, setReason] = useState('');
+  const [note, setNote] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!reason) return setErr('Pick a reason.');
+    if (reason === 'Other' && !note.trim()) return setErr('Say why in the note.');
+    setBusy(true); try { await onSave({ reason, note }); } finally { setBusy(false); }
+  };
+  return (
+    <ModalShell label={title} icon={X} accent={{ soft: 'bg-stone-100', text: 'text-stone-600' }} wide={false}
+      onCancel={() => { if (!busy) onCancel(); }} title={title} subtitle={subtitle}
+      footer={<>
+        <button onClick={onCancel} disabled={busy} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium">Cancel</button>
+        <button onClick={save} disabled={busy} className="px-4 py-2 bg-stone-900 hover:bg-stone-800 disabled:opacity-60 text-white text-sm font-semibold rounded-md">{busy ? 'Saving…' : 'Save'}</button>
+      </>}>
+      <div className="space-y-1.5" role="radiogroup" aria-label="Reason">
+        {reasons.map(r => (
+          <label key={r} className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="radio" name="case-reason" checked={reason === r} onChange={() => { setReason(r); setErr(''); }}/> {r}
+          </label>
+        ))}
+      </div>
+      <textarea value={note} onChange={e => setNote(e.target.value)} rows={2} placeholder="Note (optional)"
+        className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
+      {err && <div className="text-xs text-rose-600">{err}</div>}
+    </ModalShell>
+  );
+}
+
+function WorkOrderModal({ serial, onSave, onCancel }) {
+  const [wo, setWo] = useState('');
+  const [busy, setBusy] = useState(false);
+  return (
+    <ModalShell label="Work order opened" icon={ClipboardList} accent={{ soft: 'bg-emerald-50', text: 'text-emerald-700' }} wide={false}
+      onCancel={() => { if (!busy) onCancel(); }} title="Work order opened"
+      subtitle={<>Service opened a work order on <span className="font-mono">{serial}</span>. Moves the case to Completed.</>}
+      footer={<>
+        <button onClick={onCancel} disabled={busy} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium">Cancel</button>
+        <button onClick={async () => { setBusy(true); try { await onSave({ workOrder: wo }); } finally { setBusy(false); } }} disabled={busy}
+          className="px-4 py-2 bg-stone-900 hover:bg-stone-800 disabled:opacity-60 text-white text-sm font-semibold rounded-md">{busy ? 'Saving…' : 'Confirm'}</button>
+      </>}>
+      <input value={wo} onChange={e => setWo(e.target.value)} placeholder="Work order number, e.g. M1063768 (optional)"
+        className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white font-mono"/>
+    </ModalShell>
+  );
+}
+
+/* ===================== TELEMATICS — SETTINGS ===================== */
+// Destinations: who a win is emailed to. Edited as a draft and saved together.
+// Up to four people each; To or CC (Sean, discovery call).
+const newDestinationId = () => `d_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+const toDraft = (list) => (list || []).map(d => ({
+  id: d.id, kind: d.kind, name: d.name || '', branch: d.branch || '',
+  people: [...(d.to || []).map(p => ({ ...p, role: 'to' })), ...(d.cc || []).map(p => ({ ...p, role: 'cc' }))]
+}));
+const fromDraft = (list) => list.map(d => ({
+  id: d.id, kind: d.kind, name: d.name.trim(), branch: d.branch,
+  to: d.people.filter(p => p.role === 'to' && (p.email || p.name)).map(p => ({ name: (p.name || '').trim(), email: (p.email || '').trim() })),
+  cc: d.people.filter(p => p.role === 'cc' && (p.email || p.name)).map(p => ({ name: (p.name || '').trim(), email: (p.email || '').trim() }))
+}));
+
+function TelematicsSettingsView({ settings, error, isAdmin, branches = [], onSave }) {
+  const saved = settings && Array.isArray(settings.destinations) ? settings.destinations : [];
+  const [draft, setDraft] = useState(() => toDraft(saved));
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // Follow the live doc until the user starts editing.
+  useEffect(() => { if (!dirty) setDraft(toDraft(saved)); }, [settings]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (error) {
+    return (
+      <div className="max-w-2xl px-4 py-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-800 flex gap-2">
+        <AlertCircle size={16} className="shrink-0 mt-0.5"/>
+        <div>Telematics settings couldn’t be loaded{error === 'permission-denied' ? ' (permission denied)' : ''}.
+          {isAdmin ? <> Run <code className="font-mono text-xs bg-white px-1 rounded">firebase deploy --only firestore:rules</code>, then reload.</> : ' Ask an admin.'}</div>
+      </div>
+    );
+  }
+  if (settings === undefined) return <div className="text-sm text-stone-500 py-8">Loading…</div>;
+
+  const edit = (fn) => { setDraft(d => fn(d.map(x => ({ ...x, people: x.people.map(p => ({ ...p })) })))); setDirty(true); };
+  const setDest = (id, k, v) => edit(d => d.map(x => x.id === id ? { ...x, [k]: v } : x));
+  const setPerson = (id, i, k, v) => edit(d => d.map(x => x.id === id ? { ...x, people: x.people.map((p, j) => j === i ? { ...p, [k]: v } : p) } : x));
+  const addPerson = (id) => edit(d => d.map(x => x.id === id && x.people.length < MAX_DESTINATION_RECIPIENTS
+    ? { ...x, people: [...x.people, { name: '', email: '', role: x.people.some(p => p.role === 'to') ? 'cc' : 'to' }] } : x));
+  const removePerson = (id, i) => edit(d => d.map(x => x.id === id ? { ...x, people: x.people.filter((_, j) => j !== i) } : x));
+  const addDest = (kind) => edit(d => [...d, { id: newDestinationId(), kind, name: '', branch: '', people: [{ name: '', email: '', role: 'to' }] }]);
+  const removeDest = (id) => { if (window.confirm('Remove this destination? Cases already sent there keep their history.')) edit(d => d.filter(x => x.id !== id)); };
+  const out = fromDraft(draft);
+  const problems = Object.fromEntries(out.map(d => [d.id, destinationProblems(d)]));
+  const blocking = out.some(d => problems[d.id].some(p => p !== 'No one to send to'));
+  const save = async () => { setBusy(true); try { if (await onSave({ destinations: out })) setDirty(false); } finally { setBusy(false); } };
+  const loadSheet = async () => { setBusy(true); try { await onSave({ destinations: TELEMATICS_SEED_DESTINATIONS }); setDirty(false); } finally { setBusy(false); } };
+
+  if (!saved.length && !draft.length) {
+    return (
+      <div className="max-w-2xl text-center py-12 border border-dashed border-stone-200 rounded-lg bg-white px-6">
+        <Send size={26} className="mx-auto text-stone-300 mb-3"/>
+        <div className="text-sm font-semibold text-stone-800">No destinations yet</div>
+        <div className="text-xs text-stone-500 mt-1 leading-relaxed">
+          Load the {TELEMATICS_SEED_DESTINATIONS.length} from Tanner’s CRM contact sheet — Service and Parts for each branch, plus an
+          empty Field Service to fill in. Two misspelled addresses (<span className="font-mono">bobctofindy.com</span>) were corrected to bobcatofindy.com.
+        </div>
+        <div className="mt-4 flex justify-center gap-2 flex-wrap">
+          <button onClick={loadSheet} disabled={busy}
+            className="px-3 py-2 bg-brand-600 hover:bg-brand-700 disabled:opacity-60 text-white text-sm font-semibold rounded-md">
+            {busy ? 'Loading…' : 'Load contact sheet'}
+          </button>
+          <button onClick={() => addDest('field')} className="px-3 py-2 border border-stone-200 hover:bg-stone-50 text-sm font-semibold rounded-md text-stone-700">Start from scratch</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-4xl space-y-6 pb-20">
+      <div className="text-xs text-stone-600 bg-stone-100 border border-stone-200 rounded-lg px-3.5 py-3 leading-relaxed">
+        When Carter wins a case he picks a destination and these people get the hand-off email. They don’t need an LMT account.
+        Up to {MAX_DESTINATION_RECIPIENTS} people each. If a destination has only CCs, the email goes To them.
+      </div>
+      {DESTINATION_KINDS.map(kind => (
+        <section key={kind.id} className="space-y-2">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-stone-900">{kind.label}</h3>
+            <button onClick={() => addDest(kind.id)} className="text-xs font-semibold text-brand-700 hover:underline flex items-center gap-1"><Plus size={12}/> Add {kind.label} destination</button>
+          </div>
+          {draft.filter(d => d.kind === kind.id).length === 0 && <div className="text-xs text-stone-400">None yet.</div>}
+          {draft.filter(d => d.kind === kind.id).map(d => (
+            <div key={d.id} className="bg-white border border-stone-200 rounded-lg p-3 space-y-2">
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input value={d.name} onChange={e => setDest(d.id, 'name', e.target.value)} placeholder="Name, e.g. Anderson Service" aria-label="Destination name"
+                  className="flex-1 px-3 py-1.5 border border-stone-200 rounded-md text-sm font-semibold"/>
+                <select value={d.branch} onChange={e => setDest(d.id, 'branch', e.target.value)} aria-label="Branch"
+                  className="sm:w-44 px-3 py-1.5 border border-stone-200 rounded-md text-sm bg-white">
+                  <option value="">Any branch</option>
+                  {branches.map(b => <option key={b} value={b}>{b}</option>)}
+                </select>
+                <button onClick={() => removeDest(d.id)} className="text-stone-400 hover:text-rose-600 p-1 self-end sm:self-center" title="Remove destination"><Trash2 size={14}/></button>
+              </div>
+              {d.people.map((p, i) => (
+                <div key={i} className="flex flex-col sm:flex-row gap-2 sm:items-center">
+                  <select value={p.role} onChange={e => setPerson(d.id, i, 'role', e.target.value)} aria-label="To or CC"
+                    className="sm:w-20 px-2 py-1.5 border border-stone-200 rounded-md text-xs font-semibold bg-white">
+                    <option value="to">To</option><option value="cc">CC</option>
+                  </select>
+                  <input value={p.name} onChange={e => setPerson(d.id, i, 'name', e.target.value)} placeholder="Name" aria-label="Name"
+                    className="sm:w-48 px-3 py-1.5 border border-stone-200 rounded-md text-sm"/>
+                  <input value={p.email} onChange={e => setPerson(d.id, i, 'email', e.target.value)} placeholder="email@bobcatofindy.com" aria-label="Email"
+                    className={`flex-1 px-3 py-1.5 border rounded-md text-sm font-mono ${p.email && !isEmail(p.email) ? 'border-rose-300 bg-rose-50' : 'border-stone-200'}`}/>
+                  <button onClick={() => removePerson(d.id, i)} className="text-stone-400 hover:text-rose-600 p-1 self-end sm:self-center" title="Remove"><X size={14}/></button>
+                </div>
+              ))}
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <button onClick={() => addPerson(d.id)} disabled={d.people.length >= MAX_DESTINATION_RECIPIENTS}
+                  className="text-xs font-semibold text-stone-600 hover:text-stone-900 disabled:text-stone-300 flex items-center gap-1"><UserPlus size={12}/> Add person</button>
+                {problems[d.id].length > 0 && (
+                  <div className={`text-xs ${problems[d.id].every(x => x === 'No one to send to') ? 'text-amber-700' : 'text-rose-700'}`}>{problems[d.id].join(' · ')}</div>
+                )}
+              </div>
+            </div>
+          ))}
+        </section>
+      ))}
+      {dirty && (
+        <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-8 z-30 bg-white border border-stone-200 shadow-lg rounded-lg px-4 py-3 flex items-center gap-3">
+          <div className="text-sm text-stone-700 flex-1">{blocking ? 'Fix the problems marked in red to save.' : 'Unsaved changes'}</div>
+          <button onClick={() => { setDraft(toDraft(saved)); setDirty(false); }} className="text-sm text-stone-600 hover:text-stone-900">Discard</button>
+          <button onClick={save} disabled={busy || blocking}
+            className="px-4 py-2 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-md">{busy ? 'Saving…' : 'Save'}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ===================== MODULE ACCESS ===================== */
 // The Leads / Telematics switches on a non-admin row of the Users page.
 // Admins always have both, so their rows don't show these.

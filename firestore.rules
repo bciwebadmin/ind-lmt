@@ -130,6 +130,28 @@ service cloud.firestore {
                             && request.resource.data.level in ['critical', 'noncritical', 'ignore'];
       allow delete:         if isAdmin();
     }
+    // telematicsCases/{id}: one machine's critical fault, worked by Carter.
+    // Same trust model as the lead records: any telematics user may create and
+    // work a case; a new one must name its real creator, createdBy never
+    // changes, status is one of the known ones. Email intake (step 3) and the
+    // hand-off function write with the Admin SDK. Deletion is admin-only.
+    function caseStatusOk() {
+      return request.resource.data.status in ['new', 'working', 'sent', 'completed', 'lost', 'closed'];
+    }
+    match /telematicsCases/{caseId} {
+      allow read:   if canUseTelematics();
+      allow create: if canUseTelematics() && caseStatusOk()
+                    && request.resource.data.createdBy == request.auth.uid;
+      allow update: if canUseTelematics() && caseStatusOk()
+                    && request.resource.data.createdBy == resource.data.createdBy;
+      allow delete: if isAdmin();
+    }
+    // telematicsConfig/settings: destinations (who a win is sent to). Edited
+    // by telematics users (Tanner) as well as admins (Sean, discovery call).
+    match /telematicsConfig/{docId} {
+      allow read:  if canUseTelematics();
+      allow write: if canUseTelematics();
+    }
 
     /* ===================== CONFIG ===================== */
     // Statuses, branches, scoring, lead routing and notification recipients all

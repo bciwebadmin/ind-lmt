@@ -132,6 +132,20 @@ export async function sendSalesRequestEmailViaFunction({ leadId }) {
  * is sent; the server reads the record itself. Never throws — the record is
  * already saved when this runs.
  */
+// Telematics hand-off: emails the destination a won case was sent to. The
+// server picks the recipients from telematicsConfig/settings and stamps the
+// result on the case (outcome.email).
+export async function sendTelematicsHandoffViaFunction(caseId) {
+  try {
+    const fn = httpsCallable(fns, 'sendTelematicsHandoff');
+    const res = await fn({ caseId });
+    return res?.data || { sent: false, reason: 'no-response' };
+  } catch (e) {
+    console.error('[telematics] hand-off callable failed:', e);
+    return { sent: false, reason: e && e.code === 'functions/internal' ? 'not-invokable' : 'error' };
+  }
+}
+
 export async function sendRecordEmailViaFunction({ kind, id }) {
   try {
     const fn = httpsCallable(fns, 'sendRecordEmail');

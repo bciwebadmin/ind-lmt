@@ -21,6 +21,7 @@ const { planRouting } = require('./routingRules');
 const { needsContactReminder, needsFollowUpReminder, followUpDateDue, indyToday, completedAtOf, daysSince, groupByAssignee } = require('./reminderRules');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const selfRepair = require('./selfRepairRules');
+const telematics = require('./telematicsRules');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -2008,6 +2009,187 @@ exports.sendRecordEmail = onCall(
     }
   }
 );
+
+/* ===================== TELEMATICS HAND-OFF ===================== */
+// Carter won a telematics case to Field Service / a branch shop / Parts
+// (CLAUDE.md → "Telematics"). The client has already saved the win on the
+// case; this emails that destination's people. Recipients are read here from
+// telematicsConfig/settings — never taken from the caller. The result is
+// stamped on the case (outcome.email) so the case page shows it.
+exports.sendTelematicsHandoff = onCall(
+  {
+    secrets: [RESEND_API_KEY],
+    region: 'us-south1'
+  },
+  async (request) => {
+    const callerId = request.auth?.uid;
+    if (!callerId) throw new HttpsError('unauthenticated', 'You must be signed in.');
+    const caseId = String((request.data || {}).caseId || '');
+    if (!caseId || caseId.length > 200 || caseId.includes('/')) throw new HttpsError('invalid-argument', 'caseId is required.');
+
+    const callerDoc = await db.collection('users').doc(callerId).get();
+    const caller = callerDoc.exists ? callerDoc.data() : null;
+    if (!telematics.canUseTelematics(caller)) throw new HttpsError('permission-denied', 'Telematics access is required.');
+
+    const ref = db.collection('telematicsCases').doc(caseId);
+    const snap = await ref.get();
+    const c = snap.exists ? snap.data() : null;
+    const bad = telematics.handoffError(c);
+    if (bad) throw new HttpsError('failed-precondition', bad);
+
+    const stamp = async (email) => {
+      const at = new Date().toISOString();
+      await ref.update({
+        'outcome.email': { ...email, at },
+        history: admin.firestore.FieldValue.arrayUnion({
+          id: uid('h'), type: 'emailed', at, by: callerId, status: email.status,
+          to: email.to || [], cc: email.cc || [], ...(email.reason ? { reason: email.reason } : {})
+        })
+      });
+    };
+
+    let dest = null;
+    try {
+      const cfg = await db.collection('telematicsConfig').doc('settings').get();
+      const list = cfg.exists && Array.isArray(cfg.data().destinations) ? cfg.data().destinations : [];
+      dest = list.find(d => d && d.id === c.outcome.destinationId) || null;
+    } catch (err) {
+      console.error('[telematics] settings read failed', err);
+    }
+    if (!dest) {
+      await stamp({ status: 'failed', reason: 'no-destination' });
+      return { sent: false, reason: 'no-destination' };
+    }
+    const { to, cc } = telematics.resolveRecipients(dest);
+    if (!to.length) {
+      console.warn(`[telematics] ${dest.name} has no recipients — not sent`);
+      await stamp({ status: 'failed', reason: 'no-recipients', destination: dest.name });
+      return { sent: false, reason: 'no-recipients' };
+    }
+
+    const senderEmail = caller.email && caller.email.includes('@') ? caller.email.trim() : '';
+    const html = buildTelematicsHandoffHtml({ c, dest, sender: caller });
+    try {
+      const resend = new Resend(RESEND_API_KEY.value());
+      const message = { from: EMAIL_FROM.value(), to, subject: telematics.handoffSubject(c), html };
+      if (cc.length) message.cc = cc;
+      if (senderEmail) message.reply_to = senderEmail;
+      const result = await resend.emails.send(message);
+      if (result.error) {
+        console.error('[telematics] Resend error:', result.error);
+        await stamp({ status: 'failed', reason: 'send-failed', destination: dest.name, to, cc });
+        return { sent: false, reason: 'send-failed' };
+      }
+      await stamp({ status: 'sent', destination: dest.name, to, cc, id: (result.data && result.data.id) || '' });
+      console.log(`[telematics] Hand-off ${caseId} sent to ${dest.name} (${to.length} to, ${cc.length} cc)`);
+      return { sent: true, to: to.length, cc: cc.length };
+    } catch (err) {
+      console.error('[telematics] hand-off send failed', err);
+      try { await stamp({ status: 'failed', reason: 'send-failed', destination: dest.name, to, cc }); } catch { /* already logged */ }
+      return { sent: false, reason: 'send-failed' };
+    }
+  }
+);
+
+function buildTelematicsHandoffHtml({ c, dest, sender }) {
+  const row = (label, value) => {
+    const v = value === undefined || value === null ? '' : String(value).trim();
+    if (!v) return '';
+    return `<tr>
+      <td width="150" style="width: 150px; padding: 5px 12px 5px 0; font-size: 13px; color: #78716c; vertical-align: top;">${escapeHtml(label)}</td>
+      <td style="padding: 5px 0; font-size: 14px; color: #1c1917; font-weight: 600; white-space: pre-wrap;">${escapeHtml(v.slice(0, 2000))}</td>
+    </tr>`;
+  };
+  const block = (title, rowsHtml) => rowsHtml ? `<tr>
+    <td style="padding: 0 28px 16px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #fafaf9; border: 1px solid #e7e5e4; border-radius: 6px;">
+        <tr><td style="padding: 16px 20px;">
+          <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px; color: #78716c; font-weight: 700; padding-bottom: 6px;">${title}</div>
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">${rowsHtml}</table>
+        </td></tr>
+      </table>
+    </td>
+  </tr>` : '';
+  const button = (href, label) => href
+    ? `<a href="${escapeHtml(href)}" style="display: inline-block; background-color: #d62b00; color: #ffffff; text-decoration: none; padding: 11px 22px; border-radius: 6px; font-size: 14px; font-weight: 700; margin: 4px;">${escapeHtml(label)}</a>`
+    : '';
+
+  const tier = telematics.WIN_TIERS.find(t => t.id === c.outcome.tier);
+  const cust = c.customer || {};
+  const loc = c.location || {};
+  const fault = c.fault || {};
+  const maps = telematics.mapsUrl(loc.lat, loc.lng);
+  const asset = telematics.assetUrl(c.serial);
+  const others = (Array.isArray(fault.otherCodes) ? fault.otherCodes : [])
+    .map(o => [o.severity, o.code, o.summary].filter(Boolean).join(' - ')).join('\n');
+  const notes = (Array.isArray(c.notes) ? c.notes : []).slice(-5)
+    .map(n => `${fmtDateTime(n.at)}: ${n.text}`).join('\n\n');
+  const senderName = (sender && sender.name) || 'Our telematics specialist';
+
+  const customerRows = row('Customer', cust.name) + row('Phone', cust.phone) + row('Address', cust.address)
+    + row('Owner contact', [cust.ownerContact, cust.ownerEmail].filter(Boolean).join(' · '));
+  const machineRows = row('Model', c.model) + row('Serial number', c.serial)
+    + row('Hours', c.hours != null ? String(c.hours) : '') + row('Inventory status', c.inventoryStatus);
+  const faultRows = row('Code', [fault.severity, fault.code].filter(Boolean).join(' - '))
+    + row('Summary', fault.summary) + row('Other active codes', others)
+    + row('Started', fault.startAt ? fmtDateTime(fault.startAt) : '');
+  const locationRows = row('Machine address', loc.address) + row('Near', loc.city)
+    + row('Coordinates', maps ? `${loc.lat}, ${loc.lng}` : '');
+  const callRows = row(`Message from ${senderName}`, c.outcome.message) + row('Call notes', notes);
+
+  return `<!DOCTYPE html>
+<html>
+<body style="margin: 0; padding: 0; background-color: #f5f5f4; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #f5f5f4; padding: 24px 0;">
+    <tr><td align="center">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background-color: #1c1917; padding: 20px 28px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="padding-right: 12px;">
+                  <div style="width: 36px; height: 36px; background-color: #ff3300; display: inline-block; text-align: center; line-height: 36px; font-size: 22px; font-weight: 800; color: #ffffff; border-radius: 4px;">B</div>
+                </td>
+                <td>
+                  <div style="color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">BOBCAT OF INDY</div>
+                  <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">Telematics hand-off</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 28px 28px 16px;">
+            <div style="font-size: 20px; font-weight: 700; color: #1c1917;">${escapeHtml(tier ? tier.label : 'Hand-off')}: ${escapeHtml(cust.name || 'Customer')}</div>
+            <div style="font-size: 14px; color: #57534e; margin-top: 6px; line-height: 1.5;">
+              ${escapeHtml(senderName)} spoke with this customer about a Bobcat critical fault code and is passing it to ${escapeHtml(dest.name)}.
+              ${tier && tier.needsWorkOrder ? 'Please contact the customer and open a work order on this serial number — the LMT watches the WIP for it.' : 'Please contact the customer about the parts they need.'}
+              Reply to this email to reach ${escapeHtml(senderName)}.
+            </div>
+          </td>
+        </tr>
+        ${block('Customer', customerRows)}
+        ${block('Machine', machineRows)}
+        ${block('Fault', faultRows)}
+        ${block('Location', locationRows)}
+        ${block('From the call', callRows)}
+        <tr>
+          <td style="padding: 8px 28px 24px; text-align: center;">
+            ${button(maps, 'Open in Google Maps')}
+            ${button(asset, 'Bobcat asset details')}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 0 28px 28px; text-align: center; color: #a8a29e; font-size: 11px;">
+            You received this because you are on the ${escapeHtml(dest.name)} list for Bobcat of Indy telematics hand-offs. To change who gets these, ask the LMT admin.
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
 
 // "3 files — open the LMT to view: a.pdf, b.jpg, c.docx". Files stay in
 // Storage behind sign-in; the email only names them.

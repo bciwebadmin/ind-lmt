@@ -455,8 +455,8 @@ on that serial, or the case gets bumped. Same app, its own data, its own
 access (see Roles → module access). Discovery notes and samples are in the
 repo's `telemetry/` folder on Erin's PC (not committed — customer data).
 
-Build order: **1. access + code list (done)** · 2. board, case pages, win
-tiers, destinations, handoff emails · 3. email intake (parser + Google
+Build order: **1. access + code list (done)** · **2. board, case pages, win
+tiers, destinations, hand-off emails (done)** · 3. email intake (parser + Google
 reverse geocoding, `GOOGLE_MAPS_KEY` secret) · 4. WIP fetch from the web
 server (FTP'd there; protected URL), serial matching, bumps, escalation.
 
@@ -473,6 +473,35 @@ server (FTP'd there; protected URL), serial matching, bumps, escalation.
   the empty Code List ("Load starter list"); never overwrites existing codes.
   Don't hand-edit it.
 - The rule's level list and `CODE_LEVEL_IDS` must match — a test checks.
+- **Cases** — `telematicsCases/{id}`. Board tabs derive from `status`
+  (`CASE_TABS`; never store a tab): New · Working · Sent to Service ·
+  Completed · Archive (lost, closed — one archive with filters, Tanner).
+  Status changes are pure (`winChange`, `loseChange`, `closeChange`,
+  `confirmWorkOrderChange`, `reopenChange`, `startWorkingChange`) and return
+  `{ patch, event }`; history and notes are appended with `arrayUnion`
+  (`updateTelematicsCase`). A note on a New case moves it to Working. The
+  rules' status list must match `CASE_STATUS_IDS` — a test checks.
+- **Win tiers** (`WIN_TIERS`): Field Service and Shop → *Sent to service*
+  (wait for a work order on the serial — manual "Work order opened" until
+  step 4's WIP match); Parts → *Completed* at once (no serial to match).
+- **Destinations** — `telematicsConfig/settings.destinations[]`
+  `{ id, kind: field|service|parts, name, branch, to[], cc[] }`, ≤ 4 people,
+  plain emails (service managers never log in). Edited in Telematics
+  Settings by any telematics user. Starter list from Tanner's contact sheet
+  (`TELEMATICS_SEED_DESTINATIONS`; two `bobctofindy.com` typos corrected).
+  `resolveRecipients`: valid + de-duplicated; **only CCs → sent To the CC**.
+  The win dialog pre-selects the case's branch.
+- **Hand-off email** — callable `sendTelematicsHandoff({ caseId })`
+  (us-south1, in `PROBES`). It checks telematics access, re-reads the case,
+  resolves recipients **server-side** from settings (never from the
+  caller), reply-to the sender, and stamps `outcome.email`
+  (`sent` / `failed` + reason) and a history entry. The client saves the win
+  first, then calls it; "Send again" re-calls it. Pure server rules in
+  `functions/telematicsRules.js` — `WIN_TIERS`, `resolveRecipients`,
+  `mapsUrl`, `assetUrl` are duplicated from `src/lib/telematics.js` and a
+  test fails if they drift. New callable → needs the Cloud Run `allUsers`
+  invoker binding (`sendtelematicshandoff`, us-south1) after its first deploy.
+- `?case=<id>` opens a case page (for step 4's bump emails).
 - Known from the samples: the email gives serial, model, hours, nearest city
   **and lat/long**, customer + address, primary code ("CRITICAL - M0217") and
   other active codes, and the servicing dealer's AR number (2000007726 Indy,

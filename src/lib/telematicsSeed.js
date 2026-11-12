@@ -128,3 +128,48 @@ export const TELEMATICS_SEED_CODES = [
   {"code": "U00434605", "summary": "DEF Inlet Line Heater Short to Ground or Open Circuit", "seenCount": 1, "topModels": ["T770"], "lastSeen": "2026-07-15"},
   {"code": "U10438509", "summary": "Nox Post-Treatment Fault", "seenCount": 1, "topModels": ["T770 T4"], "lastSeen": "2026-08-26"}
 ];
+
+// Starter destinations, from Tanner's "CRM Contact Sheet" (Nov 12, 2026).
+// Loaded once from Telematics → Settings ("Load contact sheet"); after that
+// they live in telematicsConfig/settings and are edited there.
+// Corrections made on the way in (flag them to Erin, don't silently re-add):
+//   - sfeldhake@ / rlinhart@ were spelled "bobctofindy.com" on the sheet →
+//     bobcatofindy.com, the domain every other Indy address uses.
+//   - Indy North service has no To yet ("waiting on new hire"): its CC,
+//     Nate Baxter, is sent To until then (resolveRecipients).
+//   - Field Service had no one on the sheet: added empty, to be filled in.
+// Not changed: Dale Brooks is listed as mbrooks@bobcatofanderson.com.
+const p = (name, email) => ({ name, email });
+export const TELEMATICS_SEED_DESTINATIONS = [
+  { id: 'field-service', kind: 'field', name: 'Field Service', branch: '', to: [], cc: [] },
+
+  { id: 'indy-service', kind: 'service', name: 'Indy South Service', branch: 'Indy',
+    to: [p('Bob Barth', 'bbarth@bobcatofindy.com'), p('Wayne Barry', 'Wbarry@bobcatofindy.com')],
+    cc: [p('Rob Linhart', 'rlinhart@bobcatofindy.com')] },
+  { id: 'indy-parts', kind: 'parts', name: 'Indy South Parts', branch: 'Indy',
+    to: [p('Steve Feldhake', 'sfeldhake@bobcatofindy.com'), p('Jeff Hardcastle', 'Jhardcastle@bobcatofindy.com'), p('Adam Walters', 'awalters@bobcatofindy.com')],
+    cc: [p('Rob Linhart', 'rlinhart@bobcatofindy.com')] },
+
+  { id: 'anderson-service', kind: 'service', name: 'Anderson Service', branch: 'Anderson',
+    to: [p('Brandi Lawyer', 'blawyer@bobcatofanderson.com'), p('Nathan Luck', 'NLuck@bobcatofanderson.com')],
+    cc: [p('Jack Binegar', 'jbinegar@bobcatofanderson.com')] },
+  { id: 'anderson-parts', kind: 'parts', name: 'Anderson Parts', branch: 'Anderson',
+    to: [p('Dale Brooks', 'mbrooks@bobcatofanderson.com'), p('Gary Craig', 'gcraig@bobcatofanderson.com'), p('Alex Hueston', 'AHueston@bobcatofindy.com')],
+    cc: [p('Jack Binegar', 'jbinegar@bobcatofanderson.com')] },
+
+  { id: 'indy-north-service', kind: 'service', name: 'Indy North Service', branch: 'Indy North',
+    to: [], cc: [p('Nate Baxter', 'nbaxter@bobcatofindy.com')] },
+  { id: 'indy-north-parts', kind: 'parts', name: 'Indy North Parts', branch: 'Indy North',
+    to: [p('Ricardo Jimenez', 'RJimenez@bobcatofindy.com'), p('Max Thurman', 'MJThurman@bobcatofindy.com')],
+    cc: [p('Nate Baxter', 'nbaxter@bobcatofindy.com')] },
+
+  { id: 'ellettsville-service', kind: 'service', name: 'Ellettsville Service', branch: 'Ellettsville',
+    to: [p('Kristy Sosbe', 'ksosbe@bobcatofellettsville.com')], cc: [p('Michael Butler', 'MButler@bobcatofellettsville.com')] },
+  { id: 'ellettsville-parts', kind: 'parts', name: 'Ellettsville Parts', branch: 'Ellettsville',
+    to: [p('Laura Hughes', 'lhughes@bobcatofellettsville.com')], cc: [p('Michael Butler', 'MButler@bobcatofellettsville.com')] },
+
+  { id: 'columbus-service', kind: 'service', name: 'Columbus Service', branch: 'Columbus',
+    to: [p('Derek Helton', 'dhelton@bobcatofcolumbus.com')], cc: [p('Chase Neville', 'CNeville@bobcatofcolumbus.com')] },
+  { id: 'columbus-parts', kind: 'parts', name: 'Columbus Parts', branch: 'Columbus',
+    to: [p('Kellen Hottell', 'khottell@bobcatofindy.com')], cc: [p('Chase Neville', 'CNeville@bobcatofcolumbus.com')] }
+];

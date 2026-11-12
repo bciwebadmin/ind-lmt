@@ -749,6 +749,89 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   })());
 }
 
+/* ---------- Telematics step 2: cases, wins, destinations, hand-off ---------- */
+{
+  const T = await import('../src/lib/telematics.js');
+  const { TELEMATICS_SEED_DESTINATIONS: dests } = await import('../src/lib/telematicsSeed.js');
+  const { createRequire } = await import('node:module');
+  const R = createRequire(import.meta.url)('../functions/telematicsRules.js');
+  const A = await import('../src/lib/access.js');
+
+  // Tabs derive from status
+  check('cases: every status has exactly one tab', T.CASE_STATUS_IDS.every(s => T.CASE_TABS.filter(t => t.statuses.includes(s)).length === 1));
+  check('cases: tab of a case', T.caseTab({ status: 'sent' }) === 'sent' && T.caseTab({ status: 'lost' }) === 'archive' && T.caseTab({}) === 'new');
+  check('cases: telematics-only users land on the board', A.TELEMATICS_DEFAULT_VIEW === A.TELEMATICS_BOARD_VIEW && A.TELEMATICS_VIEWS.includes(A.TELEMATICS_SETTINGS_VIEW));
+
+  // Client and server copies agree
+  check('drift: WIN_TIERS match the server', JSON.stringify(T.WIN_TIERS) === JSON.stringify(R.WIN_TIERS));
+  const recFixtures = [
+    { to: [{ email: 'a@x.com' }, { email: 'A@x.com' }, { email: 'bad' }], cc: [{ email: 'a@x.com' }, { email: 'c@x.com' }] },
+    { to: [], cc: [{ email: 'nate@x.com' }] },
+    { to: [], cc: [] }, null, { to: [{ email: ' b@y.com ' }] }
+  ];
+  check('drift: resolveRecipients matches the server', recFixtures.every(f => JSON.stringify(T.resolveRecipients(f)) === JSON.stringify(R.resolveRecipients(f))));
+  check('drift: mapsUrl / assetUrl match the server', [[40.13, -86.22], ['', ''], [null, 1], [91, 0], ['x', 'y']].every(([a, b]) => T.mapsUrl(a, b) === R.mapsUrl(a, b)) && T.assetUrl('AT6330022') === R.assetUrl('AT6330022'));
+  const rules = readFileSync(join(root, 'firestore.rules'), 'utf8');
+  const sm = rules.match(/request\.resource\.data\.status in \[([^\]]+)\]/);
+  check('drift: rules case statuses match CASE_STATUSES', sm && JSON.stringify(sm[1].split(',').map(x => x.trim().replace(/'/g, ''))) === JSON.stringify(T.CASE_STATUS_IDS));
+  check('rules: cases and settings need telematics access', /match \/telematicsCases\/\{caseId\} \{\s*allow read:\s+if canUseTelematics\(\)/.test(rules) && /match \/telematicsConfig\/\{docId\} \{\s*allow read:\s+if canUseTelematics\(\)/.test(rules));
+
+  // Recipients
+  const r1 = T.resolveRecipients(recFixtures[0]);
+  check('recipients: valid, de-duplicated, CC never repeats a To', JSON.stringify(r1) === JSON.stringify({ to: ['a@x.com'], cc: ['c@x.com'], promotedCc: false }));
+  const r2 = T.resolveRecipients(recFixtures[1]);
+  check('recipients: only a CC → sent To the CC (Indy North)', r2.to[0] === 'nate@x.com' && r2.cc.length === 0 && r2.promotedCc);
+  check('recipients: none → nothing', T.resolveRecipients({}).to.length === 0);
+
+  // Destinations from the contact sheet
+  check('seed dests: unique ids, known kinds', new Set(dests.map(d => d.id)).size === dests.length && dests.every(d => T.DESTINATION_KINDS.some(k => k.id === d.kind)));
+  check('seed dests: every address valid, none misspelled', dests.every(d => [...d.to, ...d.cc].every(p => T.isEmail(p.email) && !/bobctofindy/i.test(p.email))));
+  check('seed dests: at most 4 people each', dests.every(d => d.to.length + d.cc.length <= T.MAX_DESTINATION_RECIPIENTS));
+  check('seed dests: Service and Parts for every branch', ['Anderson', 'Columbus', 'Ellettsville', 'Indy', 'Indy North'].every(b => ['service', 'parts'].every(k => dests.some(d => d.branch === b && d.kind === k))));
+  check('seed dests: Field Service is there, flagged empty', T.destinationProblems(dests.find(d => d.kind === 'field')).includes('No one to send to'));
+  check('seed dests: Indy North service sends to Nate Baxter until the hire', T.resolveRecipients(dests.find(d => d.id === 'indy-north-service')).to[0] === 'nbaxter@bobcatofindy.com');
+  check('dests: problems', T.destinationProblems({ name: '', to: [{ email: 'x' }] }).length === 3 && T.destinationProblems(dests[1]).length === 0
+    && T.destinationProblems({ name: 'n', to: [1, 2, 3, 4, 5].map(i => ({ email: `p${i}@x.com` })) }).includes('At most 4 people'));
+  check('dests: suggested by branch, else first of the kind', T.suggestedDestination('shop', 'Anderson', dests).id === 'anderson-service'
+    && T.suggestedDestination('parts', 'Nowhere', dests).kind === 'parts' && T.suggestedDestination('field', 'Indy', dests).id === 'field-service'
+    && T.suggestedDestination('bogus', 'Indy', dests) === null);
+
+  // Status changes
+  const field = dests.find(d => d.kind === 'field'), shop = dests.find(d => d.id === 'indy-service'), parts = dests.find(d => d.id === 'indy-parts');
+  const w = T.winChange({ tierId: 'field', destination: field, message: ' hi ' }, 'carter', 'NOW');
+  check('win: field → Sent to service, email pending', w.patch.status === 'sent' && w.patch.outcome.result === 'won' && w.patch.outcome.destinationId === 'field-service'
+    && w.patch.outcome.message === 'hi' && w.patch.outcome.email.status === 'pending' && !w.patch.completedAt && w.event.type === 'won');
+  check('win: shop → Sent to service', T.winChange({ tierId: 'shop', destination: shop }, 'c', 'NOW').patch.status === 'sent');
+  check('win: parts → Completed (no work order to wait for)', (() => { const x = T.winChange({ tierId: 'parts', destination: parts }, 'c', 'NOW'); return x.patch.status === 'completed' && x.patch.completedAt === 'NOW'; })());
+  const throws = (fn) => { try { fn(); return false; } catch { return true; } };
+  check('win: destination must match the tier', throws(() => T.winChange({ tierId: 'field', destination: parts }, 'c')) && throws(() => T.winChange({ tierId: 'x', destination: field }, 'c')) && throws(() => T.winChange({ tierId: 'shop' }, 'c')));
+  check('lost: needs a known reason, Other needs a note', throws(() => T.loseChange({ reason: 'meh' }, 'c')) && throws(() => T.loseChange({ reason: 'Other' }, 'c'))
+    && T.loseChange({ reason: 'Customer declined' }, 'c', 'N').patch.status === 'lost');
+  check('close: archive with a reason', T.closeChange({ reason: 'No action needed' }, 'c', 'N').patch.closure.reason === 'No action needed' && throws(() => T.closeChange({ reason: '' }, 'c')));
+  check('work order: completes the case', (() => { const x = T.confirmWorkOrderChange({ workOrder: ' M1 ' }, 'c', 'N'); return x.patch.status === 'completed' && x.patch.workOrder.number === 'M1' && x.patch.workOrder.source === 'manual'; })());
+  check('reopen: back to Working', T.reopenChange('c', 'N').patch.status === 'working');
+  check('every change writes a status the rules accept', [w, T.startWorkingChange('c'), T.reopenChange('c'), T.closeChange({ reason: 'No action needed' }, 'c'), T.loseChange({ reason: 'Customer declined' }, 'c'), T.confirmWorkOrderChange({}, 'c')].every(x => T.CASE_STATUS_IDS.includes(x.patch.status)));
+  check('note: empty note is nothing', T.noteEntry('  ', 'c') === null && T.noteEntry(' x ', 'c', 'N').text === 'x');
+
+  // Manual case
+  const ok = T.buildManualCase({ customerName: 'Foxy', serial: 'at6330022', code: 'm0217', lat: '40.1', lng: '-86.2', hours: '1702.3', branch: 'Indy North' }, 'u', 'N');
+  check('manual case: valid one builds', ok.errors.length === 0 && ok.doc.serial === 'AT6330022' && ok.doc.fault.code === 'M0217' && ok.doc.status === 'new'
+    && ok.doc.hours === 1702.3 && ok.doc.location.lat === 40.1 && ok.doc.createdBy === 'u' && ok.doc.history[0].type === 'created');
+  check('manual case: required fields and bad input', T.buildManualCase({}, 'u').errors.length === 2 && T.buildManualCase({ customerName: 'x', serial: 'AT6330022', code: 'M/1' }, 'u').errors.length === 1
+    && T.buildManualCase({ customerName: 'x', serial: 'AT6330022', lat: '200', lng: '0' }, 'u').errors.length === 1);
+  check('search: serial, code, phone digits', T.caseMatchesQuery(ok.doc, 'at633') && T.caseMatchesQuery(ok.doc, 'm0217 foxy')
+    && T.caseMatchesQuery({ customer: { phone: '+1 317 647 2102' } }, '3176472102') && !T.caseMatchesQuery(ok.doc, 'zzz'));
+  check('counts and sort', T.caseCounts([{ status: 'new' }, { status: 'lost' }, { status: 'closed' }]).archive === 2
+    && T.sortCases([{ id: 'a', fault: { startAt: '2026-01-01' } }, { id: 'b', fault: { startAt: '2026-02-01' } }])[0].id === 'b');
+
+  // Server-side guards
+  check('server: only telematics users send', R.canUseTelematics({ role: 'admin' }) && R.canUseTelematics({ telematicsAccess: true }) && !R.canUseTelematics({ role: 'user' }) && !R.canUseTelematics(null));
+  check('server: only a won case with a destination is sent', R.handoffError(null) !== '' && R.handoffError({ outcome: { result: 'lost' } }) !== ''
+    && R.handoffError({ outcome: { result: 'won', destinationId: 'x', tier: 'nope' } }) !== '' && R.handoffError({ outcome: { result: 'won', destinationId: 'x', tier: 'field' } }) === '');
+  check('server: subject', R.handoffSubject({ model: 'T770 T4', serial: 'AT6330022', customer: { name: 'FOXY LNDSCP LLC' }, fault: { code: 'M0217', summary: 'Hydraulic/Hydrostatic Filter Plugged' }, outcome: { tier: 'field' } })
+    === 'Telematics: Field Service — FOXY LNDSCP LLC — T770 T4 AT6330022 — M0217 Hydraulic/Hydrostatic Filter Plugged');
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

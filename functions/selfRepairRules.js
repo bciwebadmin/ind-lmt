@@ -186,7 +186,8 @@ const PROBES = [
   { name: 'adminResetUserPassword', region: 'us-south1', kind: 'callable' },
   { name: 'reassignUserLeads', region: 'us-south1', kind: 'callable' },
   { name: 'restoreLoaLeadsForUser', region: 'us-south1', kind: 'callable' },
-  { name: 'runHealthCheckNow', region: 'us-south1', kind: 'callable' }
+  { name: 'runHealthCheckNow', region: 'us-south1', kind: 'callable' },
+  { name: 'sendTelematicsHandoff', region: 'us-south1', kind: 'callable' }
 ];
 
 function probeUrl(probe, projectId) {

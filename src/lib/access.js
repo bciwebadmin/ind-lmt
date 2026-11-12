@@ -10,11 +10,13 @@
 // Admins always have both. A user with leadAccess: false is "telematics only"
 // (Carter): fully blocked from lead data, in the rules as well as the UI (Erin).
 
+export const TELEMATICS_BOARD_VIEW = 'telematics-board';
 export const TELEMATICS_CODES_VIEW = 'telematics-codes';
-// Every Telematics view. Later steps add the board here.
-export const TELEMATICS_VIEWS = [TELEMATICS_CODES_VIEW];
-// Where a telematics-only user lands.
-export const TELEMATICS_DEFAULT_VIEW = TELEMATICS_CODES_VIEW;
+export const TELEMATICS_SETTINGS_VIEW = 'telematics-settings';
+// Every Telematics view.
+export const TELEMATICS_VIEWS = [TELEMATICS_BOARD_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW];
+// Where a telematics-only user lands: Carter lives on the board (Tanner).
+export const TELEMATICS_DEFAULT_VIEW = TELEMATICS_BOARD_VIEW;
 // Shown to an account with neither switch on.
 export const NO_ACCESS_VIEW = 'no-access';
 
