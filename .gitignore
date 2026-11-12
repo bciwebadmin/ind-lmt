@@ -43,3 +43,6 @@ desktop.ini
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Telematics discovery material: real customer data and sample emails (Nov 2026)
+telemetry/

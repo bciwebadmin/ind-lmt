@@ -59,7 +59,7 @@ because it was consistently wrong. `nslookup` a domain before writing it down.
 
 ## App.jsx is one file on purpose
 
-~8,300 lines. Components, memos, helpers and Firestore subscriptions all inline.
+~11,900 lines. Components, memos, helpers and Firestore subscriptions all inline.
 This repo values greppability over modularity. **Do not split it up** unless
 explicitly asked.
 
@@ -446,6 +446,41 @@ the export style. Change one, change the other.
 **us-south1** alongside Firestore. Originally to preserve legacy Zapier URLs;
 kept so the forks stay diffable. Don't "fix" it in one fork only.
 
+## Telematics (Nov 2026 — in progress)
+
+A separate module for Tanner's telematics specialist (Carter): Bobcat critical
+fault-code emails become cases; Carter calls the customer, wins it to Field
+Service / a branch shop / Parts; the WIP report confirms a work order opened
+on that serial, or the case gets bumped. Same app, its own data, its own
+access (see Roles → module access). Discovery notes and samples are in the
+repo's `telemetry/` folder on Erin's PC (not committed — customer data).
+
+Build order: **1. access + code list (done)** · 2. board, case pages, win
+tiers, destinations, handoff emails · 3. email intake (parser + Google
+reverse geocoding, `GOOGLE_MAPS_KEY` secret) · 4. WIP fetch from the web
+server (FTP'd there; protected URL), serial matching, bumps, escalation.
+
+- Pure rules in `src/lib/telematics.js` (tested). Views: `TELEMATICS_VIEWS`
+  in `access.js`; sidebar group **Telematics**.
+- **Code list** — `telematicsCodes/{code}` (doc id = the code, upper case,
+  letters/digits/dashes only — `isValidCode`). `level`: `critical` |
+  `noncritical` | `ignore`; `reviewed` + `reviewedBy` / `reviewedAt`.
+  Bobcat labels every email CRITICAL, so this list is the real filter.
+  **Unknown or unreviewed codes count as critical** (Erin) — `classifyCode`.
+  Any telematics user may classify or add a code; only admins delete.
+- Starter list: `src/lib/telematicsSeed.js`, generated from Tanner's Critical
+  Code Log (5,019 emails, Jun 17 – Nov 12 2026, 115 codes). Loaded once from
+  the empty Code List ("Load starter list"); never overwrites existing codes.
+  Don't hand-edit it.
+- The rule's level list and `CODE_LEVEL_IDS` must match — a test checks.
+- Known from the samples: the email gives serial, model, hours, nearest city
+  **and lat/long**, customer + address, primary code ("CRITICAL - M0217") and
+  other active codes, and the servicing dealer's AR number (2000007726 Indy,
+  2000008174 Indy North, 2000008159 Anderson). The asset link is
+  `https://dealer.bobcat.com/dmiq/AssetDetails/<serial lower-case>` — build
+  it; don't store Bobcat's expiring tracking links. WIP order prefixes look
+  like M1–M6 = branch shop, T* = field truck (to confirm with Tanner).
+
 ## Intake rules (Indy)
 
 `functions/intakeRules.js` is pure and tested: web leads are always `New`
@@ -474,6 +509,27 @@ Two tiers only — `admin` and `user`. `ADMIN_ONLY_VIEWS` at the top of `App.jsx
 is the single source of truth: reports, users, settings. Lead Routing now
 lives inside Settings, so it is admin-only too (it used to give reps a
 read-only overview).
+
+**Module access (Nov 2026).** On top of the role, each `users/{uid}` doc has
+two switches, set on the Users page (Leads / Telematics pills; the add-user
+form has an Access preset). Logic in `src/lib/access.js` (pure, tested):
+
+- `leadAccess` — Lead Management. **Absent = on**, so older accounts need no
+  migration. `false` = **telematics only**.
+- `telematicsAccess` — the Telematics module. Absent = off.
+- Admins always have both.
+
+A telematics-only account is **fully blocked from lead data** (Erin): the rules
+(`canUseLeads()`) refuse `leads`, `requests`, `tradeIns`, `finance`; the app
+doesn't subscribe to them (that effect is keyed on `leadAccess`, like the
+access-request one is keyed on role); + New, search and every lead view are
+hidden; `canAccessView(view, user)` (it takes the **user** now, not the role)
+bounces deep links. `configWithUsers.users` holds only people with lead access
+(`leadUsers`), so no assignment dropdown, routing slot or report offers a
+telematics-only account; the Users page gets everyone (`allUsersConfig`).
+Storage attachments are still readable by any signed-in user (Storage rules
+can't cheaply read Firestore) — paths aren't listed anywhere a telematics user
+can see, but it isn't enforced.
 
 ## Working from the user's local copy
 

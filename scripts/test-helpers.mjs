@@ -662,6 +662,93 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('repair: config body is not for the agent', S.issueBody({ ...inc, kind: 'config', source: 'health' }, { ai: false }).includes('not sent to the repair agent'));
 }
 
+/* ---------- Module access: Lead Management vs Telematics (Nov 2026) ---------- */
+{
+  const A = await import('../src/lib/access.js');
+  const admin = { id: 'a', role: 'admin', leadAccess: false, telematicsAccess: false };
+  const rep = { id: 'r', role: 'user' };                                   // an account from before the switches
+  const both = { id: 'b', role: 'user', telematicsAccess: true };
+  const tele = { id: 't', role: 'user', leadAccess: false, telematicsAccess: true };
+  const none = { id: 'n', role: 'user', leadAccess: false };
+  const sys = { id: 'u_1', isSystem: true };
+  const ADMIN_ONLY = ['reports', 'users', 'settings'];
+
+  check('access: admins always have both modules', A.hasLeadAccess(admin) && A.hasTelematicsAccess(admin));
+  check('access: existing accounts keep lead access, no telematics', A.hasLeadAccess(rep) && !A.hasTelematicsAccess(rep));
+  check('access: telematics-only has no lead access', !A.hasLeadAccess(tele) && A.hasTelematicsAccess(tele));
+  check('access: nobody signed in / system user has nothing', !A.hasLeadAccess(null) && !A.hasTelematicsAccess(null) && !A.hasLeadAccess(sys) && !A.hasTelematicsAccess(sys));
+  check('access: telematics-only cannot open a lead view', !A.canOpenView('stage-incoming', tele, ADMIN_ONLY) && !A.canOpenView('todo', tele, ADMIN_ONLY) && !A.canOpenView('submittals', tele, ADMIN_ONLY));
+  check('access: telematics-only opens the code list', A.canOpenView(A.TELEMATICS_CODES_VIEW, tele, ADMIN_ONLY));
+  check('access: a rep cannot open telematics unless switched on', !A.canOpenView(A.TELEMATICS_CODES_VIEW, rep, ADMIN_ONLY) && A.canOpenView(A.TELEMATICS_CODES_VIEW, both, ADMIN_ONLY));
+  check('access: admin-only views stay admin-only', !A.canOpenView('settings', both, ADMIN_ONLY) && A.canOpenView('settings', admin, ADMIN_ONLY));
+  check('access: landing view follows access', A.defaultViewFor(rep, 'stage-incoming') === 'stage-incoming'
+    && A.defaultViewFor(tele, 'stage-incoming') === A.TELEMATICS_DEFAULT_VIEW
+    && A.defaultViewFor(none, 'stage-incoming') === A.NO_ACCESS_VIEW);
+  check('access: every telematics view is reachable by telematics users', A.TELEMATICS_VIEWS.every(v => A.canOpenView(v, tele, ADMIN_ONLY)));
+  check('access: presets write both fields', A.ACCESS_PRESETS.every(p => typeof p.fields.leadAccess === 'boolean' && typeof p.fields.telematicsAccess === 'boolean'));
+  check('access: labels', A.accessLabel(admin) === 'Admin' && A.accessLabel(rep) === 'Sales Rep' && A.accessLabel(tele) === 'Telematics' && A.accessLabel(both) === 'Sales Rep + Telematics');
+
+  // The rules must gate every lead-side collection on canUseLeads and the
+  // telematics collections on canUseTelematics — the UI alone is not enough.
+  const rules = readFileSync(join(root, 'firestore.rules'), 'utf8');
+  const block = (name) => { const m = rules.match(new RegExp(`match /${name}/\\{[^}]+\\} \\{([\\s\\S]*?)\\n    \\}`)); return m ? m[1] : ''; };
+  check('rules: leads read needs lead access', /allow read:\s+if canUseLeads\(\)/.test(block('leads')));
+  for (const c of ['requests', 'tradeIns', 'finance']) check(`rules: ${c} read needs lead access`, /allow read: if canUseLeads\(\)/.test(block(c)));
+  check('rules: record writes need lead access', /function recordCreateOk\(\) \{\s*return canUseLeads\(\)/.test(rules) && /function recordUpdateOk\(\) \{\s*return canUseLeads\(\)/.test(rules));
+  check('rules: telematics codes need telematics access', /allow read:\s+if canUseTelematics\(\)/.test(block('telematicsCodes')));
+  check('rules: leadAccess defaults on, telematicsAccess off (same as access.js)', rules.includes("get('leadAccess', true) != false") && rules.includes("get('telematicsAccess', false) == true"));
+  // A user may never grant themselves a module.
+  check('rules: self-update is still name only', /isSelf\(userId\) && changed\(\)\.hasOnly\(\['name'\]\)/.test(rules));
+
+  // Lead pickers must not offer telematics-only accounts.
+  check('app: config.users is filtered to lead users', /const leadUsers = useMemo\(\(\) => users\.filter\(u => u\.isSystem \|\| hasLeadAccess\(u\)\)/.test(app) && app.includes('users: leadUsers'));
+  check('app: leads subscribe only with lead access', /useEffect\(\(\) => \{\s*if \(!leadAccess\) \{[\s\S]{0,200}?return;\s*\}\s*const unsubLeads = subscribeToLeads/.test(app));
+}
+
+/* ---------- Telematics: critical code list (Nov 2026) ---------- */
+{
+  const T = await import('../src/lib/telematics.js');
+  const { TELEMATICS_SEED_CODES: seed, TELEMATICS_SEED_SOURCE: src } = await import('../src/lib/telematicsSeed.js');
+
+  check('codes: parses "CRITICAL - M0217"', JSON.stringify(T.parsePrimaryCode('CRITICAL - M0217')) === JSON.stringify({ severity: 'CRITICAL', code: 'M0217' }));
+  check('codes: parses dashed codes and other severities', T.parsePrimaryCode('WARNING - E00009714').code === 'E00009714' && T.parsePrimaryCode('INFORMATION - P113B-7B').code === 'P113B-7B' && T.parsePrimaryCode('critical - c1047-00').code === 'C1047-00');
+  check('codes: bare code parses, junk does not', T.parsePrimaryCode(' m0217 ').code === 'M0217' && T.parsePrimaryCode('') === null && T.parsePrimaryCode('<html><head>') === null && T.parsePrimaryCode('CRITICAL -') === null);
+  check('codes: valid ids only', T.isValidCode('M0217') && T.isValidCode('p1061-97') && !T.isValidCode('M/0217') && !T.isValidCode('') && !T.isValidCode('-M1') && !T.isValidCode('M 0217'));
+
+  const byId = { M0217: { code: 'M0217', level: 'ignore', reviewed: true }, C1047: { code: 'C1047', level: 'noncritical' }, X1: { code: 'X1', level: 'bogus' } };
+  check('codes: unknown code is critical and flagged', JSON.stringify(T.classifyCode('zz99', byId)) === JSON.stringify({ code: 'ZZ99', level: 'critical', known: false, reviewed: false }));
+  check('codes: reviewed level is used', T.classifyCode('m0217', byId).level === 'ignore' && T.classifyCode('M0217', byId).reviewed === true);
+  check('codes: unreviewed keeps its level but says so', T.classifyCode('C1047', byId).level === 'noncritical' && T.classifyCode('C1047', byId).reviewed === false);
+  check('codes: a bad stored level falls back to critical', T.classifyCode('X1', byId).level === 'critical');
+
+  const rp = T.reviewPatch('noncritical', 'tanner', 'NOW');
+  check('codes: review stamps who and when', rp.level === 'noncritical' && rp.reviewed === true && rp.reviewedBy === 'tanner' && rp.reviewedAt === 'NOW');
+  check('codes: review rejects unknown levels', T.reviewPatch('urgent', 'x').level === 'critical');
+
+  const d = T.newCodeDoc({ code: ' m0217 ', summary: ' Filter ', seenCount: '7', topModels: ['a', 'b', 'c', 'd', 'e', 'f'] }, 'u', 'T');
+  check('codes: new code starts critical and not reviewed', d.code === 'M0217' && d.level === 'critical' && d.reviewed === false && d.summary === 'Filter' && d.seenCount === 7 && d.topModels.length === 5 && d.createdBy === 'u');
+
+  const docs = [{ code: 'A', level: 'critical', reviewed: true, seenCount: 5 }, { code: 'B', level: 'ignore', seenCount: 50 }, { code: 'C', level: 'noncritical', reviewed: true, seenCount: 9, topModels: ['T770 T4'] }, { code: 'D', seenCount: 1 }];
+  const c = T.codeCounts(docs);
+  check('codes: counts', c.all === 4 && c.unreviewed === 2 && c.critical === 2 && c.ignore === 1 && c.noncritical === 1);
+  check('codes: filters', docs.filter(x => T.codeMatchesFilter(x, 'unreviewed')).map(x => x.code).join() === 'B,D' && docs.filter(x => T.codeMatchesFilter(x, 'critical')).map(x => x.code).join() === 'A,D');
+  check('codes: search matches code, summary and model', T.codeMatchesQuery(docs[2], 't770') && T.codeMatchesQuery({ code: 'M0217', summary: 'Hydraulic Filter Plugged' }, 'filter m02') && !T.codeMatchesQuery(docs[0], 'zzz'));
+  check('codes: not reviewed first, then most seen', T.sortCodes(docs).map(x => x.code).join() === 'B,D,C,A');
+
+  // The starter list
+  check('seed: 115 codes from the log', seed.length === 115 && src.rows === 5019);
+  check('seed: every code is a valid, unique id', seed.every(r => T.isValidCode(r.code) && r.code === T.normalizeCode(r.code)) && new Set(seed.map(r => r.code)).size === seed.length);
+  check('seed: every code has a summary and a count', seed.every(r => r.summary && r.seenCount > 0 && /^\d{4}-\d{2}-\d{2}$/.test(r.lastSeen)));
+  check('seed: counts add up to the log', seed.reduce((n, r) => n + r.seenCount, 0) === src.rows);
+  const seededDocs = seed.map(r => T.newCodeDoc(r, 'u', 'T'));
+  check('seed: loads as critical, not reviewed', seededDocs.every(x => x.level === 'critical' && x.reviewed === false));
+  check('seed: the levels the rules accept match CODE_LEVELS', (() => {
+    const rules = readFileSync(join(root, 'firestore.rules'), 'utf8');
+    const m = rules.match(/request\.resource\.data\.level in \[([^\]]+)\]/);
+    return m && JSON.stringify(m[1].split(',').map(x => x.trim().replace(/'/g, ''))) === JSON.stringify(T.CODE_LEVEL_IDS);
+  })());
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

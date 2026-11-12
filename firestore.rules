@@ -19,6 +19,29 @@ service cloud.firestore {
         && userDoc().role == 'admin';
     }
 
+    // Module access (Nov 2026, Telematics). Same model as src/lib/access.js:
+    //   leadAccess       absent = on, so accounts from before this change keep
+    //                    working; false = "telematics only", blocked from every
+    //                    lead / back-office collection (Erin).
+    //   telematicsAccess absent = off.
+    // Admins always have both. A signed-in account with no users/ doc keeps
+    // lead access, exactly as before this change.
+    function userPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+    function canUseLeads() {
+      return isSignedIn()
+        && (!exists(userPath())
+            || userDoc().get('role', '') == 'admin'
+            || userDoc().get('leadAccess', true) != false);
+    }
+    function canUseTelematics() {
+      return isSignedIn()
+        && exists(userPath())
+        && (userDoc().get('role', '') == 'admin'
+            || userDoc().get('telematicsAccess', false) == true);
+    }
+
     function isSelf(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
@@ -56,10 +79,11 @@ service cloud.firestore {
     // UI only ever shows a rep their own leads, staff are trusted, and narrowing
     // this risks blocking legitimate lead work for a threat that requires an
     // authenticated insider with developer tools.
-    // Deletion stays admin-only.
+    // Deletion stays admin-only. Telematics-only accounts are refused
+    // (canUseLeads); intake writes with the Admin SDK and is unaffected.
     match /leads/{leadId} {
-      allow read:           if isSignedIn();
-      allow create, update: if isSignedIn();
+      allow read:           if canUseLeads();
+      allow create, update: if canUseLeads();
       allow delete:         if isAdmin();
     }
 
@@ -71,28 +95,40 @@ service cloud.firestore {
     // and finance halves to admins. Deletion is admin-only. A new record must
     // name its real creator, and createdBy can never change afterwards.
     function recordCreateOk() {
-      return isSignedIn() && request.resource.data.createdBy == request.auth.uid;
+      return canUseLeads() && request.resource.data.createdBy == request.auth.uid;
     }
     function recordUpdateOk() {
-      return isSignedIn() && request.resource.data.createdBy == resource.data.createdBy;
+      return canUseLeads() && request.resource.data.createdBy == resource.data.createdBy;
     }
     match /requests/{id} {
-      allow read: if isSignedIn();
+      allow read: if canUseLeads();
       allow create: if recordCreateOk();
       allow update: if recordUpdateOk();
       allow delete: if isAdmin();
     }
     match /tradeIns/{id} {
-      allow read: if isSignedIn();
+      allow read: if canUseLeads();
       allow create: if recordCreateOk();
       allow update: if recordUpdateOk();
       allow delete: if isAdmin();
     }
     match /finance/{id} {
-      allow read: if isSignedIn();
+      allow read: if canUseLeads();
       allow create: if recordCreateOk();
       allow update: if recordUpdateOk();
       allow delete: if isAdmin();
+    }
+
+    /* ===================== TELEMATICS ===================== */
+    // A separate module (CLAUDE.md → "Telematics"): telematics users and
+    // admins only. telematicsCodes/{code} is the critical code master list;
+    // any telematics user may classify a code, only an admin may delete one.
+    match /telematicsCodes/{code} {
+      allow read:           if canUseTelematics();
+      allow create, update: if canUseTelematics()
+                            && request.resource.data.code == code
+                            && request.resource.data.level in ['critical', 'noncritical', 'ignore'];
+      allow delete:         if isAdmin();
     }
 
     /* ===================== CONFIG ===================== */

@@ -194,3 +194,31 @@ export async function setIncidentMuted(id, muted, userId) {
     ? { status: 'muted', mutedBy: userId || '', mutedAt: new Date().toISOString() }
     : { status: 'open', mutedBy: '', mutedAt: '' });
 }
+
+/* ===================== TELEMATICS ===================== */
+// Telematics users and admins only (firestore.rules → canUseTelematics).
+// telematicsCodes/{code}: the critical code master list (src/lib/telematics.js).
+// A refused read is reported to the caller, not logged as an error: before
+// `firebase deploy --only firestore:rules` has run it is expected, and the
+// view says what to do.
+export function subscribeToTelematicsCodes(callback, onError) {
+  return onSnapshot(collection(db, 'telematicsCodes'),
+    (snap) => callback(snap.docs.map(d => ({ id: d.id, ...d.data() }))),
+    (err) => { console.warn('subscribeToTelematicsCodes error:', err.code || err); if (onError) onError(err); });
+}
+
+export async function saveTelematicsCode(code, data) {
+  await setDoc(doc(db, 'telematicsCodes', code), data, { merge: true });
+}
+
+// The one-time starter list. Never overwrites a code that already exists.
+export async function seedTelematicsCodes(docs, existingIds = []) {
+  const skip = new Set(existingIds);
+  const todo = docs.filter(d => !skip.has(d.code));
+  for (let i = 0; i < todo.length; i += 450) {
+    const batch = writeBatch(db);
+    todo.slice(i, i + 450).forEach(d => batch.set(doc(db, 'telematicsCodes', d.code), d));
+    await batch.commit();
+  }
+  return todo.length;
+}

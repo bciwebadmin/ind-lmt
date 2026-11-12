@@ -16,7 +16,7 @@ import {
   Trophy, Target, Printer, FileSpreadsheet, Eye, EyeOff, Copy, Menu,
   RotateCcw, CalendarOff, Archive, ArchiveX, Key, Route,
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
-  Inbox, Briefcase, ClipboardList, LayoutDashboard, ArrowRight
+  Inbox, Briefcase, ClipboardList, LayoutDashboard, ArrowRight, Activity
 } from 'lucide-react';
 
 import {
@@ -26,8 +26,18 @@ import {
   addAccessRequestDoc, deleteAccessRequestDoc,
   subscribeToRecords, addRecordDoc, updateRecordDoc,
   addAttachmentRecords, removeAttachmentRecord,
-  subscribeToHealth, subscribeToIncidents, setIncidentMuted
+  subscribeToHealth, subscribeToIncidents, setIncidentMuted,
+  subscribeToTelematicsCodes, saveTelematicsCode, seedTelematicsCodes
 } from './lib/firestoreData';
+import {
+  hasLeadAccess, hasTelematicsAccess, canOpenView, defaultViewFor, accessLabel, ACCESS_PRESETS,
+  TELEMATICS_CODES_VIEW, NO_ACCESS_VIEW
+} from './lib/access';
+import {
+  CODE_LEVELS, codeLevelLabel, reviewPatch, newCodeDoc, isValidCode, normalizeCode,
+  codeMatchesFilter, codeMatchesQuery, codeCounts, sortCodes
+} from './lib/telematics';
+import { TELEMATICS_SEED_CODES, TELEMATICS_SEED_SOURCE } from './lib/telematicsSeed';
 import { setErrorContext } from './lib/errorReporter';
 
 import {
@@ -198,15 +208,16 @@ const STAGE_ACCENTS = {
   [STAGE_COMPLETED]:     { bar: 'bg-emerald-500', soft: 'bg-emerald-50', text: 'text-emerald-700' }
 };
 
-function canAccessView(view, role) {
-  if (ADMIN_ONLY_VIEWS.includes(view)) return role === 'admin';
-  return true;  // Default views (my-open, my-closed, add) — every signed-in user
+// Takes the signed-in user, not just the role: Lead Management and Telematics
+// are separate switches on the user (src/lib/access.js, Nov 2026).
+function canAccessView(view, user) {
+  return canOpenView(view, user, ADMIN_ONLY_VIEWS);
 }
 
-// Landing page and safety-redirect fallback. Admins see the full pipeline;
-// sales reps land on their own open leads.
-function getDefaultView(role) {
-  return DEFAULT_VIEW;
+// Landing page and safety-redirect fallback: the New tab for anyone with lead
+// access, the Telematics module for a telematics-only account.
+function getDefaultView(user) {
+  return defaultViewFor(user, DEFAULT_VIEW);
 }
 
 // Auto-archival rule: leads closed for this many consecutive days (no reopen in between)
@@ -1029,7 +1040,7 @@ export default function BobcatIndyCRM() {
     // Allow ?view=users or ?view=leads etc. via URL — used by email notifications
     try {
       const requested = new URLSearchParams(window.location.search).get('view');
-      const valid = [HOME_VIEW, 'todo', ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings'];
+      const valid = [HOME_VIEW, 'todo', ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings', TELEMATICS_CODES_VIEW];
       if (requested && valid.includes(requested)) return requested;
       if (requested && MOVED_VIEWS[requested]) return MOVED_VIEWS[requested][0];
     } catch { /* ignore */ }
@@ -1098,16 +1109,8 @@ export default function BobcatIndyCRM() {
       return;
     }
 
-    const unsubLeads = subscribeToLeads((data) => {
-      // Present legacy 'Qualified' leads as 'Working' immediately. The stored
-      // value is rewritten separately (see the migration effect below); until
-      // that lands, this keeps every filter, chart and dropdown coherent.
-      setLeads(data.map(normalizeLeadStatus));
-    });
-
-    const unsubRecords = ['requests', 'tradeIns', 'finance'].map(kind =>
-      subscribeToRecords(kind, (data) => setRecords(r => ({ ...r, [kind]: data }))));
-
+    // Leads and records subscribe in their own effect below, once the user's
+    // lead access is known — a telematics-only account is refused them.
     const unsubConfig = subscribeToConfig((data) => {
       const merged = {
         ...DEFAULT_CONFIG,
@@ -1126,7 +1129,7 @@ export default function BobcatIndyCRM() {
     });
 
     return () => {
-      unsubLeads(); unsubRecords.forEach(u => u()); unsubConfig(); unsubUsers();
+      unsubConfig(); unsubUsers();
     };
   }, [currentUserId]);
 
@@ -1212,6 +1215,42 @@ export default function BobcatIndyCRM() {
     return users.find(u => u.id === currentUserId && !u.isSystem) || null;
   }, [currentUserId, users]);
 
+  // Module access (src/lib/access.js). Both are false until the user's profile
+  // has loaded, so nothing subscribes before we know what they may read.
+  const leadAccess = hasLeadAccess(currentUser);
+  const telematicsAccess = hasTelematicsAccess(currentUser);
+
+  // Leads and the back-office records. Keyed on lead access, the same way the
+  // access-request listener below is keyed on role: firestore.rules refuses
+  // these to a telematics-only account (Erin, Nov 2026), and a refused
+  // listener would just sit there erroring.
+  useEffect(() => {
+    if (!leadAccess) {
+      setLeads([]);
+      setRecords({ requests: [], tradeIns: [], finance: [] });
+      return;
+    }
+    const unsubLeads = subscribeToLeads((data) => {
+      // Present legacy 'Qualified' leads as 'Working' immediately. The stored
+      // value is rewritten separately (see the migration effect below); until
+      // that lands, this keeps every filter, chart and dropdown coherent.
+      setLeads(data.map(normalizeLeadStatus));
+    });
+    const unsubRecords = ['requests', 'tradeIns', 'finance'].map(kind =>
+      subscribeToRecords(kind, (data) => setRecords(r => ({ ...r, [kind]: data }))));
+    return () => { unsubLeads(); unsubRecords.forEach(u => u()); };
+  }, [leadAccess]);
+
+  // Telematics → Code List. null = still loading.
+  const [telematicsCodes, setTelematicsCodes] = useState(null);
+  const [telematicsCodesError, setTelematicsCodesError] = useState(null);
+  useEffect(() => {
+    if (!telematicsAccess) { setTelematicsCodes(null); setTelematicsCodesError(null); return; }
+    return subscribeToTelematicsCodes(
+      (data) => { setTelematicsCodes(data); setTelematicsCodesError(null); },
+      (err) => setTelematicsCodesError(err && err.code ? err.code : 'error'));
+  }, [telematicsAccess]);
+
   // Crash reports say who was signed in and on which screen (self-repair loop).
   useEffect(() => { setErrorContext({ userId: currentUserId || '' }); }, [currentUserId]);
   useEffect(() => { setErrorContext({ view: selectedLead ? `${view}/lead` : view }); }, [view, selectedLead]);
@@ -1295,8 +1334,8 @@ export default function BobcatIndyCRM() {
   useEffect(() => {
     if (!currentUser) return;
     if (MOVED_VIEWS[view]) { goTo(view); return; }
-    if (RETIRED_VIEWS.includes(view) || !canAccessView(view, currentUser.role)) {
-      setView(getDefaultView(currentUser.role));
+    if (RETIRED_VIEWS.includes(view) || !canAccessView(view, currentUser)) {
+      setView(getDefaultView(currentUser));
     }
   }, [view, currentUser]);
 
@@ -1447,10 +1486,17 @@ export default function BobcatIndyCRM() {
   // so the child UI components don't all need new props.
   // IMPORTANT: this useMemo must stay BEFORE any conditional returns to satisfy
   // React's Rules of Hooks.
+  //
+  // `users` here is everyone who can work leads: every assignment dropdown,
+  // routing slot and report reads config.users, and a telematics-only account
+  // must never be offered a lead it can't open. The Users page gets the full
+  // list (allUsersConfig).
+  const leadUsers = useMemo(() => users.filter(u => u.isSystem || hasLeadAccess(u)), [users]);
   const configWithUsers = useMemo(
-    () => ({ ...config, users, accessRequests }),
-    [config, users, accessRequests]
+    () => ({ ...config, users: leadUsers, accessRequests }),
+    [config, leadUsers, accessRequests]
   );
+  const allUsersConfig = useMemo(() => ({ ...configWithUsers, users }), [configWithUsers, users]);
 
   // Defensive guard: redirect non-admins away from admin-only views
   useEffect(() => {
@@ -1596,6 +1642,49 @@ export default function BobcatIndyCRM() {
       await saveUserDoc(userId, { role: newRole });
     } catch (e) {
       showToast('Could not update role', 'error');
+    }
+  };
+
+  // Users → the Leads / Telematics switches (src/lib/access.js).
+  const setUserAccess = async (userId, patch) => {
+    try {
+      await saveUserDoc(userId, patch);
+    } catch (e) {
+      console.error('[users] access change failed', e);
+      showToast('Could not update access', 'error');
+    }
+  };
+
+  // Telematics → Code List.
+  const setTelematicsCodeLevel = async (code, level) => {
+    try {
+      await saveTelematicsCode(code, reviewPatch(level, currentUser.id));
+    } catch (e) {
+      console.error('[telematics] code save failed', e);
+      showToast('Could not save that code', 'error');
+    }
+  };
+  const addTelematicsCode = async ({ code, summary }) => {
+    try {
+      await saveTelematicsCode(normalizeCode(code), newCodeDoc({ code, summary }, currentUser.id));
+      showToast(`Added ${normalizeCode(code)}`);
+      return true;
+    } catch (e) {
+      console.error('[telematics] code add failed', e);
+      showToast('Could not add that code', 'error');
+      return false;
+    }
+  };
+  const seedTelematicsCodeList = async () => {
+    const now = new Date().toISOString();
+    try {
+      const n = await seedTelematicsCodes(
+        TELEMATICS_SEED_CODES.map(r => newCodeDoc(r, currentUser.id, now)),
+        (telematicsCodes || []).map(c => c.id));
+      showToast(`Loaded ${n} code${n === 1 ? '' : 's'}`);
+    } catch (e) {
+      console.error('[telematics] seed failed', e);
+      showToast('Could not load the starter list', 'error');
     }
   };
 
@@ -2383,7 +2472,7 @@ export default function BobcatIndyCRM() {
           stageCounts={Object.fromEntries(PIPELINE_STAGES.map(s => [s.id, stageLeads[s.id].length]))}
           todoCount={todoCount}
           backOfficeCounts={{ submittals: openSubmittalCount, requests: openRequestCount, finance: openFinanceCount, tradeIns: pendingTradeInCount }}
-          userRole={currentUser.role}
+          user={currentUser}
           pendingCount={accessRequests.length}
           mobileOpen={mobileNavOpen}
           onMobileClose={() => setMobileNavOpen(false)}
@@ -2399,7 +2488,7 @@ export default function BobcatIndyCRM() {
             leadOpen={!!selectedLead}
             addPreset={addPreset}
             onAdd={handleNew}
-            search={
+            search={!leadAccess ? null : (
               <GlobalSearch
                 scope={searchScope}
                 users={configWithUsers.users || []}
@@ -2408,7 +2497,7 @@ export default function BobcatIndyCRM() {
                 onOpenRecord={openRecordFromSearch}
                 onActivate={() => { setSelectedLead(null); setFocusRecord(null); }}
               />
-            }
+            )}
           />
 
           <div className="px-4 md:px-8 py-4 md:py-6">
@@ -2558,19 +2647,30 @@ export default function BobcatIndyCRM() {
             {view === 'add' && (
               <AddLeadView key={addPreset || 'lead'} preset={addPreset} config={configWithUsers} currentUser={currentUser} onAdd={(d) => submitNewLead(d, 'Manual Entry')} />
             )}
-            {view === 'reports' && canAccessView('reports', currentUser.role) && (
+            {view === TELEMATICS_CODES_VIEW && telematicsAccess && (
+              <TelematicsCodesView
+                codes={telematicsCodes} error={telematicsCodesError}
+                users={users} isAdmin={currentUser.role === 'admin'}
+                onSetLevel={setTelematicsCodeLevel}
+                onAddCode={addTelematicsCode}
+                onSeed={seedTelematicsCodeList}
+              />
+            )}
+            {view === NO_ACCESS_VIEW && <NoAccessView/>}
+            {view === 'reports' && canAccessView('reports', currentUser) && (
               <ReportsView leads={pipelineLeads} config={configWithUsers}/>
             )}
-            {view === 'users' && canAccessView('users', currentUser.role) && (
+            {view === 'users' && canAccessView('users', currentUser) && (
               <UsersView
-                config={configWithUsers} onSave={saveConfig} leads={pipelineLeads}
+                config={allUsersConfig} onSave={saveConfig} leads={pipelineLeads}
                 onApprove={approveRequest} onDeny={denyRequest}
                 onToggleRole={toggleUserRole}
+                onSetAccess={setUserAccess}
                 currentUserId={currentUser.id}
                 currentUserRole={currentUser.role}
               />
             )}
-            {view === 'settings' && canAccessView('settings', currentUser.role) && (
+            {view === 'settings' && canAccessView('settings', currentUser) && (
               <>
                 <SubTabs value={settingsTab} onChange={setSettingsTab} tabs={SETTINGS_TABS}/>
                 {settingsTab === 'general' && (
@@ -2963,8 +3063,11 @@ const STAGE_ADD_KIND = {
   [STAGE_WANTED]:   'want'
 };
 
-function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userRole, pendingCount, mobileOpen, onMobileClose, onNew, todoCount = 0 }) {
+function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user, pendingCount, mobileOpen, onMobileClose, onNew, todoCount = 0 }) {
   const [newOpen, setNewOpen] = useState(false);
+  const userRole = user ? user.role : 'user';
+  // + New only makes lead-side records.
+  const showNew = hasLeadAccess(user);
   // Groups, in order. Access is still decided centrally by canAccessView, and a
   // group whose items are all filtered out disappears with them.
   const groups = [
@@ -2981,6 +3084,11 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userR
       { id: 'finance',   label: 'Finance',            icon: Briefcase,     badge: backOfficeCounts.finance },
       { id: 'trade-ins', label: userRole === 'admin' ? 'Trade-In Approvals' : 'Trade-Ins', icon: RefreshCw,     badge: backOfficeCounts.tradeIns }
     ] },
+    // A separate module (CLAUDE.md → "Telematics"); only shown to people with
+    // telematics access. The board joins Code List in step 2.
+    { title: 'Telematics', items: [
+      { id: TELEMATICS_CODES_VIEW, label: 'Code List', icon: Activity }
+    ] },
     { title: null, items: [
       { id: 'reports',   label: 'Reports',            icon: BarChart3 }
     ] },
@@ -2988,7 +3096,7 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userR
       { id: 'users',     label: 'Users',              icon: UsersIcon, badge: pendingCount, badgeAccent: pendingCount > 0 },
       { id: 'settings',  label: 'Settings',           icon: SettingsIcon }
     ] }
-  ].map(g => ({ ...g, items: g.items.filter(i => canAccessView(i.id, userRole)) }))
+  ].map(g => ({ ...g, items: g.items.filter(i => canAccessView(i.id, user)) }))
    .filter(g => g.items.length);
 
   const handleNav = (id) => {
@@ -3035,6 +3143,7 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userR
         </div>
 
         {/* + New — every form in one place */}
+        {showNew && (
         <div className="px-3 pt-4 relative">
           <button onClick={() => setNewOpen(o => !o)} aria-haspopup="menu" aria-expanded={newOpen}
             className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-md bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold">
@@ -3063,6 +3172,7 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, userR
             </>
           )}
         </div>
+        )}
 
         <nav className="flex-1 px-3 py-3 overflow-y-auto scrollbar-thin">
           {groups.map((g, gi) => (
@@ -3130,7 +3240,9 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
     add: addPreset === PROSPECT_STATUS ? 'Add Prospect' : addPreset === WANTED_STATUS ? 'Add a Want' : 'Add Lead', import: 'Import Leads',
     reports: 'Reports',
     users: 'Users', scoring: 'Scoring Rules', settings: 'Settings',
-    'lead-routing': 'Lead Routing'
+    'lead-routing': 'Lead Routing',
+    [TELEMATICS_CODES_VIEW]: 'Critical Code List',
+    [NO_ACCESS_VIEW]: 'No access yet'
   };
 
   const stats = useMemo(() => {
@@ -3183,6 +3295,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
               {view === 'scoring' && 'Tune how leads are scored and ranked'}
               {view === 'lead-routing' && 'Who each location and department routes leads to'}
               {view === 'settings' && 'Configure statuses, branches, departments, and lead sources'}
+              {view === TELEMATICS_CODES_VIEW && 'Telematics · which Bobcat fault codes Carter should call on'}
             </div>
           </div>
         </div>
@@ -3207,7 +3320,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
               <div className="text-left leading-tight hidden md:block">
                 <div className="text-xs font-semibold text-stone-900">{currentUser.name}</div>
                 <div className="text-[10px] uppercase tracking-wider text-stone-500">
-                  {currentUser.role === 'admin' ? 'Admin' : 'Sales Rep'}
+                  {accessLabel(currentUser)}
                 </div>
               </div>
               <ChevronDown size={12} className="text-stone-400 hidden md:block"/>
@@ -3220,7 +3333,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
                     <div className="text-sm font-semibold text-stone-900">{currentUser.name}</div>
                     <div className="text-xs text-stone-500 truncate">{currentUser.email}</div>
                     <div className="text-[10px] uppercase tracking-wider text-stone-400 mt-0.5">
-                      {currentUser.role === 'admin' ? 'Admin' : 'Sales Rep'}
+                      {accessLabel(currentUser)}
                     </div>
                   </div>
                   <button onClick={() => { setMenuOpen(false); onSignOut(); }}
@@ -5410,11 +5523,270 @@ function ImportView({ config, onImport, leads }) {
 }
 
 /* ===================== USERS VIEW ===================== */
-function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, currentUserId, currentUserRole }) {
+/* ===================== MODULE ACCESS ===================== */
+// The Leads / Telematics switches on a non-admin row of the Users page.
+// Admins always have both, so their rows don't show these.
+function UserAccessToggles({ user, onSetAccess }) {
+  const leads = hasLeadAccess(user), tele = hasTelematicsAccess(user);
+  const pill = (on, label, title, patch) => (
+    <button type="button" onClick={() => onSetAccess(user.id, patch)} title={title} aria-pressed={on}
+      className={`px-2 py-1 text-[10px] uppercase tracking-widest font-bold rounded border ${
+        on ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-400 border-stone-200 hover:text-stone-700'}`}>
+      {label}
+    </button>
+  );
+  return (
+    <div className="hidden sm:flex items-center gap-1" role="group" aria-label={`${user.name} access`}>
+      {pill(leads, 'Leads', leads ? 'Click to remove lead access (telematics only)' : 'Click to give lead access', { leadAccess: !leads })}
+      {pill(tele, 'Telematics', tele ? 'Click to remove telematics access' : 'Click to give telematics access', { telematicsAccess: !tele })}
+    </div>
+  );
+}
+
+function NoAccessView() {
+  return (
+    <div className="max-w-lg mx-auto text-center py-16 border border-dashed border-stone-200 rounded-lg bg-white">
+      <Lock size={28} className="mx-auto text-stone-300 mb-3"/>
+      <div className="text-sm font-semibold text-stone-800">Your account doesn’t have access to anything yet</div>
+      <div className="text-xs text-stone-500 mt-1">Ask an admin to turn on Leads or Telematics for you on the Users page.</div>
+    </div>
+  );
+}
+
+/* ===================== TELEMATICS — CODE LIST ===================== */
+// The critical code master list (src/lib/telematics.js). Bobcat labels every
+// fault email CRITICAL; here Tanner decides which codes Carter calls on.
+// Codes not reviewed yet count as Critical (Erin, Nov 2026).
+// Date-only values ("2026-11-11") read as local noon, so they don't show the day before.
+const fmtDay = (d) => fmtDate(/^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? `${d}T12:00:00` : d);
+
+const CODE_LEVEL_TONE = {
+  critical:    'bg-rose-600 text-white border-rose-600',
+  noncritical: 'bg-amber-100 text-amber-900 border-amber-300',
+  ignore:      'bg-stone-700 text-white border-stone-700'
+};
+
+function CodeLevelPicker({ doc, onSetLevel }) {
+  return (
+    <div className="inline-flex rounded-md overflow-hidden border border-stone-200" role="group" aria-label={`Treat ${doc.code} as`}>
+      {CODE_LEVELS.map((l, i) => {
+        const on = (doc.level || 'critical') === l.id;
+        return (
+          <button key={l.id} type="button" title={l.hint} aria-pressed={on}
+            onClick={() => onSetLevel(doc.code, l.id)}
+            className={`px-2.5 py-1 text-xs font-semibold whitespace-nowrap ${i ? 'border-l border-stone-200' : ''} ${
+              on ? CODE_LEVEL_TONE[l.id] : 'bg-white text-stone-600 hover:bg-stone-50'}`}>
+            {l.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function CodeReviewState({ doc, userMap, onSetLevel }) {
+  if (doc.reviewed === true) {
+    const who = userMap[doc.reviewedBy];
+    return (
+      <span className="text-[11px] text-stone-500">
+        <CheckCircle2 size={11} className="inline -mt-0.5 mr-1 text-emerald-600"/>
+        Reviewed{who ? ` by ${who.name}` : ''}{doc.reviewedAt ? ` · ${fmtDay(doc.reviewedAt)}` : ''}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span className="text-[10px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200 whitespace-nowrap">Not reviewed</span>
+      <button type="button" onClick={() => onSetLevel(doc.code, doc.level || 'critical')}
+        className="text-xs font-semibold text-brand-700 hover:underline whitespace-nowrap">
+        Confirm {codeLevelLabel(doc.level)}
+      </button>
+    </span>
+  );
+}
+
+function TelematicsCodesView({ codes, error, users = [], isAdmin = false, onSetLevel, onAddCode, onSeed }) {
+  const [filter, setFilter] = useState('all');
+  const [q, setQ] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState({ code: '', summary: '' });
+  const [draftErr, setDraftErr] = useState('');
+  const [seeding, setSeeding] = useState(false);
+  const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
+  const list = codes || [];
+  const counts = useMemo(() => codeCounts(list), [list]);
+  const rows = useMemo(
+    () => sortCodes(list.filter(d => codeMatchesFilter(d, filter) && codeMatchesQuery(d, q))),
+    [list, filter, q]);
+
+  if (error) {
+    return (
+      <div className="max-w-2xl px-4 py-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-800 flex gap-2">
+        <AlertCircle size={16} className="shrink-0 mt-0.5"/>
+        <div>
+          The code list couldn’t be loaded{error === 'permission-denied' ? ' (permission denied)' : ''}.
+          {isAdmin
+            ? <> If the Telematics rules haven’t been deployed yet, run <code className="font-mono text-xs bg-white px-1 rounded">firebase deploy --only firestore:rules</code>, then reload.</>
+            : ' Ask an admin to check your Telematics access.'}
+        </div>
+      </div>
+    );
+  }
+  if (codes === null) return <div className="text-sm text-stone-500 py-8">Loading the code list…</div>;
+
+  const submitDraft = async () => {
+    setDraftErr('');
+    const code = normalizeCode(draft.code);
+    if (!isValidCode(code)) return setDraftErr('Use the code as Bobcat shows it — letters, numbers and dashes, e.g. M0217.');
+    if (list.some(d => d.code === code)) return setDraftErr(`${code} is already on the list.`);
+    if (await onAddCode({ code, summary: draft.summary })) {
+      setDraft({ code: '', summary: '' }); setAdding(false);
+    }
+  };
+  const seed = async () => { setSeeding(true); try { await onSeed(); } finally { setSeeding(false); } };
+
+  const addForm = adding && (
+    <div className="p-4 bg-stone-50 border border-stone-200 rounded-lg space-y-2">
+      <div className="flex flex-col sm:flex-row gap-2">
+        <input value={draft.code} onChange={e => setDraft({ ...draft, code: e.target.value })} placeholder="Code, e.g. M0217"
+          className="sm:w-44 px-3 py-2 border border-stone-200 rounded-md text-sm bg-white font-mono"/>
+        <input value={draft.summary} onChange={e => setDraft({ ...draft, summary: e.target.value })} placeholder="Summary, e.g. Hydraulic Filter Plugged"
+          className="flex-1 px-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
+      </div>
+      <div className="flex gap-2">
+        <button onClick={submitDraft} className="px-3 py-1.5 bg-stone-900 hover:bg-stone-800 text-white text-sm font-medium rounded-md">Add code</button>
+        <button onClick={() => { setAdding(false); setDraftErr(''); }} className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-sm">Cancel</button>
+      </div>
+      {draftErr && <div className="text-xs text-rose-600">{draftErr}</div>}
+      <div className="text-[11px] text-stone-500">New codes start as Critical and not reviewed.</div>
+    </div>
+  );
+
+  if (!list.length) {
+    return (
+      <div className="max-w-2xl space-y-4">
+        <div className="text-center py-12 border border-dashed border-stone-200 rounded-lg bg-white px-6">
+          <Activity size={28} className="mx-auto text-stone-300 mb-3"/>
+          <div className="text-sm font-semibold text-stone-800">The code list is empty</div>
+          <div className="text-xs text-stone-500 mt-1 leading-relaxed">
+            Load the {TELEMATICS_SEED_CODES.length} codes from Tanner’s critical code log
+            ({TELEMATICS_SEED_SOURCE.rows.toLocaleString()} Bobcat emails, {fmtDay(TELEMATICS_SEED_SOURCE.from)} – {fmtDay(TELEMATICS_SEED_SOURCE.to)}).
+            They start as Critical and not reviewed.
+          </div>
+          <div className="mt-4 flex justify-center gap-2 flex-wrap">
+            <button onClick={seed} disabled={seeding}
+              className="px-3 py-2 bg-brand-600 hover:bg-brand-700 disabled:bg-stone-300 text-white text-sm font-semibold rounded-md">
+              {seeding ? 'Loading…' : `Load starter list (${TELEMATICS_SEED_CODES.length} codes)`}
+            </button>
+            <button onClick={() => setAdding(true)} className="px-3 py-2 border border-stone-200 hover:bg-stone-50 text-sm font-semibold rounded-md text-stone-700">Add a code</button>
+          </div>
+        </div>
+        {addForm}
+      </div>
+    );
+  }
+
+  const chips = [['all', 'All'], ['unreviewed', 'Not reviewed'], ...CODE_LEVELS.map(l => [l.id, l.label])];
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-3 px-3.5 py-3 bg-stone-100 border border-stone-200 rounded-lg text-xs text-stone-600 leading-relaxed">
+        <Activity size={16} className="text-stone-500 shrink-0 mt-0.5"/>
+        <div>
+          Bobcat marks every fault code critical. Choose what each one really is: <b>Critical</b> codes go on
+          Carter’s board, <b>Non-critical</b> ones are logged but kept off it, <b>Ignore</b> is logged only.
+          Codes nobody has reviewed yet count as Critical.
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        {chips.map(([id, label]) => (
+          <button key={id} type="button" onClick={() => setFilter(id)} aria-pressed={filter === id}
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${
+              filter === id ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'}`}>
+            {label} <span className="font-mono opacity-70">{counts[id] || 0}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="flex flex-col sm:flex-row gap-2">
+        <div className="relative flex-1">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400"/>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search code, summary or model…"
+            className="w-full pl-8 pr-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
+        </div>
+        {!adding && (
+          <button onClick={() => setAdding(true)}
+            className="px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md flex items-center justify-center gap-1.5">
+            <Plus size={14}/> Add code
+          </button>
+        )}
+      </div>
+      {addForm}
+
+      {rows.length === 0 ? (
+        <div className="text-center py-10 text-sm text-stone-500 border border-dashed border-stone-200 rounded-lg">No codes match.</div>
+      ) : (
+        <>
+          {/* Desktop table */}
+          <div className="hidden md:block bg-white border border-stone-200 rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-stone-50 text-[10px] uppercase tracking-widest text-stone-500">
+                <tr>
+                  <th className="text-left px-4 py-2.5 font-semibold">Code</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">Summary</th>
+                  <th className="text-right px-4 py-2.5 font-semibold">Seen</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">Treat as</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">Review</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-100">
+                {rows.map(d => (
+                  <tr key={d.code} className={d.reviewed === true ? '' : 'bg-amber-50/40'}>
+                    <td className="px-4 py-2.5 font-mono text-xs font-semibold text-stone-900 whitespace-nowrap">{d.code}</td>
+                    <td className="px-4 py-2.5">
+                      <div className="text-stone-800">{d.summary || <span className="text-stone-400">—</span>}</div>
+                      {d.topModels && d.topModels.length > 0 && (
+                        <div className="text-[11px] text-stone-500">Mostly {d.topModels.join(', ')}</div>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <div className="font-mono text-xs text-stone-800">{(Number(d.seenCount) || 0).toLocaleString()}</div>
+                      {d.lastSeen && <div className="text-[11px] text-stone-500">last {fmtDay(d.lastSeen)}</div>}
+                    </td>
+                    <td className="px-4 py-2.5"><CodeLevelPicker doc={d} onSetLevel={onSetLevel}/></td>
+                    <td className="px-4 py-2.5"><CodeReviewState doc={d} userMap={userMap} onSetLevel={onSetLevel}/></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Mobile cards */}
+          <div className="md:hidden space-y-2.5">
+            {rows.map(d => (
+              <div key={d.code} className={`p-3 border rounded-lg space-y-2 ${d.reviewed === true ? 'bg-white border-stone-200' : 'bg-amber-50/40 border-amber-200'}`}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-mono text-xs font-semibold text-stone-900">{d.code}</span>
+                  <span className="font-mono text-[11px] text-stone-500">{(Number(d.seenCount) || 0).toLocaleString()} seen</span>
+                </div>
+                <div className="text-sm text-stone-800">{d.summary}</div>
+                {d.topModels && d.topModels.length > 0 && <div className="text-[11px] text-stone-500">Mostly {d.topModels.join(', ')}</div>}
+                <CodeLevelPicker doc={d} onSetLevel={onSetLevel}/>
+                <div><CodeReviewState doc={d} userMap={userMap} onSetLevel={onSetLevel}/></div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, onSetAccess, currentUserId, currentUserRole }) {
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({
     name: '', email: '', password: '',
-    role: 'user'
+    role: 'user', access: 'leads'
   });
   const [addErr, setAddErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -5467,10 +5839,14 @@ function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, cur
       const newUid = await createUserOnSecondaryApp(trimmedEmail, password);
 
       // Create their Firestore profile
+      // Admins get every module; a non-admin gets the chosen access preset.
+      const accessFields = form.role === 'admin' ? {}
+        : ((ACCESS_PRESETS.find(p => p.id === form.access) || ACCESS_PRESETS[0]).fields);
       await saveUserDoc(newUid, {
         name: trimmedName,
         email: trimmedEmail,
         role: form.role,
+        ...accessFields,
         isSystem: false,
         createdAt: new Date().toISOString()
       });
@@ -5496,7 +5872,7 @@ function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, cur
         );
       }
 
-      setForm({ name: '', email: '', password: '', role: 'user' });
+      setForm({ name: '', email: '', password: '', role: 'user', access: 'leads' });
       setAdding(false);
       setShowPw(false);
       setCopied(false);
@@ -5800,6 +6176,13 @@ function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, cur
                 <option value="user">Sales Rep</option>
                 <option value="admin">Admin</option>
               </select>
+              {form.role !== 'admin' && (
+                <select value={form.access} onChange={e => setForm({...form, access: e.target.value})}
+                  aria-label="Access"
+                  className="px-3 py-2 border border-stone-200 rounded-md text-sm bg-white">
+                  {ACCESS_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </select>
+              )}
             </div>
 
             {/* Generate password + strength meter */}
@@ -5834,7 +6217,7 @@ function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, cur
                 className="px-3 py-1.5 bg-stone-900 hover:bg-stone-800 disabled:bg-stone-400 text-white text-sm font-medium rounded-md">
                 {busy ? 'Creating…' : 'Create User'}
               </button>
-              <button onClick={() => { setAdding(false); setAddErr(''); setShowPw(false); setCopied(false); setForm({ name: '', email: '', password: '', role: 'user' }); }} className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-sm">Cancel</button>
+              <button onClick={() => { setAdding(false); setAddErr(''); setShowPw(false); setCopied(false); setForm({ name: '', email: '', password: '', role: 'user', access: 'leads' }); }} className="px-3 py-1.5 text-stone-600 hover:text-stone-900 text-sm">Cancel</button>
             </div>
             {addErr && (
               <div className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-md px-3 py-2 flex items-center gap-2">
@@ -5874,8 +6257,11 @@ function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, cur
                         : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
                     } ${isCurrent ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}
                     title={isCurrent ? "Can't change your own role" : 'Click to toggle role'}>
-                    {u.role === 'admin' ? 'Admin' : 'Sales Rep'}
+                    {u.role === 'admin' ? 'Admin' : (hasLeadAccess(u) ? 'Sales Rep' : 'User')}
                   </button>
+                )}
+                {!u.isSystem && u.role !== 'admin' && onSetAccess && (
+                  <UserAccessToggles user={u} onSetAccess={onSetAccess}/>
                 )}
                 <div className="font-mono text-xs text-stone-500 w-16 text-right">{userLeadCounts[u.id] || 0} leads</div>
                 {!u.isSystem && !isCurrent && (
