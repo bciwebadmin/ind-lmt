@@ -255,6 +255,98 @@ What the endpoint does:
   lead is created in Incoming with a note pointing back to the old one.
 - Answers `{"ok":true,"action":"created"|"linked","leadId":…}`.
 
+## 9b. Telematics (Nov 2026)
+
+A separate module (CLAUDE.md → "Telematics"). Only admins and users with the
+**Telematics** switch on (Users page) can open it.
+
+### One-time, before the first push that includes email intake
+
+The intake function needs two **new** secrets. A deploy fails if a secret it
+uses doesn't exist, and the CI deploy account can't grant access to a new
+secret — so create both and grant them *first*:
+
+```powershell
+# 1. A long random value for the Zap to send. Copy it — Zapier needs it too.
+-join ((48..57)+(65..90)+(97..122) | Get-Random -Count 40 | % {[char]$_})
+firebase functions:secrets:set TELEMATICS_INTAKE_SECRET     # paste it
+
+# 2. The Google Maps key (below), or type none to start without address lookups.
+firebase functions:secrets:set GOOGLE_MAPS_KEY
+
+# 3. Let the functions read both.
+gcloud secrets add-iam-policy-binding TELEMATICS_INTAKE_SECRET --project=ind-lmt --member="serviceAccount:9450023146-compute@developer.gserviceaccount.com" --role=roles/secretmanager.secretAccessor
+gcloud secrets add-iam-policy-binding GOOGLE_MAPS_KEY --project=ind-lmt --member="serviceAccount:9450023146-compute@developer.gserviceaccount.com" --role=roles/secretmanager.secretAccessor
+```
+
+After the deploy, the hand-off callable needs the usual invoker binding
+(System Health flags it if missing):
+
+```powershell
+gcloud run services add-iam-policy-binding sendtelematicshandoff --region=us-south1 --project=ind-lmt --member=allUsers --role=roles/run.invoker
+```
+
+### Google Maps key (machine address lookups)
+
+Google Cloud console → project **ind-lmt** → APIs & Services → **Library** →
+enable **Geocoding API** → **Credentials** → Create credentials → API key →
+**Edit** the key → API restrictions → *Restrict key* → **Geocoding API** only →
+Save. One lookup per new case (≈1,000 a month at most), inside Google's free
+monthly allowance. To change it later, `firebase functions:secrets:set
+GOOGLE_MAPS_KEY` again and redeploy functions. `none` turns lookups off; the
+case still gets the city and a map link from Bobcat's coordinates.
+
+### The Zap: web admin inbox → LMT
+
+Bobcat's critical fault code emails go to the web admin inbox (DealerNet
+profile — Sean). One Zap:
+
+1. **Trigger:** Microsoft Outlook → **New Email** — signed in as the web admin
+   mailbox, folder = the one the Bobcat emails land in (an Outlook rule can file
+   mail from `no-reply@bobcat.com` with "Critical Fault Code" in the subject
+   there). Zapier's *New Email Matching Search* with
+   `from:no-reply@bobcat.com subject:"Critical Fault Code"` works too.
+2. **Action:** Webhooks by Zapier → **POST**
+
+```
+URL:           https://us-south1-ind-lmt.cloudfunctions.net/telematicsIntake
+Payload Type:  json
+Header:        Authorization = Bearer <the TELEMATICS_INTAKE_SECRET>
+```
+
+| Key | Map to (Outlook trigger field) |
+|---|---|
+| `subject` | Subject |
+| `html` | Body Content (the HTML body) |
+| `messageId` | Internet Message ID (or ID) — lets a Zapier retry be ignored |
+| `receivedAt` | Received Date Time (optional) |
+
+Send the **whole** body — don't pull fields out in Zapier. The LMT reads the
+email itself (`functions/telematicsIntakeRules.js`), so a change in Bobcat's
+layout shows up as an error in System Health instead of blank cases. A plain
+text body also works (send it as `text`).
+
+What the endpoint does:
+
+- Answers `{"ok":true,"action":"created"|"attached"|"duplicate"|"skipped"}`.
+  Wrong secret → 401. An email that isn't a fault code → `skipped`. A fault
+  email it can't read → 422, logged as an error (self-repair alert).
+- **Repeat codes** on a machine with an open case join that case (×N on the
+  board, "Bobcat sent the code again" in its activity) instead of making a
+  second one.
+- The **Code List** decides where a new case goes: Critical (or not reviewed
+  yet) → **New**; Non-critical / Ignore → straight to the **Archive**. Every
+  code is counted on the Code List, and one it has never seen is added there,
+  critical and not reviewed.
+- The branch comes from the servicing dealer on the email ("… BOBCAT OF INDY
+  NORTH" → Indy North).
+- The machine's street address is looked up once (Google), so it can differ
+  from the customer's billing address.
+
+**Test it:** in the Zap editor, *Test* the webhook step with a real Bobcat
+email — the answer should be `"action":"created"` and the case appears on the
+board. Logs: `firebase functions:log --only telematicsIntake`.
+
 ## 10. Post-launch checklist
 
 - [ ] All five branches appear under Settings

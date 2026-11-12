@@ -456,8 +456,8 @@ access (see Roles → module access). Discovery notes and samples are in the
 repo's `telemetry/` folder on Erin's PC (not committed — customer data).
 
 Build order: **1. access + code list (done)** · **2. board, case pages, win
-tiers, destinations, hand-off emails (done)** · 3. email intake (parser + Google
-reverse geocoding, `GOOGLE_MAPS_KEY` secret) · 4. WIP fetch from the web
+tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
+4. WIP fetch from the web
 server (FTP'd there; protected URL), serial matching, bumps, escalation.
 
 - Pure rules in `src/lib/telematics.js` (tested). Views: `TELEMATICS_VIEWS`
@@ -502,6 +502,26 @@ server (FTP'd there; protected URL), serial matching, bumps, escalation.
   test fails if they drift. New callable → needs the Cloud Run `allUsers`
   invoker binding (`sendtelematicshandoff`, us-south1) after its first deploy.
 - `?case=<id>` opens a case page (for step 4's bump emails).
+- **Email intake** — `telematicsIntake` (onRequest POST, **us-south1**, in
+  `PROBES`; `Authorization: Bearer <TELEMATICS_INTAKE_SECRET>` — its own
+  secret, not `INTAKE_SECRET`). A Zap (web admin Outlook → Webhooks) posts
+  `{ subject, html, messageId, receivedAt }`; setup in SETUP.md §9b. The
+  email is **read server-side** by `functions/telematicsIntakeRules.js`
+  (pure, tested against made-up copies of real emails in
+  `scripts/fixtures/` — never commit real ones): sections → labelled
+  fields, CST/CDT times, branch from the dealer name (longest first, so
+  Indy North isn't Indy; known AR numbers as a fallback). A fault email it
+  can't read → 422 + `console.error('[telematics-intake] …')` (self-repair);
+  other mail → `skipped`. Repeats on a machine's open case attach to it
+  (`alertCount`, `alerts[]`, an `alert` history entry); the same
+  `messageId` twice is a duplicate. New cases: Code List level decides —
+  critical / unknown / unreviewed → New; noncritical / ignore → `closed`
+  with `closure.auto` (Archive; its repeats keep logging there). Every
+  code is counted (`seenCount`) and an unseen one is added to the Code List,
+  not reviewed. Email cases have `createdBy: 'intake'`.
+- **Reverse geocoding** — `GOOGLE_MAPS_KEY` (Geocoding API only; `none`
+  = off). Once per new case → `location.address`, `geocodeStatus`. A bad
+  key is a `console.warn` (settings problem, not a code bug).
 - Known from the samples: the email gives serial, model, hours, nearest city
   **and lat/long**, customer + address, primary code ("CRITICAL - M0217") and
   other active codes, and the servicing dealer's AR number (2000007726 Indy,

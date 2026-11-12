@@ -832,6 +832,78 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
     === 'Telematics: Field Service — FOXY LNDSCP LLC — T770 T4 AT6330022 — M0217 Hydraulic/Hydrostatic Filter Plugged');
 }
 
+/* ---------- Telematics step 3: reading Bobcat's fault emails ---------- */
+{
+  const { createRequire } = await import('node:module');
+  const I = createRequire(import.meta.url)('../functions/telematicsIntakeRules.js');
+  const T = await import('../src/lib/telematics.js');
+  const BR = ['Anderson', 'Columbus', 'Ellettsville', 'Indy', 'Indy North'];
+  // Made-up copies of real emails: real layout, invented customer data.
+  const fx1 = readFileSync(join(root, 'scripts/fixtures/telematics-fault-email-1.html'), 'utf8');
+  const fx2 = readFileSync(join(root, 'scripts/fixtures/telematics-fault-email-2.html'), 'utf8');
+
+  const p1 = I.parseFaultEmail({ subject: 'Critical Fault Code - ACME DIRT WORKS LLC - Hydraulic/Hydrostatic Filter Plugged - T770 T4', html: fx1 }, BR);
+  const a1 = p1.alert || {};
+  check('email: reads the machine', p1.ok && a1.serial === 'AT6399999' && a1.model === 'T770 T4' && a1.hours === 1702.3 && a1.inventoryStatus === 'Retailed Inventory');
+  check('email: reads the customer', a1.customer && a1.customer.name === 'ACME DIRT WORKS LLC' && a1.customer.phone === '+1 317 555 0100' && a1.customer.address === '100 MAIN ST, SHERIDAN, 46069, US');
+  check('email: reads location and coordinates', a1.location && a1.location.city === 'Sheridan, Indiana' && a1.location.lat === 40.1 && a1.location.lng === -86.2);
+  check('email: reads the fault', a1.fault && a1.fault.severity === 'CRITICAL' && a1.fault.code === 'M0217' && a1.fault.summary === 'Hydraulic/Hydrostatic Filter Plugged');
+  check('email: start time in the right zone (4:35 PM CST)', a1.fault && a1.fault.startAt === '2026-11-11T22:35:00.000Z', a1.fault && a1.fault.startAt);
+  check('email: description and possible causes', a1.fault && /Gateway Controller detects/.test(a1.fault.description) && /^Hydraulic Implement Filter\./.test(a1.fault.possibleCause) && !/Conditions for/.test(a1.fault.possibleCause));
+  check('email: "Invalid date" PM fields are blank', a1.planned && a1.planned.endDate === '' && a1.planned.endHours === '');
+  check('email: branch from the dealer name (Indy North, not Indy)', a1.branch === 'Indy North' && a1.dealer.ar === '2000008174');
+  const a2 = (I.parseFaultEmail({ subject: 'x Fault Code', html: fx2 }, BR).alert) || {};
+  check('email: other active codes', a2.fault && JSON.stringify(a2.fault.otherCodes) === JSON.stringify([{ severity: 'INFORMATION', code: 'P113B-7B', summary: 'Fuel Level Low' }, { severity: 'WARNING', code: 'E00009714', summary: 'Water in Fuel Detected' }]));
+  check('email: dashed customer name kept whole, Anderson branch', a2.customer && a2.customer.name === 'EXAMPLE RENTALS - EAST' && a2.branch === 'Anderson');
+
+  // Plain text works too, and the Owner Account block
+  const txt = ['An asset serviced by your dealership has reported a critical fault code.', 'Asset Information', 'Serial Number: b4sb11111', 'Model: T66', 'Hours: 12',
+    'Location: Franklin, Indiana US (39.4, -85.9)', 'Customer Information', 'Retail Customer: Pat Example', 'Address: 1 A ST, FRANKLIN, 46131, US',
+    'Owner Account', 'Owner Account: Example Lawn Care', 'Pat Example', 'pat@example.com', 'Fault Information', 'Start Date: Nov 12, 2026 06:19 AM (CST)',
+    'Primary Code: CRITICAL - P1061-97', 'Summary: Air Filter Plugged', 'Other Active Fault Codes:', 'CRITICAL - P1061-97 - Air Filter Plugged',
+    'Service Information', 'Planned Maintenance:', 'End Date: Invalid date', 'End Hours: undefined', 'Servicing Dealer Information', 'AR Number: 2000007726',
+    'Name: BRIGHT EQUIPMENT INC. BOBCAT OF INDY'].join('\n');
+  const a3 = (I.parseFaultEmail({ subject: 'Critical Fault Code - Pat Example - Air Filter Plugged - T66', text: txt }, BR).alert) || {};
+  check('email: plain-text body works, serial upper-cased', a3.serial === 'B4SB11111' && a3.branch === 'Indy');
+  check('email: owner account, contact and email', a3.customer && a3.customer.ownerAccount === 'Example Lawn Care' && a3.customer.ownerContact === 'Pat Example' && a3.customer.ownerEmail === 'pat@example.com');
+  check('email: the primary code is not repeated as an "other" code', a3.fault && a3.fault.otherCodes.length === 0);
+  check('email: missing phone is blank, not "undefined"', a3.customer && a3.customer.phone === '');
+
+  // What isn't a fault email, and what can't be read
+  check('email: other mail is skipped', I.parseFaultEmail({ subject: 'Lunch?', text: 'See you at noon' }, BR).reason === 'not-a-fault-email');
+  check('email: a fault email without a serial is unreadable', I.parseFaultEmail({ subject: 'Critical Fault Code - X - Y - Z', text: 'Fault Information\nPrimary Code: CRITICAL - M0217' }, BR).reason === 'unreadable');
+  check('email: a fault email without a code is unreadable', I.parseFaultEmail({ subject: 'Critical Fault Code', text: 'Asset Information\nSerial Number: AT6399999' }, BR).reason === 'unreadable');
+
+  // Helpers
+  check('dates: CST/CDT/EST and 12 AM / 12 PM', I.parseBobcatDate('Nov 11, 2026 04:35 PM (CST)') === '2026-11-11T22:35:00.000Z' && I.parseBobcatDate('Jul 4, 2026 12:05 AM (CDT)') === '2026-07-04T05:05:00.000Z'
+    && I.parseBobcatDate('Jan 2, 2026 12:00 PM (EST)') === '2026-01-02T17:00:00.000Z' && I.parseBobcatDate('Invalid date') === '');
+  check('html: entities, breaks, styles', I.htmlToText('<style>p{x}</style><p>A&nbsp;&amp;&#176;B</p><br>C&#x2019;').trim() === 'A &°B\n\nC’');
+  check('branch: dealer name, then known AR, else blank', I.branchFromDealer({ name: 'BOBCAT OF COLUMBUS' }, BR) === 'Columbus' && I.branchFromDealer({ name: 'odd', ar: '2000008159' }, BR) === 'Anderson'
+    && I.branchFromDealer({ name: 'BOBCAT OF ELLETTSVILLE' }, BR) === 'Ellettsville' && I.branchFromDealer({ name: 'somewhere' }, BR) === '');
+
+  // Which case an alert joins
+  const al = { serial: 'AT6399999', fault: { code: 'M0217' } };
+  const cs = [
+    { id: 'old', serial: 'AT6399999', status: 'completed', createdAt: '2026-01-01' },
+    { id: 'open', serial: 'AT6399999', status: 'working', createdAt: '2026-02-01' },
+    { id: 'other', serial: 'B4SB00000', status: 'new', createdAt: '2026-03-01' }
+  ];
+  check('repeat: joins the machine\'s open case', I.caseForAlert(cs, al).id === 'open');
+  check('repeat: a closed or completed case starts a new one', I.caseForAlert([cs[0]], al) === null);
+  check('repeat: a non-critical code keeps logging on its auto-closed case', I.caseForAlert([{ id: 'nc', serial: 'AT6399999', status: 'closed', closure: { auto: true }, fault: { code: 'M0217' } }], al).id === 'nc'
+    && I.caseForAlert([{ id: 'nc', serial: 'AT6399999', status: 'closed', closure: { auto: true }, fault: { code: 'X1' } }], al) === null);
+  check('repeat: same email twice is a duplicate', I.isDuplicateMessage([{ intake: { messageId: 'm1' } }], 'm1') && I.isDuplicateMessage([{ alerts: [{ messageId: 'm2' }] }], 'm2') && !I.isDuplicateMessage([{ intake: { messageId: 'm1' } }], '') && !I.isDuplicateMessage([], 'm3'));
+
+  // New cases
+  const n1 = I.newCaseFromAlert(a1, { level: 'critical', now: 'N', messageId: 'm' });
+  check('new case: critical → New, with intake details', n1.status === 'new' && n1.source === 'email' && n1.createdBy === 'intake' && n1.alertCount === 1 && n1.alerts[0].messageId === 'm' && n1.branch === 'Indy North' && n1.history[0].type === 'created');
+  const n2 = I.newCaseFromAlert(a1, { level: 'noncritical', now: 'N' });
+  check('new case: non-critical / ignored → Archive, auto-closed', n2.status === 'closed' && n2.closure.auto === true && n2.closure.reason === 'Non-critical code' && I.newCaseFromAlert(a1, { level: 'ignore' }).closure.reason === 'Ignored code');
+  check('new case: statuses the rules accept, tab derived', [n1, n2].every(c => T.CASE_STATUS_IDS.includes(c.status)) && T.caseTab(n2) === 'archive');
+  check('new case: the hand-off can read it', (() => { const R = createRequire(import.meta.url)('../functions/telematicsRules.js'); return R.handoffSubject({ ...n1, outcome: { tier: 'shop' } }).includes('AT6399999'); })());
+  check('fixtures carry no real customer data', ![fx1, fx2].some(f => /FOXY|RUNYON|SUNBELT|AT6330022|B4SB33825|stanage|awstrack/i.test(f)));
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

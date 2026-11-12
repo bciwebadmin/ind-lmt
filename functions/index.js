@@ -22,6 +22,7 @@ const { needsContactReminder, needsFollowUpReminder, followUpDateDue, indyToday,
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const selfRepair = require('./selfRepairRules');
 const telematics = require('./telematicsRules');
+const telematicsIntakeRules = require('./telematicsIntakeRules');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -97,6 +98,17 @@ const RESEND_API_KEY  = defineSecret('RESEND_API_KEY');
 //   firebase functions:secrets:set GITHUB_ISSUES_TOKEN
 // Set it to "none" to run the health checks without filing issues.
 const GITHUB_ISSUES_TOKEN = defineSecret('GITHUB_ISSUES_TOKEN');
+
+// Telematics email intake (CLAUDE.md → "Telematics"). Its own secret, not
+// INTAKE_SECRET, so the two Zaps can be rotated separately. Set via:
+//   firebase functions:secrets:set TELEMATICS_INTAKE_SECRET
+const TELEMATICS_INTAKE_SECRET = defineSecret('TELEMATICS_INTAKE_SECRET');
+
+// Google Maps Platform key, Geocoding API only: the machine's coordinates →
+// a street address, once per new case. Set via:
+//   firebase functions:secrets:set GOOGLE_MAPS_KEY
+// Set it to "none" to run intake without address lookups.
+const GOOGLE_MAPS_KEY = defineSecret('GOOGLE_MAPS_KEY');
 // The repo issues are filed in. A plain constant on purpose: a defineString
 // param needs a value in functions/.env.ind-lmt, and the non-interactive CI
 // deploy fails without one even when a default is given.
@@ -2006,6 +2018,124 @@ exports.sendRecordEmail = onCall(
     } catch (err) {
       console.error(`[${kind}] Failed to send:`, err);
       return { sent: false, reason: 'send-failed', deskRecipients: desk.length };
+    }
+  }
+);
+
+/* ===================== TELEMATICS EMAIL INTAKE ===================== */
+// A Zap (Outlook "New Email" in the web admin inbox → Webhooks POST) sends
+// each Bobcat "Critical Fault Code" email here:
+//   POST  Authorization: Bearer <TELEMATICS_INTAKE_SECRET>
+//   { subject, html, text?, messageId?, receivedAt? }
+// The email is read by functions/telematicsIntakeRules.js (pure, tested).
+//   - A repeat on a machine with an open case attaches to it (alertCount,
+//     alerts[], an 'alert' history entry) instead of making a second case.
+//   - A new case's code is classified by the Code List: unknown / unreviewed
+//     = critical (New); Non-critical / Ignore file straight into the Archive.
+//   - Every code seen is counted on the Code List; a code the list has never
+//     seen is added there, critical and not reviewed, for Tanner to review.
+//   - The same email twice (a Zapier retry) is ignored (messageId).
+// Answers 200 { ok, action: created | attached | duplicate | skipped },
+// 422 when a fault email can't be read — logged as an error, so a change in
+// Bobcat's layout reaches the self-repair loop instead of failing silently.
+async function reverseGeocode(lat, lng) {
+  let key = '';
+  try { key = (GOOGLE_MAPS_KEY.value() || '').trim(); } catch { /* not set */ }
+  if (key.length <= 10 || lat == null || lng == null) return { status: 'skipped' };
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 5000);
+  try {
+    const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(lat)},${encodeURIComponent(lng)}&key=${encodeURIComponent(key)}`, { signal: ctl.signal });
+    const j = await r.json();
+    if (j.status === 'OK' && Array.isArray(j.results) && j.results[0]) return { status: 'ok', address: String(j.results[0].formatted_address || '').slice(0, 300) };
+    if (j.status === 'ZERO_RESULTS') return { status: 'none' };
+    // A bad or unrestricted key is a settings problem, not a code bug.
+    console.warn(`[telematics-intake] geocoding answered ${j.status}${j.error_message ? `: ${j.error_message}` : ''}`);
+    return { status: 'error', error: String(j.status || 'unknown') };
+  } catch (err) {
+    console.warn('[telematics-intake] geocoding request failed:', err && err.message ? err.message : err);
+    return { status: 'error', error: 'request-failed' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+exports.telematicsIntake = onRequest(
+  { secrets: [TELEMATICS_INTAKE_SECRET, GOOGLE_MAPS_KEY], region: 'us-south1' },
+  async (req, res) => {
+    if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
+    if ((req.headers.authorization || '') !== `Bearer ${TELEMATICS_INTAKE_SECRET.value()}`) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    }
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const subject = String(body.subject || '').slice(0, 500);
+    const html = String(body.html || '').slice(0, 2000000);
+    const text = String(body.text || '').slice(0, 500000);
+    const messageId = String(body.messageId || '').trim().slice(0, 300);
+    const receivedAt = String(body.receivedAt || '').slice(0, 40);
+    if (!html && !text) return res.status(400).json({ ok: false, error: 'Send the email body as html (or text).' });
+
+    const appConfig = await getAppConfig();
+    const parsed = telematicsIntakeRules.parseFaultEmail({ subject, html, text }, appConfig.branches || []);
+    if (!parsed.ok) {
+      if (parsed.reason === 'not-a-fault-email') {
+        console.warn(`[telematics-intake] Skipped an email that isn't a fault code: "${subject.slice(0, 120)}"`);
+        return res.json({ ok: true, action: 'skipped', reason: parsed.reason });
+      }
+      console.error(`[telematics-intake] Could not read a Bobcat fault email (${parsed.detail}) — has the layout changed? Subject: "${subject.slice(0, 120)}"`);
+      return res.status(422).json({ ok: false, error: 'unreadable', detail: parsed.detail });
+    }
+
+    const a = parsed.alert;
+    const now = new Date().toISOString();
+    const FV = admin.firestore.FieldValue;
+    try {
+      const casesRef = db.collection('telematicsCases');
+      const snap = await casesRef.where('serial', '==', a.serial).get();
+      const cases = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      if (telematicsIntakeRules.isDuplicateMessage(cases, messageId)) {
+        console.log(`[telematics-intake] Already have message ${messageId.slice(0, 40)} — ignored`);
+        return res.json({ ok: true, action: 'duplicate' });
+      }
+
+      // The Code List: classify, and count what Bobcat sends.
+      const codeRef = db.collection('telematicsCodes').doc(a.fault.code);
+      const codeSnap = await codeRef.get();
+      const codeDoc = codeSnap.exists ? codeSnap.data() : null;
+      const level = codeDoc && ['critical', 'noncritical', 'ignore'].includes(codeDoc.level) ? codeDoc.level : 'critical';
+      if (codeDoc) {
+        await codeRef.update({ seenCount: FV.increment(1), lastSeen: now.slice(0, 10), updatedAt: now });
+      } else {
+        await codeRef.set({
+          code: a.fault.code, summary: a.fault.summary || '', level: 'critical', reviewed: false,
+          seenCount: 1, topModels: a.model ? [a.model] : [], lastSeen: now.slice(0, 10), notes: '',
+          createdAt: now, createdBy: 'intake', updatedAt: now
+        });
+        console.log(`[telematics-intake] New code ${a.fault.code} added to the Code List (not reviewed)`);
+      }
+
+      const existing = telematicsIntakeRules.caseForAlert(cases, a);
+      if (existing) {
+        const patch = {
+          alertCount: FV.increment(1), lastAlertAt: now, updatedAt: now,
+          alerts: FV.arrayUnion({ at: now, code: a.fault.code, summary: a.fault.summary, startAt: a.fault.startAt, messageId }),
+          history: FV.arrayUnion({ id: uid('h'), type: 'alert', at: now, by: '', code: a.fault.code, summary: a.fault.summary })
+        };
+        if (a.hours != null) patch.hours = a.hours;
+        await casesRef.doc(existing.id).update(patch);
+        console.log(`[telematics-intake] ${a.serial} ${a.fault.code} attached to case ${existing.id}`);
+        return res.json({ ok: true, action: 'attached', caseId: existing.id });
+      }
+
+      const geo = await reverseGeocode(a.location.lat, a.location.lng);
+      const doc = telematicsIntakeRules.newCaseFromAlert(a, { level, now, messageId, receivedAt });
+      doc.location = { ...doc.location, address: geo.address || '', geocodeStatus: geo.status };
+      const ref = await casesRef.add(doc);
+      console.log(`[telematics-intake] Case ${ref.id} created: ${a.serial} ${a.fault.code} (${doc.status}${doc.branch ? `, ${doc.branch}` : ''})`);
+      return res.json({ ok: true, action: 'created', caseId: ref.id, status: doc.status });
+    } catch (err) {
+      console.error('[telematics-intake] Failed to save a fault email:', err);
+      return res.status(500).json({ ok: false, error: 'save-failed' });
     }
   }
 );

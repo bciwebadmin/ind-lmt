@@ -5813,8 +5813,8 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
           </div>
           {!list.length && (
             <div className="text-xs text-stone-500 mt-1 max-w-md mx-auto leading-relaxed">
-              Cases will arrive on their own from Bobcat’s critical fault code emails once intake is set up.
-              Until then, add one by hand with <b>Add case</b>.
+              Cases arrive on their own from Bobcat’s critical fault code emails (the Zap in SETUP.md → Telematics).
+              You can also add one by hand with <b>Add case</b>.
             </div>
           )}
         </div>
@@ -5846,6 +5846,7 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
                     </td>
                     <td className="px-4 py-2.5">
                       <CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/>
+                      {c.alertCount > 1 && <span className="ml-1.5 text-[10px] font-bold text-stone-500" title={`Bobcat has sent ${c.alertCount} alerts on this case`}>×{c.alertCount}</span>}
                       {c.fault && c.fault.summary && <div className="text-xs text-stone-500 truncate max-w-[240px]">{c.fault.summary}</div>}
                     </td>
                     <td className="px-4 py-2.5 text-stone-700">{c.branch || '—'}</td>
@@ -6000,7 +6001,9 @@ function caseEventText(e) {
     ? `Hand-off emailed to ${(e.to || []).join(', ')}${(e.cc || []).length ? ` (cc ${e.cc.join(', ')})` : ''}`
     : `Hand-off email not sent${e.reason === 'no-recipients' ? ' — no one to send to' : ''}`;
   if (e.type === 'work_order') return `Work order confirmed${e.number ? ` — ${e.number}` : ''}`;
-  if (e.type === 'created') return e.source === 'manual' ? 'Case added by hand' : 'Case created from Bobcat email';
+  if (e.type === 'created') return e.source === 'manual' ? 'Case added by hand'
+    : `Case created from Bobcat email${e.autoClosed ? ` — filed in the Archive (${e.autoClosed.toLowerCase()})` : ''}`;
+  if (e.type === 'alert') return `Bobcat sent the code again — ${[e.code, e.summary].filter(Boolean).join(' ')}`;
   return CASE_EVENT_LABEL[e.type] || e.type;
 }
 
@@ -6054,20 +6057,42 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
               </CaseField>
             )}
             {c.alertCount > 1 && <CaseField label="Sent again">{`${c.alertCount - 1} more time${c.alertCount === 2 ? '' : 's'}, last ${fmtWhen(c.lastAlertAt)}`}</CaseField>}
+            {(fault.description || fault.possibleCause) && (
+              <details className="py-1 text-sm">
+                <summary className="cursor-pointer text-xs font-semibold text-brand-700">Bobcat’s description and possible causes</summary>
+                {fault.description && <div className="mt-2 text-stone-700 whitespace-pre-wrap">{fault.description}</div>}
+                {fault.possibleCause && <div className="mt-2"><div className="text-[11px] uppercase tracking-widest font-bold text-stone-500">Possible causes</div><div className="text-stone-700 whitespace-pre-wrap">{fault.possibleCause}</div></div>}
+              </details>
+            )}
+            {(c.alerts || []).length > 1 && (
+              <details className="py-1 text-sm">
+                <summary className="cursor-pointer text-xs font-semibold text-brand-700">Every alert on this case ({c.alerts.length})</summary>
+                <div className="mt-1 divide-y divide-stone-100">
+                  {[...c.alerts].sort((x, y) => String(y.at).localeCompare(String(x.at))).map((x, i) => (
+                    <div key={i} className="py-1 text-xs text-stone-700"><span className="text-stone-500">{fmtWhen(x.at)}</span> · <span className="font-mono font-semibold">{x.code}</span> {x.summary}</div>
+                  ))}
+                </div>
+              </details>
+            )}
           </CaseCard>
           <div className="grid sm:grid-cols-2 gap-4">
             <CaseCard title="Customer">
               <CaseField label="Name">{cust.name}</CaseField>
               <CaseField label="Phone">{cust.phone ? <a className="text-brand-700 hover:underline" href={`tel:${cust.phone.replace(/[^\d+]/g, '')}`}>{cust.phone}</a> : null}</CaseField>
               <CaseField label="Address">{cust.address}</CaseField>
-              <CaseField label="Owner contact">{[cust.ownerContact, cust.ownerEmail].filter(Boolean).join(' · ')}</CaseField>
+              <CaseField label="Owner account">{cust.ownerAccount && cust.ownerAccount !== cust.name ? cust.ownerAccount : null}</CaseField>
+              <CaseField label="Owner contact">{cust.ownerContact || null}</CaseField>
+              <CaseField label="Owner email">{cust.ownerEmail ? <a className="text-brand-700 hover:underline" href={`mailto:${cust.ownerEmail}`}>{cust.ownerEmail}</a> : null}</CaseField>
             </CaseCard>
             <CaseCard title="Machine"
               action={asset ? <a href={asset} target="_blank" rel="noreferrer" className="text-xs font-semibold text-brand-700 hover:underline flex items-center gap-1">Bobcat portal <ExternalLink size={11}/></a> : null}>
               <CaseField label="Model">{c.model}</CaseField>
               <CaseField label="Serial">{c.serial ? <span className="font-mono">{c.serial}</span> : null}</CaseField>
               <CaseField label="Hours">{c.hours != null ? String(c.hours) : null}</CaseField>
+              <CaseField label="Status">{c.inventoryStatus}</CaseField>
               <CaseField label="Branch">{c.branch}</CaseField>
+              <CaseField label="Dealer">{c.dealer && c.dealer.name ? `${c.dealer.name}${c.dealer.ar ? ` (AR ${c.dealer.ar})` : ''}` : null}</CaseField>
+              <CaseField label="PM due">{c.planned && (c.planned.endDate || c.planned.endHours) ? [c.planned.endDate, c.planned.endHours && `${c.planned.endHours} hrs`].filter(Boolean).join(' · ') : null}</CaseField>
             </CaseCard>
           </div>
           <CaseCard title="Location"
@@ -6075,6 +6100,7 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
             <CaseField label="Machine at">{loc.address}</CaseField>
             <CaseField label="Near">{loc.city}</CaseField>
             <CaseField label="Coordinates">{maps ? `${loc.lat}, ${loc.lng}` : null}</CaseField>
+            {!loc.address && maps && loc.geocodeStatus === 'error' && <div className="text-xs text-stone-400 py-1">The street address couldn’t be looked up — use the map link.</div>}
             {!loc.address && !loc.city && !maps && <div className="text-sm text-stone-400 py-1">No location on this case.</div>}
           </CaseCard>
 
@@ -6154,8 +6180,9 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
               )}
               {status === 'closed' && c.closure && (
                 <div className="text-sm"><div className="font-semibold text-stone-900">Closed — {c.closure.reason}</div>
+                  {c.closure.auto && <div className="text-xs text-stone-500">Filed automatically: the Code List keeps this code off the board. Reopen to work it anyway.</div>}
                   {c.closure.note && <div className="text-xs text-stone-600 whitespace-pre-wrap">{c.closure.note}</div>}
-                  <div className="text-xs text-stone-500">{fmtWhen(c.closure.at)} by {who(c.closure.by)}</div></div>
+                  {!c.closure.auto && <div className="text-xs text-stone-500">{fmtWhen(c.closure.at)} by {who(c.closure.by)}</div>}</div>
               )}
               {!isOpenStatus && (
                 <button onClick={() => run(onReopen)} disabled={busy} className="text-xs font-semibold text-stone-600 hover:text-stone-900 flex items-center gap-1 pt-1">
