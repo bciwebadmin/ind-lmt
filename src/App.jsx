@@ -34,7 +34,7 @@ import {
 } from './lib/firestoreData';
 import {
   hasLeadAccess, hasTelematicsAccess, canOpenView, defaultViewFor, accessLabel, ACCESS_PRESETS,
-  TELEMATICS_CODES_VIEW, TELEMATICS_BOARD_VIEW, TELEMATICS_SETTINGS_VIEW, NO_ACCESS_VIEW,
+  TELEMATICS_CODES_VIEW, TELEMATICS_BOARD_VIEW, TELEMATICS_SETTINGS_VIEW, TELEMATICS_DASHBOARD_VIEW, NO_ACCESS_VIEW,
   WORKSPACES, WORKSPACE_PICKER_VIEW, workspaceOfView, workspacesFor, workspaceHomeView, landingView
 } from './lib/access';
 import {
@@ -48,6 +48,10 @@ import {
   FOLLOW_UP_DEFAULTS, followUpSettings, followUpState, followUpLabel
 } from './lib/telematics';
 import { TELEMATICS_SEED_CODES, TELEMATICS_SEED_SOURCE, TELEMATICS_SEED_DESTINATIONS } from './lib/telematicsSeed';
+import {
+  PERIODS, inPeriod, summary, outcomeBreakdown, topCodes, levelCounts, topMachines, serialBreaks,
+  byBranch, byDestination, lostReasons, weekly, formatHours, formatDays, formatPct
+} from './lib/telematicsStats';
 import { setErrorContext } from './lib/errorReporter';
 
 import {
@@ -1052,7 +1056,7 @@ export default function BobcatIndyCRM() {
     try {
       const requested = new URLSearchParams(window.location.search).get('view');
       const valid = [HOME_VIEW, 'todo', ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings',
-        TELEMATICS_BOARD_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW, WORKSPACE_PICKER_VIEW];
+        TELEMATICS_BOARD_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW, TELEMATICS_DASHBOARD_VIEW, WORKSPACE_PICKER_VIEW];
       // ?case=<id> (bump emails, step 4) opens the board.
       if (new URLSearchParams(window.location.search).get('case')) return TELEMATICS_BOARD_VIEW;
       if (requested && valid.includes(requested)) return requested;
@@ -2857,6 +2861,10 @@ export default function BobcatIndyCRM() {
                 />
               );
             })()}
+            {view === TELEMATICS_DASHBOARD_VIEW && telematicsAccess && (
+              <TelematicsDashboardView cases={telematicsCases} error={telematicsCasesError}
+                codesById={telematicsCodesById} branches={config.branches || []}/>
+            )}
             {view === TELEMATICS_SETTINGS_VIEW && telematicsAccess && (
               <TelematicsSettingsView
                 settings={telematicsSettings} error={telematicsSettingsError} isAdmin={currentUser.role === 'admin'}
@@ -3311,6 +3319,7 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
     // telematics access.
     { ws: 'telematics', title: 'Telematics', items: [
       { id: TELEMATICS_BOARD_VIEW, label: 'Board', icon: Activity, badge: telematicsNewCount, badgeAccent: telematicsNewCount > 0 },
+      { id: TELEMATICS_DASHBOARD_VIEW, label: 'Dashboard', icon: BarChart3 },
       { id: TELEMATICS_CODES_VIEW, label: 'Code List', icon: ClipboardList },
       { id: TELEMATICS_SETTINGS_VIEW, label: 'Telematics Settings', icon: SettingsIcon }
     ] },
@@ -3544,6 +3553,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
     [TELEMATICS_CODES_VIEW]: 'Critical Code List',
     [TELEMATICS_BOARD_VIEW]: 'Telematics Board',
     [TELEMATICS_SETTINGS_VIEW]: 'Telematics Settings',
+    [TELEMATICS_DASHBOARD_VIEW]: 'Telematics Dashboard',
     [WORKSPACE_PICKER_VIEW]: 'Choose a dashboard',
     [NO_ACCESS_VIEW]: 'No access yet'
   };
@@ -3601,6 +3611,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
               {view === TELEMATICS_CODES_VIEW && 'Telematics · which Bobcat fault codes Carter should call on'}
               {view === TELEMATICS_BOARD_VIEW && 'Critical fault codes to call on, and where each win was sent'}
               {view === TELEMATICS_SETTINGS_VIEW && 'Who a win is emailed to, for each place Carter can send it'}
+              {view === TELEMATICS_DASHBOARD_VIEW && 'Win rate, response times, machines and codes'}
             </div>
           </div>
         </div>
@@ -6555,6 +6566,215 @@ function WorkOrderModal({ serial, onSave, onCancel }) {
       <input value={wo} onChange={e => setWo(e.target.value)} placeholder="Work order number, e.g. M1063768 (optional)"
         className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white font-mono"/>
     </ModalShell>
+  );
+}
+
+/* ===================== TELEMATICS — DASHBOARD ===================== */
+// "How are we doing" for Tanner, Scott and Carter (phase 2 of the discovery
+// call). Every figure comes from src/lib/telematicsStats.js (pure, tested).
+// Colours: code levels keep the board's red / blue / grey; everything else is
+// one validated series blue, plus orange for "won" on the weekly trend
+// (dataviz palette slots 1–2, checked with validate_palette.js).
+const VIZ = { s1: '#2a78d6', s2: '#eb6834', grid: '#e7e5e4', axis: '#78716c', ink: '#1c1917' };
+const VIZ_LEVEL = { critical: '#e11d48', noncritical: '#2563eb', ignore: '#78716c' };
+const vizTip = { contentStyle: { fontSize: 12, border: '1px solid #e7e5e4', borderRadius: 6, padding: '6px 10px' }, labelStyle: { fontWeight: 600, color: '#1c1917' }, cursor: { fill: '#fafaf9' } };
+const axisTick = { fontSize: 10, fill: VIZ.axis };
+
+function VizLegend({ items }) {
+  return (
+    <div className="flex flex-wrap gap-x-4 gap-y-1 mb-2 text-xs text-stone-600">
+      {items.map(i => (
+        <span key={i.label} className="flex items-center gap-1.5">
+          <span className="w-2.5 h-2.5 rounded-sm" style={{ background: i.color }} aria-hidden="true"/>{i.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function VizTable({ cols, rows, empty = 'Nothing yet.' }) {
+  if (!rows.length) return <div className="text-xs text-stone-400 py-3">{empty}</div>;
+  return (
+    <div className="overflow-x-auto -mx-1">
+      <table className="w-full text-sm">
+        <thead><tr className="text-[10px] uppercase tracking-widest text-stone-500">
+          {cols.map(c => <th key={c.key} className={`px-1 py-1.5 font-semibold ${c.right ? 'text-right' : 'text-left'}`}>{c.label}</th>)}
+        </tr></thead>
+        <tbody className="divide-y divide-stone-100">
+          {rows.map((r, i) => (
+            <tr key={i}>
+              {cols.map(c => <td key={c.key} className={`px-1 py-1.5 ${c.right ? 'text-right font-mono text-xs' : ''} ${c.mono ? 'font-mono text-xs' : ''}`}>{c.render ? c.render(r) : r[c.key]}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }) {
+  const [period, setPeriod] = useState('90');
+  const [branch, setBranch] = useState('All');
+  const all = cases || [];
+  const scoped = useMemo(() => all.filter(c => branch === 'All' || (branch === 'No branch' ? !c.branch : c.branch === branch)), [all, branch]);
+  const list = useMemo(() => scoped.filter(c => inPeriod(c, period)), [scoped, period]);
+  const s = useMemo(() => summary(list), [list]);
+  const outcomes = useMemo(() => outcomeBreakdown(list), [list]);
+  const codes = useMemo(() => topCodes(list, codesById, 10), [list, codesById]);
+  const levels = useMemo(() => levelCounts(list, codesById), [list, codesById]);
+  const machines = useMemo(() => topMachines(list, 10), [list]);
+  const breaks = useMemo(() => serialBreaks(list, 10), [list]);
+  const branchRows = useMemo(() => byBranch(list, branches), [list, branches]);
+  const dests = useMemo(() => byDestination(list), [list]);
+  const lost = useMemo(() => lostReasons(list), [list]);
+  const weeks = useMemo(() => weekly(scoped, 12), [scoped]);
+
+  if (error) return <div className="max-w-2xl px-4 py-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-800">The dashboard couldn’t load the cases ({error}).</div>;
+  if (cases === null) return <div className="text-sm text-stone-500 py-8">Loading…</div>;
+
+  const periodLabel = PERIODS.find(p => p.id === period).label.toLowerCase();
+  const barH = (n) => Math.max(120, n * 30 + 20);
+
+  return (
+    <div className="space-y-4">
+      {/* Filters — one row, above everything they change */}
+      <div className="flex flex-wrap items-center gap-2">
+        <select value={period} onChange={e => setPeriod(e.target.value)} aria-label="Period"
+          className="px-3 py-1.5 border border-stone-200 rounded-md text-sm bg-white font-semibold text-stone-700">
+          {PERIODS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+        <select value={branch} onChange={e => setBranch(e.target.value)} aria-label="Branch"
+          className="px-3 py-1.5 border border-stone-200 rounded-md text-sm bg-white font-semibold text-stone-700">
+          <option value="All">All branches</option>
+          {branches.map(b => <option key={b} value={b}>{b}</option>)}
+          <option value="No branch">No branch</option>
+        </select>
+        <span className="text-xs text-stone-500">{s.cases} case{s.cases === 1 ? '' : 's'} created in the {periodLabel}</span>
+      </div>
+
+      {!all.length ? (
+        <div className="text-center py-16 border border-dashed border-stone-200 rounded-lg bg-white text-sm text-stone-500">
+          No cases yet — the dashboard fills in as Bobcat’s fault codes arrive and Carter works them.
+        </div>
+      ) : (
+      <>
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+        <KpiCard label="Cases" value={s.cases} subtitle={`${s.open} still New / Working`}/>
+        <KpiCard label="Win rate" value={formatPct(s.winRate)} subtitle={s.won + s.lost ? `${s.won} won · ${s.lost} lost` : 'nothing decided yet'}/>
+        <KpiCard label="Work orders opened" value={formatPct(s.workOrderRate)} subtitle={s.fieldShopWins ? `${s.workOrders} of ${s.fieldShopWins} field / shop wins` : 'no field / shop wins yet'}/>
+        <KpiCard label="First response" value={formatHours(s.medianFirstResponseHours)} subtitle={s.firstResponseCount ? 'median, code in → first action' : 'no responses yet'}/>
+        <KpiCard label="Win → work order" value={formatDays(s.medianDaysToWorkOrder)} subtitle={s.workOrderTimingCount ? `median of ${s.workOrderTimingCount}` : 'no work orders yet'}/>
+        <KpiCard label="Waiting on service" value={s.waitingOnService} subtitle={`${s.reminders} reminder${s.reminders === 1 ? '' : 's'} · ${s.escalated} escalated`} accent={s.escalated ? 'bad' : null}/>
+      </div>
+
+      <ChartCard title="Cases and wins per week" subtitle={`Last 12 weeks${branch !== 'All' ? ` · ${branch}` : ''}`}>
+        <VizLegend items={[{ label: 'New cases', color: VIZ.s1 }, { label: 'Won', color: VIZ.s2 }]}/>
+        <ResponsiveContainer width="100%" height={220}>
+          <LineChart data={weeks} margin={{ top: 5, right: 12, bottom: 5, left: -16 }}>
+            <CartesianGrid stroke={VIZ.grid} vertical={false}/>
+            <XAxis dataKey="label" tick={axisTick} tickLine={false} axisLine={{ stroke: VIZ.grid }}/>
+            <YAxis tick={axisTick} allowDecimals={false} tickLine={false} axisLine={false}/>
+            <Tooltip {...vizTip} cursor={{ stroke: VIZ.axis, strokeDasharray: '3 3' }} labelFormatter={(l) => `Week of ${l}`}/>
+            <Line type="monotone" dataKey="cases" name="New cases" stroke={VIZ.s1} strokeWidth={2} dot={{ r: 4, fill: VIZ.s1, strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 5, fill: VIZ.s1, stroke: '#fff', strokeWidth: 2 }}/>
+            <Line type="monotone" dataKey="won" name="Won" stroke={VIZ.s2} strokeWidth={2} dot={{ r: 4, fill: VIZ.s2, strokeWidth: 2, stroke: '#fff' }} activeDot={{ r: 5, fill: VIZ.s2, stroke: '#fff', strokeWidth: 2 }}/>
+          </LineChart>
+        </ResponsiveContainer>
+      </ChartCard>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ChartCard title="Most common codes" subtitle={`Top ${codes.length} by cases · coloured by the Code List`}>
+          <VizLegend items={[
+            { label: `Critical (${levels.critical})`, color: VIZ_LEVEL.critical },
+            { label: `Non-critical (${levels.noncritical})`, color: VIZ_LEVEL.noncritical },
+            { label: `Ignore (${levels.ignore})`, color: VIZ_LEVEL.ignore }
+          ]}/>
+          {codes.length ? (
+            <ResponsiveContainer width="100%" height={barH(codes.length)}>
+              <BarChart data={codes} layout="vertical" margin={{ top: 0, right: 16, bottom: 0, left: 0 }} barCategoryGap={4}>
+                <CartesianGrid stroke={VIZ.grid} horizontal={false}/>
+                <XAxis type="number" tick={axisTick} allowDecimals={false} tickLine={false} axisLine={false}/>
+                <YAxis type="category" dataKey="code" width={86} tick={{ ...axisTick, fontFamily: 'ui-monospace, monospace' }} tickLine={false} axisLine={false}/>
+                <Tooltip {...vizTip} formatter={(v, k, p) => [`${v} cases · ${p.payload.alerts} alerts · ${p.payload.won} won`, `${p.payload.summary} (${codeLevelLabel(p.payload.level)})`]}/>
+                <Bar dataKey="cases" radius={[0, 4, 4, 0]}>
+                  {codes.map(c => <Cell key={c.code} fill={VIZ_LEVEL[c.level] || VIZ_LEVEL.critical}/>)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : <div className="text-xs text-stone-400 py-3">No codes in this period.</div>}
+        </ChartCard>
+
+        <ChartCard title="How cases end" subtitle={`Cases created in the ${periodLabel}`}>
+          <ResponsiveContainer width="100%" height={barH(outcomes.length)}>
+            <BarChart data={outcomes} layout="vertical" margin={{ top: 0, right: 16, bottom: 0, left: 0 }} barCategoryGap={4}>
+              <CartesianGrid stroke={VIZ.grid} horizontal={false}/>
+              <XAxis type="number" tick={axisTick} allowDecimals={false} tickLine={false} axisLine={false}/>
+              <YAxis type="category" dataKey="label" width={150} tick={axisTick} tickLine={false} axisLine={false}/>
+              <Tooltip {...vizTip} formatter={(v) => [v, 'Cases']}/>
+              <Bar dataKey="count" fill={VIZ.s1} radius={[0, 4, 4, 0]}/>
+            </BarChart>
+          </ResponsiveContainer>
+          {lost.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-stone-100">
+              <div className="text-[10px] uppercase tracking-widest font-semibold text-stone-500 mb-1">Why we lost</div>
+              <VizTable cols={[{ key: 'reason', label: 'Reason' }, { key: 'count', label: 'Cases', right: true }]} rows={lost}/>
+            </div>
+          )}
+        </ChartCard>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ChartCard title="Machines that come up most" subtitle="Cases by model">
+          {machines.length ? (
+            <ResponsiveContainer width="100%" height={barH(machines.length)}>
+              <BarChart data={machines} layout="vertical" margin={{ top: 0, right: 16, bottom: 0, left: 0 }} barCategoryGap={4}>
+                <CartesianGrid stroke={VIZ.grid} horizontal={false}/>
+                <XAxis type="number" tick={axisTick} allowDecimals={false} tickLine={false} axisLine={false}/>
+                <YAxis type="category" dataKey="model" width={86} tick={axisTick} tickLine={false} axisLine={false}/>
+                <Tooltip {...vizTip} formatter={(v, k, p) => [`${v} cases · ${p.payload.won} won · ${p.payload.workOrders} work orders`, `Most common code: ${p.payload.topCode || '—'}`]}/>
+                <Bar dataKey="cases" fill={VIZ.s1} radius={[0, 4, 4, 0]}/>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : <div className="text-xs text-stone-400 py-3">No machines in this period.</div>}
+        </ChartCard>
+
+        <ChartCard title="By model and serial break" subtitle="First four characters of the serial number">
+          <VizTable rows={breaks} cols={[
+            { key: 'model', label: 'Model' },
+            { key: 'prefix', label: 'Serial', mono: true },
+            { key: 'machines', label: 'Machines', right: true },
+            { key: 'cases', label: 'Cases', right: true },
+            { key: 'topCode', label: 'Top code', mono: true }
+          ]}/>
+        </ChartCard>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ChartCard title="Who follows through" subtitle="Wins sent to each destination, and the work orders that followed">
+          <VizTable rows={dests} empty="No wins in this period." cols={[
+            { key: 'destination', label: 'Destination' },
+            { key: 'wins', label: 'Wins', right: true },
+            { key: 'workOrderRate', label: 'Work orders', right: true, render: r => r.fieldShop ? `${r.workOrders}/${r.fieldShop} · ${formatPct(r.workOrderRate)}` : 'parts' },
+            { key: 'medianDays', label: 'Days', right: true, render: r => r.medianDays == null ? '—' : formatDays(r.medianDays) },
+            { key: 'escalated', label: 'Escalated', right: true, render: r => r.escalated ? <span className="text-rose-700 font-semibold">{r.escalated}</span> : 0 }
+          ]}/>
+        </ChartCard>
+        <ChartCard title="By branch" subtitle="Branch from the servicing dealer on Bobcat’s email">
+          <VizTable rows={branchRows} empty="No cases in this period." cols={[
+            { key: 'branch', label: 'Branch' },
+            { key: 'cases', label: 'Cases', right: true },
+            { key: 'won', label: 'Won', right: true },
+            { key: 'winRate', label: 'Win rate', right: true, render: r => formatPct(r.winRate) }
+          ]}/>
+        </ChartCard>
+      </div>
+      <div className="text-[11px] text-stone-500 leading-relaxed">
+        Win rate = won ÷ (won + lost); closed cases (no action, duplicates, codes filed automatically) aren’t counted.
+        Work orders opened = field and shop wins with a work order from the WIP report or confirmed by hand.
+        First response = case created → the first note or status change by a person.
+      </div>
+      </>
+      )}
+    </div>
   );
 }
 

@@ -516,6 +516,19 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
   test fails if they drift. New callable → needs the Cloud Run `allUsers`
   invoker binding (`sendtelematicshandoff`, us-south1) after its first deploy.
 - `?case=<id>` opens a case page (for step 4's bump emails).
+- **Dashboard** (Telematics → Dashboard, `TELEMATICS_DASHBOARD_VIEW`) — every
+  figure from `src/lib/telematicsStats.js` (pure, tested): win rate = won ÷
+  (won + lost) with **closed excluded**; work-order rate = Field/Shop wins
+  with a work order ÷ Field/Shop wins; first response = created → first
+  note / status change *by a person* (system history has no `by`); win →
+  work order in Indy days (`openedOn`); top codes coloured by the Code List's
+  current level; machines by model and by model + serial prefix (first 4
+  chars — Tanner's "serial break"); who follows through per destination;
+  by branch; 12-week cases/wins trend. Period + branch filters. Cases are
+  all loaded client-side (fine for now; move to aggregates if it reaches
+  many thousands). Chart colours: code levels keep red/blue/grey; others use
+  the dataviz palette's validated blue (`#2a78d6`) and orange (`#eb6834`).
+  Repair-complete time isn't measurable yet — the WIP lists open orders only.
 - **Colour coding** — red = Critical, blue = Non-critical, grey = Ignore
   (Erin): `LEVEL_STYLE` (board rows: left bar + tint; chips) and
   `CODE_LEVEL_TONE` (Code List buttons, board filter chips). A case's level is

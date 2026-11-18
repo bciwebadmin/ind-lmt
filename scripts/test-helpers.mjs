@@ -998,6 +998,61 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('app: the sidebar groups are tagged with a dashboard', /\{ ws: 'telematics', title: 'Telematics'/.test(app) && /\{ ws: 'backoffice', title: 'Back Office'/.test(app) && /\{ ws: '\*', title: 'Admin'/.test(app));
 }
 
+/* ---------- Telematics dashboard: the numbers (Nov 2026) ---------- */
+{
+  const X = await import('../src/lib/telematicsStats.js');
+  const A = await import('../src/lib/access.js');
+  const NOW = Date.parse('2026-11-18T18:00:00Z'), H = 3600e3, D = 864e5;
+  const iso = (ms) => new Date(ms).toISOString();
+  const mk = (id, o = {}) => ({ id, status: 'new', createdAt: iso(NOW - 5 * D), serial: 'AT6300001', model: 'T770 T4', branch: 'Indy', fault: { code: 'M0217', summary: 'Filter' }, history: [], notes: [], ...o });
+  const won = (tier, extra = {}) => ({ status: tier === 'parts' ? 'completed' : 'sent', outcome: { result: 'won', tier, destinationName: tier === 'field' ? 'Field Service' : tier === 'shop' ? 'Indy South Service' : 'Indy South Parts', sentAt: iso(NOW - 4 * D) }, ...extra });
+  const cases = [
+    mk('a', { ...won('field'), workOrder: { number: 'T2', openedOn: new Date(NOW - 2 * D).toISOString().slice(0, 10), source: 'wip' },
+      history: [{ type: 'created', at: iso(NOW - 5 * D), by: '' }, { type: 'status', at: iso(NOW - 5 * D + 2 * H), by: 'carter' }] }),
+    mk('b', { ...won('shop', { followUp: { bumps: 3, escalatedAt: iso(NOW - D) } }), serial: 'AT6300002', fault: { code: 'E00009818', summary: 'Oil' },
+      notes: [{ at: iso(NOW - 5 * D + 4 * H), by: 'carter', text: 'x' }] }),
+    mk('c', { ...won('parts'), model: 'T66', serial: 'B4SB10001', branch: 'Anderson' }),
+    mk('d', { status: 'lost', outcome: { result: 'lost', reason: 'Customer declined' }, model: 'T66', serial: 'B4SB10002', branch: 'Anderson',
+      history: [{ type: 'lost', at: iso(NOW - 5 * D + 6 * H), by: 'carter' }] }),
+    mk('e', { status: 'closed', closure: { reason: 'Non-critical code', auto: true }, fault: { code: 'C1047-00' }, alertCount: 4, branch: '' }),
+    mk('f', { createdAt: iso(NOW - 200 * D) }),   // outside 90 days
+    mk('g', { status: 'working', outcome: { result: 'lost' } })   // reopened after a loss: not lost now
+  ];
+  const codes = { 'C1047-00': { code: 'C1047-00', level: 'ignore', reviewed: true }, E00009818: { code: 'E00009818', level: 'noncritical', reviewed: true } };
+  const in90 = cases.filter(c => X.inPeriod(c, '90', NOW));
+  check('dash: period filter', in90.length === 6 && cases.filter(c => X.inPeriod(c, 'all', NOW)).length === 7 && !X.inPeriod({}, '30', NOW));
+  const s = X.summary(in90);
+  check('dash: win rate = won / (won + lost); closed and reopened don\'t count', s.won === 3 && s.lost === 1 && s.closed === 1 && Math.abs(s.winRate - 0.75) < 1e-9);
+  check('dash: work-order rate over field + shop wins', s.fieldShopWins === 2 && s.workOrders === 1 && s.workOrderRate === 0.5);
+  check('dash: first response median (2 h, 4 h, 6 h → 4 h)', s.medianFirstResponseHours === 4 && s.firstResponseCount === 3);
+  check('dash: win → work order in days (sent 4 days ago, opened 2 days ago)', s.medianDaysToWorkOrder === 2 && s.workOrderTimingCount === 1);
+  check('dash: waiting, reminders, escalations', s.waitingOnService === 2 && s.reminders === 3 && s.escalated === 1 && s.open === 1);
+  check('dash: empty is safe', (() => { const e = X.summary([]); return e.winRate === null && e.workOrderRate === null && e.medianFirstResponseHours === null && e.cases === 0; })());
+  const ob = X.outcomeBreakdown(in90);
+  check('dash: outcomes by tier', JSON.stringify(ob.map(o => o.count)) === '[1,1,1,1,1]' && ob[0].label === 'Won · Field Service');
+  const tc = X.topCodes(in90, codes);
+  check('dash: top codes with today\'s level, alerts counted', tc[0].code === 'M0217' && tc[0].cases === 4 && tc[0].level === 'critical'
+    && tc.find(c => c.code === 'C1047-00').level === 'ignore' && tc.find(c => c.code === 'C1047-00').alerts === 4 && tc.find(c => c.code === 'E00009818').level === 'noncritical');
+  check('dash: level counts', JSON.stringify(X.levelCounts(in90, codes)) === JSON.stringify({ critical: 4, noncritical: 1, ignore: 1 }));
+  const tm = X.topMachines(in90);
+  check('dash: machines by model, with wins / work orders / top code', tm[0].model === 'T770 T4' && tm[0].cases === 4 && tm[0].won === 2 && tm[0].workOrders === 1 && tm[0].topCode === 'M0217' && tm[1].model === 'T66' && tm[1].cases === 2);
+  const sb = X.serialBreaks(in90);
+  check('dash: serial breaks count machines and cases', sb[0].model === 'T770 T4' && sb[0].prefix === 'AT63' && sb[0].machines === 2 && sb[0].cases === 4 && sb.find(r => r.prefix === 'B4SB').machines === 2);
+  const br = X.byBranch(in90, ['Indy', 'Anderson', 'Columbus']);
+  check('dash: by branch, empty branches dropped, no-branch row', br[0].branch === 'Indy' && br[0].cases === 3 && br.find(b => b.branch === 'Anderson').winRate === 0.5 && !br.some(b => b.branch === 'Columbus') && br.some(b => b.branch === 'No branch'));
+  const ds = X.byDestination(in90);
+  check('dash: who follows through', ds.find(d => d.destination === 'Field Service').workOrderRate === 1 && ds.find(d => d.destination === 'Indy South Service').escalated === 1
+    && ds.find(d => d.destination === 'Indy South Service').workOrderRate === 0 && ds.find(d => d.destination === 'Indy South Parts').fieldShop === 0);
+  check('dash: lost reasons', JSON.stringify(X.lostReasons(in90)) === JSON.stringify([{ reason: 'Customer declined', count: 1 }]));
+  const wk = X.weekly(cases, 12, NOW);
+  check('dash: 12 weeks, cases and wins land in their week', wk.length === 12 && wk.reduce((n, w) => n + w.cases, 0) === 6 && wk.reduce((n, w) => n + w.won, 0) === 3);
+  check('dash: formatting', X.formatHours(0.5) === '30 min' && X.formatHours(4) === '4 h' && X.formatHours(72) === '3 days' && X.formatHours(null) === '—'
+    && X.formatDays(0.2) === 'same day' && X.formatDays(1) === '1 day' && X.formatDays(2.5) === '2.5 days' && X.formatPct(0.756) === '76%' && X.formatPct(null) === '—');
+  check('dash: median', X.median([3, 1, 2]) === 2 && X.median([4, 1, 2, 3]) === 2.5 && X.median([]) === null);
+  check('dash: a Telematics view, open to telematics users only', A.TELEMATICS_VIEWS.includes(A.TELEMATICS_DASHBOARD_VIEW) && A.workspaceOfView(A.TELEMATICS_DASHBOARD_VIEW) === 'telematics'
+    && A.canOpenView(A.TELEMATICS_DASHBOARD_VIEW, { role: 'user', leadAccess: false, telematicsAccess: true }, []) && !A.canOpenView(A.TELEMATICS_DASHBOARD_VIEW, { role: 'user' }, []));
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
