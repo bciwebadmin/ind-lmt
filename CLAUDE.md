@@ -301,10 +301,25 @@ one is added without a probe or with the wrong region.
 
 ## Navigation
 
-Sidebar (`Sidebar`): **+ New** menu (`NEW_MENU`: lead, sales request, trade-in,
-walk-in sales submittal, finance deal → `handleNew`), then **Pipeline**
-(Dashboards + the four steps), **Back Office** (Sales Requests, Finance,
-Trade-Ins — badges are open counts), Reports, **Admin** (Users, Settings).
+**Dashboards (Nov 2026).** The left menu shows one dashboard at a time —
+**Lead Management** (To Do, Dashboard, the five lead tabs, Reports),
+**Back Office** (Sales Submittals, Sales Requests, Finance, Trade-Ins) or
+**Telematics** (Board, Code List, Telematics Settings) — switched from the
+**Dashboard** button at the bottom of the menu. **Admin** (Users, Settings)
+shows under every dashboard. **+ New** (`NEW_MENU` → `handleNew`) shows on
+Lead Management and Back Office; top-bar search is hidden on Telematics.
+Rules in `src/lib/access.js`: `WORKSPACES`, `workspacesFor(user)` (reps get
+Lead Management + Back Office — their own submittals/requests live there;
+telematics-only gets Telematics and no switcher), `workspaceOfView` (Users /
+Settings / the picker belong to none), `landingView`. Each `Sidebar` group
+carries `ws`. The menu follows the view: opening a Back Office record from
+To Do or search switches it. **Landing:** admins get **Choose a dashboard**
+(`WORKSPACE_PICKER_VIEW`, `WorkspacePickerView`) at sign-in; reps land on
+New; telematics-only on the board. A link that asks for something
+(`?view` / `?lead` / `?case`) skips the picker, and a refresh returns to
+the dashboard the tab was in (`sessionStorage['lmt.workspace']`, cleared on
+sign-out). Erin said "Back End"; the menu, emails and docs say Back Office,
+so that's the label.
 
 **Search** (`GlobalSearch` in the top bar, Ctrl/Cmd+K or `/`): matching lives
 in `src/lib/search.js` (pure, tested) — every word must match; phone digits
@@ -457,8 +472,7 @@ repo's `telemetry/` folder on Erin's PC (not committed — customer data).
 
 Build order: **1. access + code list (done)** · **2. board, case pages, win
 tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
-4. WIP fetch from the web
-server (FTP'd there; protected URL), serial matching, bumps, escalation.
+**4. WIP report by email, serial matching, reminders, escalation (done)**.
 
 - Pure rules in `src/lib/telematics.js` (tested). Views: `TELEMATICS_VIEWS`
   in `access.js`; sidebar group **Telematics**.
@@ -502,6 +516,12 @@ server (FTP'd there; protected URL), serial matching, bumps, escalation.
   test fails if they drift. New callable → needs the Cloud Run `allUsers`
   invoker binding (`sendtelematicshandoff`, us-south1) after its first deploy.
 - `?case=<id>` opens a case page (for step 4's bump emails).
+- **Colour coding** — red = Critical, blue = Non-critical, grey = Ignore
+  (Erin): `LEVEL_STYLE` (board rows: left bar + tint; chips) and
+  `CODE_LEVEL_TONE` (Code List buttons, board filter chips). A case's level is
+  the Code List's *current* classification of its code (`classifyCode`), so
+  re-classifying a code recolours its cases. Board filters: code level chips
+  (with counts in the tab) and branch.
 - **Email intake** — `telematicsIntake` (onRequest POST, **us-south1**, in
   `PROBES`; `Authorization: Bearer <TELEMATICS_INTAKE_SECRET>` — its own
   secret, not `INTAKE_SECRET`). A Zap (web admin Outlook → Webhooks) posts
@@ -519,6 +539,33 @@ server (FTP'd there; protected URL), serial matching, bumps, escalation.
   with `closure.auto` (Archive; its repeats keep logging there). Every
   code is counted (`seenCount`) and an unseen one is added to the Code List,
   not reviewed. Email cases have `createdBy: 'intake'`.
+- **WIP report** — emailed daily (CSV attachment) to a private Resend
+  **receiving** address (Telematics Settings → WIP report; SETUP.md §9b).
+  Resend posts `email.received` to `telematicsWipInbound` (onRequest POST,
+  us-south1, in `PROBES`). It verifies the **Svix signature** on the raw
+  body (`RESEND_WEBHOOK_SECRET`, `whsec_…`; 5-min tolerance), checks the
+  address and allowed senders, downloads the CSV with `RESEND_INBOUND_KEY`
+  (a **full-access** Resend key — sending-only can't read received
+  attachments), and keeps only `{ order, openedOn, serial, model, kind,
+  branch }` in `telematicsWip/latest` (no customer data); `telematicsWip/status`
+  feeds Settings and System Health. Pure rules: `functions/telematicsWipRules.js`.
+  It was going to be a public URL; Erin chose email instead (Nov 2026).
+- **Matching** — a `sent` Field/Shop case completes when a work order on its
+  serial was **opened on or after the Indy day it was sent** (WIP has dates
+  only). Earliest wins. `kind` (M* shop, T* field) and the M1–M6 branch are
+  informational — unconfirmed, never required.
+- **Reminders** — `telematicsFollowUps` (hourly :43, us-central1) and right
+  after each report. `followUpState` (duplicated in `src/lib/telematics.js`
+  for the board; a test checks): first deadline Field 48 h / Shop 168 h,
+  then every 24 h, 3 reminders (to the destination, cc the sender), then the
+  escalation list (`settings.escalation.to`, Tanner), cc the sender. Never
+  sooner than one interval after the last reminder. **A reminder only fires
+  once a WIP report received after its deadline still shows no match** — a
+  late or broken feed pauses reminders. Stored on `case.followUp
+  { bumps, lastBumpAt, escalatedAt }`. Timers live in
+  `settings.followUps` (every key may be absent → defaults).
+- System Health: check `telematics-wip` (once a WIP address is set) warns
+  when no report for `wipStaleHours` (36).
 - **Reverse geocoding** — `GOOGLE_MAPS_KEY` (Geocoding API only; `none`
   = off). Once per new case → `location.address`, `geocodeStatus`. A bad
   key is a `console.warn` (settings problem, not a code bug).

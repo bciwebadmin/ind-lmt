@@ -53,6 +53,8 @@ export function canOpenView(view, user, adminOnlyViews = []) {
   if (!user) return false;
   if (adminOnlyViews.includes(view)) return isAdmin(user);
   if (view === NO_ACCESS_VIEW) return true;
+  // Only useful with more than one dashboard to choose from.
+  if (view === 'workspace-picker') return workspacesFor(user).length > 1;
   if (TELEMATICS_VIEWS.includes(view)) return hasTelematicsAccess(user);
   // Everything else is Lead Management.
   return hasLeadAccess(user);
@@ -62,4 +64,49 @@ export function defaultViewFor(user, leadDefaultView) {
   if (hasLeadAccess(user)) return leadDefaultView;
   if (hasTelematicsAccess(user)) return TELEMATICS_DEFAULT_VIEW;
   return NO_ACCESS_VIEW;
+}
+
+/* ===================== DASHBOARDS (workspaces) ===================== */
+// The left menu shows one dashboard at a time, switched from the bottom of the
+// menu (Erin, Nov 2026). Admins pick one on a "Choose a dashboard" screen at
+// sign-in; everyone else lands straight in theirs. Users / Settings belong to
+// none — they show under every dashboard for admins.
+export const WORKSPACE_PICKER_VIEW = 'workspace-picker';
+export const WORKSPACES = [
+  { id: 'leads',      label: 'Lead Management', hint: 'New leads through completed deals, To Do and reports' },
+  { id: 'backoffice', label: 'Back Office',     hint: 'Sales submittals, sales requests, finance and trade-ins' },
+  { id: 'telematics', label: 'Telematics',      hint: 'Critical fault codes, the code list and follow-ups' }
+];
+export const BACK_OFFICE_VIEWS = ['submittals', 'requests', 'finance', 'trade-ins'];
+const SHARED_VIEWS = ['users', 'settings', NO_ACCESS_VIEW, WORKSPACE_PICKER_VIEW];
+
+// Which dashboard a view belongs to; null for the shared ones.
+export function workspaceOfView(view) {
+  if (TELEMATICS_VIEWS.includes(view)) return 'telematics';
+  if (BACK_OFFICE_VIEWS.includes(view)) return 'backoffice';
+  if (SHARED_VIEWS.includes(view)) return null;
+  return 'leads';
+}
+
+// The dashboards this person may switch between, in menu order. Reps keep
+// Back Office: it's where their own submittals, requests and trade-ins live.
+export function workspacesFor(user) {
+  const lead = hasLeadAccess(user), tele = hasTelematicsAccess(user);
+  return WORKSPACES.filter(w => (w.id === 'telematics' ? tele : lead)).map(w => w.id);
+}
+
+// Where each dashboard opens.
+export function workspaceHomeView(id, leadDefaultView) {
+  if (id === 'telematics') return TELEMATICS_BOARD_VIEW;
+  if (id === 'backoffice') return 'submittals';
+  return leadDefaultView;
+}
+
+// The first screen after sign-in. `remembered` = the dashboard this browser
+// tab was last in (a refresh shouldn't bounce an admin back to the picker).
+export function landingView(user, leadDefaultView, remembered = '') {
+  const mine = workspacesFor(user);
+  if (remembered && mine.includes(remembered)) return workspaceHomeView(remembered, leadDefaultView);
+  if (user && user.role === 'admin' && mine.length > 1) return WORKSPACE_PICKER_VIEW;
+  return defaultViewFor(user, leadDefaultView);
 }

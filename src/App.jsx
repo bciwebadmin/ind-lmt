@@ -17,7 +17,7 @@ import {
   RotateCcw, CalendarOff, Archive, ArchiveX, Key, Route,
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
   Inbox, Briefcase, ClipboardList, LayoutDashboard, ArrowRight, Activity,
-  Truck, Wrench, Package, ExternalLink
+  Truck, Wrench, Package, ExternalLink, ChevronUp
 } from 'lucide-react';
 
 import {
@@ -30,11 +30,12 @@ import {
   subscribeToHealth, subscribeToIncidents, setIncidentMuted,
   subscribeToTelematicsCodes, saveTelematicsCode, seedTelematicsCodes,
   subscribeToTelematicsCases, addTelematicsCase, updateTelematicsCase,
-  subscribeToTelematicsConfig, saveTelematicsConfig
+  subscribeToTelematicsConfig, saveTelematicsConfig, subscribeToTelematicsWipStatus
 } from './lib/firestoreData';
 import {
   hasLeadAccess, hasTelematicsAccess, canOpenView, defaultViewFor, accessLabel, ACCESS_PRESETS,
-  TELEMATICS_CODES_VIEW, TELEMATICS_BOARD_VIEW, TELEMATICS_SETTINGS_VIEW, NO_ACCESS_VIEW
+  TELEMATICS_CODES_VIEW, TELEMATICS_BOARD_VIEW, TELEMATICS_SETTINGS_VIEW, NO_ACCESS_VIEW,
+  WORKSPACES, WORKSPACE_PICKER_VIEW, workspaceOfView, workspacesFor, workspaceHomeView, landingView
 } from './lib/access';
 import {
   CODE_LEVELS, codeLevelLabel, reviewPatch, newCodeDoc, isValidCode, normalizeCode,
@@ -43,7 +44,8 @@ import {
   WIN_TIERS, winTier, LOST_REASONS, CLOSE_REASONS, DESTINATION_KINDS, MAX_DESTINATION_RECIPIENTS,
   resolveRecipients, destinationsForTier, suggestedDestination, destinationProblems, isEmail,
   assetUrl, mapsUrl, startWorkingChange, winChange, loseChange, closeChange,
-  confirmWorkOrderChange, reopenChange, noteEntry, buildManualCase
+  confirmWorkOrderChange, reopenChange, noteEntry, buildManualCase,
+  FOLLOW_UP_DEFAULTS, followUpSettings, followUpState, followUpLabel
 } from './lib/telematics';
 import { TELEMATICS_SEED_CODES, TELEMATICS_SEED_SOURCE, TELEMATICS_SEED_DESTINATIONS } from './lib/telematicsSeed';
 import { setErrorContext } from './lib/errorReporter';
@@ -1050,7 +1052,7 @@ export default function BobcatIndyCRM() {
     try {
       const requested = new URLSearchParams(window.location.search).get('view');
       const valid = [HOME_VIEW, 'todo', ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings',
-        TELEMATICS_BOARD_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW];
+        TELEMATICS_BOARD_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW, WORKSPACE_PICKER_VIEW];
       // ?case=<id> (bump emails, step 4) opens the board.
       if (new URLSearchParams(window.location.search).get('case')) return TELEMATICS_BOARD_VIEW;
       if (requested && valid.includes(requested)) return requested;
@@ -1269,6 +1271,7 @@ export default function BobcatIndyCRM() {
   const [telematicsCasesError, setTelematicsCasesError] = useState(null);
   const [telematicsSettings, setTelematicsSettings] = useState(undefined);
   const [telematicsSettingsError, setTelematicsSettingsError] = useState(null);
+  const [telematicsWipStatus, setTelematicsWipStatus] = useState(null);
   useEffect(() => {
     if (!telematicsAccess) {
       setTelematicsCases(null); setTelematicsCasesError(null);
@@ -1281,8 +1284,10 @@ export default function BobcatIndyCRM() {
     const unsubSettings = subscribeToTelematicsConfig(
       (data) => { setTelematicsSettings(data); setTelematicsSettingsError(null); },
       (err) => setTelematicsSettingsError(err && err.code ? err.code : 'error'));
-    return () => { unsubCases(); unsubSettings(); };
+    const unsubWip = subscribeToTelematicsWipStatus(setTelematicsWipStatus);
+    return () => { unsubCases(); unsubSettings(); unsubWip(); };
   }, [telematicsAccess]);
+  const telematicsWipReceivedAt = (telematicsWipStatus && telematicsWipStatus.lastGood && telematicsWipStatus.lastGood.receivedAt) || '';
   const telematicsCodesById = useMemo(
     () => Object.fromEntries((telematicsCodes || []).map(c => [c.code || c.id, c])), [telematicsCodes]);
   const telematicsDestinations = useMemo(
@@ -1380,6 +1385,40 @@ export default function BobcatIndyCRM() {
       }
     })();
   }, [currentUser?.role, leads]);
+
+  // ---- Dashboards (src/lib/access.js → WORKSPACES) ----
+  // The first screen after sign-in: admins choose a dashboard; everyone else
+  // lands in theirs. A link that asked for something (?view / ?lead / ?case,
+  // e.g. from an email) skips it, and a refresh returns to the dashboard this
+  // tab was in (sessionStorage — a new tab or a new sign-in asks again).
+  const deepLinkRef = useRef((() => {
+    try { const q = new URLSearchParams(window.location.search); return !!(q.get('view') || q.get('lead') || q.get('case')); }
+    catch { return false; }
+  })());
+  const landedRef = useRef(false);
+  useEffect(() => {
+    if (!currentUser) { landedRef.current = false; return; }
+    if (landedRef.current) return;
+    landedRef.current = true;
+    if (deepLinkRef.current) { deepLinkRef.current = false; return; }
+    let remembered = '';
+    try { remembered = window.sessionStorage.getItem('lmt.workspace') || ''; } catch { /* storage blocked */ }
+    setView(landingView(currentUser, DEFAULT_VIEW, remembered));
+  }, [currentUser]);
+
+  // The dashboard the left menu shows. It follows the view (a To Do item or a
+  // search result that opens a Back Office record switches with it); Users
+  // and Settings keep whichever dashboard you came from.
+  const [workspace, setWorkspace] = useState(null);
+  const myWorkspaces = useMemo(() => workspacesFor(currentUser), [currentUser]);
+  const viewWorkspace = workspaceOfView(view);
+  useEffect(() => { if (viewWorkspace && viewWorkspace !== workspace) setWorkspace(viewWorkspace); }, [viewWorkspace]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const activeWorkspace = (viewWorkspace && myWorkspaces.includes(viewWorkspace) ? viewWorkspace : null)
+    || (myWorkspaces.includes(workspace) ? workspace : null) || myWorkspaces[0] || null;
+  useEffect(() => {
+    if (!activeWorkspace || view === WORKSPACE_PICKER_VIEW) return;
+    try { window.sessionStorage.setItem('lmt.workspace', activeWorkspace); } catch { /* storage blocked */ }
+  }, [activeWorkspace, view]);
 
   // Safety redirect: if a user lands on a view they can't access (e.g. via deep link
   // or after a role change while signed in), bounce them to the role-appropriate
@@ -1583,6 +1622,8 @@ export default function BobcatIndyCRM() {
   };
 
   const signOut = async () => {
+    // The next sign-in asks for a dashboard again.
+    try { window.sessionStorage.removeItem('lmt.workspace'); } catch { /* storage blocked */ }
     await signOutCurrent();
     setView(DEFAULT_VIEW);
     setSelectedLead(null);
@@ -2277,6 +2318,12 @@ export default function BobcatIndyCRM() {
     setView(v);
   };
 
+  // The dashboard switcher (bottom of the menu) and the admin landing screen.
+  const switchWorkspace = (id) => {
+    setWorkspace(id);
+    goTo(workspaceHomeView(id, DEFAULT_VIEW));
+  };
+
   // + New → Prospect / Want open Add Lead preset to that status.
   const [addPreset, setAddPreset] = useState(null);
   // The + New menu.
@@ -2591,6 +2638,7 @@ export default function BobcatIndyCRM() {
           backOfficeCounts={{ submittals: openSubmittalCount, requests: openRequestCount, finance: openFinanceCount, tradeIns: pendingTradeInCount }}
           user={currentUser}
           telematicsNewCount={telematicsNewCount}
+          workspace={activeWorkspace} workspaces={myWorkspaces} onSwitchWorkspace={switchWorkspace}
           pendingCount={accessRequests.length}
           mobileOpen={mobileNavOpen}
           onMobileClose={() => setMobileNavOpen(false)}
@@ -2606,7 +2654,7 @@ export default function BobcatIndyCRM() {
             leadOpen={!!selectedLead}
             addPreset={addPreset}
             onAdd={handleNew}
-            search={!leadAccess ? null : (
+            search={!leadAccess || activeWorkspace === 'telematics' || view === WORKSPACE_PICKER_VIEW ? null : (
               <GlobalSearch
                 scope={searchScope}
                 users={configWithUsers.users || []}
@@ -2784,6 +2832,7 @@ export default function BobcatIndyCRM() {
                   <TelematicsCasePage
                     c={openCase} codesById={telematicsCodesById} users={users}
                     destinations={telematicsDestinations}
+                    settings={telematicsSettings} wipReceivedAt={telematicsWipReceivedAt}
                     onBack={() => setSelectedCaseId(null)}
                     onAddNote={(text) => addCaseNote(openCase, text)}
                     onStartWorking={() => changeCase(openCase.id, startWorkingChange(currentUser.id))}
@@ -2802,6 +2851,7 @@ export default function BobcatIndyCRM() {
                   cases={telematicsCases} error={telematicsCasesError} isAdmin={currentUser.role === 'admin'}
                   codesById={telematicsCodesById} codes={telematicsCodes || []}
                   branches={config.branches || []} currentUser={currentUser}
+                  settings={telematicsSettings} wipReceivedAt={telematicsWipReceivedAt}
                   onOpen={(c) => setSelectedCaseId(c.id)}
                   onAdd={addCase}
                 />
@@ -2810,10 +2860,21 @@ export default function BobcatIndyCRM() {
             {view === TELEMATICS_SETTINGS_VIEW && telematicsAccess && (
               <TelematicsSettingsView
                 settings={telematicsSettings} error={telematicsSettingsError} isAdmin={currentUser.role === 'admin'}
+                wipStatus={telematicsWipStatus}
                 branches={config.branches || []} onSave={saveTelematicsSettings}
               />
             )}
             {view === NO_ACCESS_VIEW && <NoAccessView/>}
+            {view === WORKSPACE_PICKER_VIEW && (
+              <WorkspacePickerView
+                workspaces={myWorkspaces} currentUser={currentUser} onPick={switchWorkspace}
+                counts={{
+                  leads: stageLeads[STAGE_INCOMING] ? stageLeads[STAGE_INCOMING].length : 0,
+                  backoffice: openSubmittalCount,
+                  telematics: telematicsNewCount
+                }}
+              />
+            )}
             {view === 'reports' && canAccessView('reports', currentUser) && (
               <ReportsView leads={pipelineLeads} config={configWithUsers}/>
             )}
@@ -3220,22 +3281,27 @@ const STAGE_ADD_KIND = {
   [STAGE_WANTED]:   'want'
 };
 
-function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user, pendingCount, mobileOpen, onMobileClose, onNew, todoCount = 0, telematicsNewCount = 0 }) {
+function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user, pendingCount, mobileOpen, onMobileClose, onNew, todoCount = 0, telematicsNewCount = 0,
+  workspace = 'leads', workspaces = [], onSwitchWorkspace }) {
   const [newOpen, setNewOpen] = useState(false);
+  const [switchOpen, setSwitchOpen] = useState(false);
   const userRole = user ? user.role : 'user';
-  // + New only makes lead-side records.
-  const showNew = hasLeadAccess(user);
+  // On the "Choose a dashboard" screen nothing is chosen yet: Admin links only.
+  const picking = view === WORKSPACE_PICKER_VIEW;
+  // + New makes lead and back-office records, so it shows on those two.
+  const showNew = hasLeadAccess(user) && workspace !== 'telematics' && !picking;
   // Groups, in order. Access is still decided centrally by canAccessView, and a
   // group whose items are all filtered out disappears with them.
+  // Each group belongs to one dashboard (`ws`); Admin shows on all of them.
   const groups = [
-    { title: null, items: [
+    { ws: 'leads', title: null, items: [
       { id: 'todo', label: 'To Do', icon: CheckCircle2, badge: todoCount, badgeAccent: todoCount > 0 }
     ] },
-    { title: 'Lead Management', items: [
+    { ws: 'leads', title: 'Lead Management', items: [
       { id: HOME_VIEW, label: 'Dashboard', icon: LayoutDashboard },
       ...PIPELINE_STAGES.map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id], indent: true }))
     ] },
-    { title: 'Back Office', items: [
+    { ws: 'backoffice', title: 'Back Office', items: [
       { id: 'submittals', label: 'Sales Submittals',  icon: ClipboardList, badge: backOfficeCounts.submittals },
       { id: 'requests',  label: 'Sales Requests',     icon: Send,          badge: backOfficeCounts.requests },
       { id: 'finance',   label: 'Finance',            icon: Briefcase,     badge: backOfficeCounts.finance },
@@ -3243,20 +3309,23 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
     ] },
     // A separate module (CLAUDE.md → "Telematics"); only shown to people with
     // telematics access.
-    { title: 'Telematics', items: [
+    { ws: 'telematics', title: 'Telematics', items: [
       { id: TELEMATICS_BOARD_VIEW, label: 'Board', icon: Activity, badge: telematicsNewCount, badgeAccent: telematicsNewCount > 0 },
       { id: TELEMATICS_CODES_VIEW, label: 'Code List', icon: ClipboardList },
       { id: TELEMATICS_SETTINGS_VIEW, label: 'Telematics Settings', icon: SettingsIcon }
     ] },
-    { title: null, items: [
+    { ws: 'leads', title: null, items: [
       { id: 'reports',   label: 'Reports',            icon: BarChart3 }
     ] },
-    { title: 'Admin', items: [
+    { ws: '*', title: 'Admin', items: [
       { id: 'users',     label: 'Users',              icon: UsersIcon, badge: pendingCount, badgeAccent: pendingCount > 0 },
       { id: 'settings',  label: 'Settings',           icon: SettingsIcon }
     ] }
-  ].map(g => ({ ...g, items: g.items.filter(i => canAccessView(i.id, user)) }))
+  ].filter(g => g.ws === '*' || (!picking && g.ws === workspace))
+   .map(g => ({ ...g, items: g.items.filter(i => canAccessView(i.id, user)) }))
    .filter(g => g.items.length);
+  const current = WORKSPACES.find(w => w.id === workspace) || WORKSPACES[0];
+  const WS_ICON = { leads: LayoutDashboard, backoffice: ClipboardList, telematics: Activity };
 
   const handleNav = (id) => {
     setView(id);
@@ -3362,8 +3431,80 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
             </div>
           ))}
         </nav>
+
+        {/* Dashboard switcher — only when there is more than one to switch to. */}
+        {workspaces.length > 1 && (
+          <div className="px-3 py-3 border-t border-stone-800 relative shrink-0">
+            {switchOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setSwitchOpen(false)} aria-hidden="true"/>
+                <div role="menu" aria-label="Switch dashboard" className="absolute left-3 right-3 bottom-full mb-1 z-20 bg-white text-stone-900 rounded-md shadow-xl border border-stone-200 py-1">
+                  {workspaces.map(id => {
+                    const w = WORKSPACES.find(x => x.id === id);
+                    const Icon = WS_ICON[id];
+                    const on = id === workspace;
+                    return (
+                      <button key={id} role="menuitem" onClick={() => { setSwitchOpen(false); onSwitchWorkspace(id); if (onMobileClose) onMobileClose(); }}
+                        className={`w-full text-left px-3 py-2 hover:bg-stone-50 flex items-start gap-2.5 ${on ? 'bg-stone-50' : ''}`}>
+                        <Icon size={15} className="text-brand-700 mt-0.5 shrink-0"/>
+                        <span className="flex-1">
+                          <span className="block text-sm font-semibold">{w.label}</span>
+                          <span className="block text-[11px] text-stone-500">{w.hint}</span>
+                        </span>
+                        {on && <Check size={13} className="text-brand-600 mt-1 shrink-0"/>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+            <button onClick={() => setSwitchOpen(o => !o)} aria-haspopup="menu" aria-expanded={switchOpen}
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-md bg-stone-800 hover:bg-stone-700 text-left">
+              {(() => { const Icon = WS_ICON[current.id]; return <Icon size={16} className="text-brand-500 shrink-0"/>; })()}
+              <span className="flex-1 min-w-0">
+                <span className="block text-[10px] uppercase tracking-[0.15em] text-stone-400 font-semibold">Dashboard</span>
+                <span className="block text-sm font-semibold text-white truncate">{picking ? 'Choose one…' : current.label}</span>
+              </span>
+              <ChevronUp size={14} className={`text-stone-400 transition-transform ${switchOpen ? '' : 'rotate-180'}`}/>
+            </button>
+          </div>
+        )}
       </aside>
     </>
+  );
+}
+
+/* ===================== DASHBOARD PICKER ===================== */
+// The admin's first screen after sign-in (src/lib/access.js → landingView).
+function WorkspacePickerView({ workspaces = [], currentUser, counts = {}, onPick }) {
+  const ICON = { leads: LayoutDashboard, backoffice: ClipboardList, telematics: Activity };
+  const COUNT = { leads: (n) => `${n} new lead${n === 1 ? '' : 's'}`, backoffice: (n) => `${n} open submittal${n === 1 ? '' : 's'}`, telematics: (n) => `${n} new case${n === 1 ? '' : 's'}` };
+  const first = ((currentUser && currentUser.name) || '').split(' ')[0];
+  return (
+    <div className="max-w-4xl mx-auto py-4 md:py-10">
+      <div className="text-center mb-6">
+        <div className="font-display text-2xl md:text-3xl font-bold text-stone-900">{first ? `Hi ${first} — where to?` : 'Where to?'}</div>
+        <div className="text-sm text-stone-500 mt-1">You can switch any time from the bottom of the menu.</div>
+      </div>
+      <div className="grid sm:grid-cols-3 gap-3">
+        {workspaces.map(id => {
+          const w = WORKSPACES.find(x => x.id === id);
+          const Icon = ICON[id];
+          const n = Number(counts[id]) || 0;
+          return (
+            <button key={id} onClick={() => onPick(id)}
+              className="text-left p-5 bg-white border border-stone-200 rounded-lg hover:border-brand-600 hover:shadow-md transition-all group focus:outline-none focus:ring-2 focus:ring-brand-500/40">
+              <div className="w-10 h-10 rounded-md bg-orange-50 flex items-center justify-center mb-3">
+                <Icon size={20} className="text-brand-700"/>
+              </div>
+              <div className="font-display text-lg font-bold text-stone-900 flex items-center gap-1.5">{w.label} <ArrowRight size={15} className="text-stone-300 group-hover:text-brand-600 transition-colors"/></div>
+              <div className="text-xs text-stone-500 mt-1 leading-relaxed">{w.hint}</div>
+              <div className={`text-xs font-semibold mt-3 ${n ? 'text-brand-700' : 'text-stone-400'}`}>{COUNT[id](n)}</div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -3403,6 +3544,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
     [TELEMATICS_CODES_VIEW]: 'Critical Code List',
     [TELEMATICS_BOARD_VIEW]: 'Telematics Board',
     [TELEMATICS_SETTINGS_VIEW]: 'Telematics Settings',
+    [WORKSPACE_PICKER_VIEW]: 'Choose a dashboard',
     [NO_ACCESS_VIEW]: 'No access yet'
   };
 
@@ -5702,6 +5844,14 @@ const CASE_STATUS_TONE = {
 const WIN_TIER_ICON = { field: Truck, shop: Wrench, parts: Package };
 const TELEMATICS_ACCENT = { soft: 'bg-orange-50', text: 'text-orange-700' };
 
+// "Work order due Nov 14 9:00 AM" / "Bumped 2× · next …" / "Escalated".
+const FOLLOW_UP_TONE = { stone: 'text-stone-500', amber: 'text-amber-800', rose: 'text-rose-700' };
+function FollowUpChip({ c, settings, wipReceivedAt }) {
+  const l = followUpLabel(c, settings, { wipReceivedAt });
+  if (!l) return null;
+  return <div className={`text-[11px] font-semibold mt-0.5 ${FOLLOW_UP_TONE[l.tone] || FOLLOW_UP_TONE.stone}`}>{l.text}</div>;
+}
+
 function CaseStatusBadge({ status }) {
   return (
     <span className={`inline-block text-[10px] uppercase tracking-widest font-bold px-1.5 py-0.5 rounded border whitespace-nowrap ${CASE_STATUS_TONE[status || 'new'] || CASE_STATUS_TONE.new}`}>
@@ -5715,7 +5865,7 @@ function CaseStatusBadge({ status }) {
 function CaseCodeChip({ code, codesById }) {
   if (!code) return <span className="text-stone-400">—</span>;
   const k = classifyCode(code, codesById);
-  const tone = k.level === 'critical' ? 'text-rose-700' : k.level === 'noncritical' ? 'text-amber-800' : 'text-stone-500';
+  const tone = (LEVEL_STYLE[k.level] || LEVEL_STYLE.critical).text;
   return (
     <span className="whitespace-nowrap">
       <span className="font-mono text-xs font-semibold text-stone-900">{k.code}</span>
@@ -5752,17 +5902,30 @@ function caseOutcomeLine(c) {
   return '';
 }
 
-function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches, currentUser, onOpen, onAdd }) {
+function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches, currentUser, onOpen, onAdd, settings = null, wipReceivedAt = '' }) {
   const [tab, setTab] = useState('new');
   const [archiveFilter, setArchiveFilter] = useState('all');
+  const [levelFilter, setLevelFilter] = useState('all');
+  const [branchFilter, setBranchFilter] = useState('All');
   const [q, setQ] = useState('');
   const [adding, setAdding] = useState(false);
   const list = cases || [];
   const counts = useMemo(() => caseCounts(list), [list]);
-  const rows = useMemo(() => sortCases(list.filter(c =>
+  // The level comes from the Code List as it is now, so re-classifying a code
+  // recolours its cases straight away. Unknown / unreviewed = critical.
+  const levelOf = (c) => classifyCode(c.fault && c.fault.code, codesById).level;
+  const inTab = useMemo(() => list.filter(c =>
     caseTab(c) === tab
     && (tab !== 'archive' || archiveFilter === 'all' || c.status === archiveFilter)
-    && caseMatchesQuery(c, q))), [list, tab, archiveFilter, q]);
+    && (branchFilter === 'All' || (c.branch || '') === branchFilter)
+    && caseMatchesQuery(c, q)), [list, tab, archiveFilter, branchFilter, q]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const levelCounts = useMemo(() => {
+    const n = { all: inTab.length, critical: 0, noncritical: 0, ignore: 0 };
+    inTab.forEach(c => { n[levelOf(c)]++; });
+    return n;
+  }, [inTab, codesById]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const rows = useMemo(() => sortCases(inTab.filter(c => levelFilter === 'all' || levelOf(c) === levelFilter)),
+    [inTab, levelFilter, codesById]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   if (error) {
     return (
@@ -5793,6 +5956,27 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
           <Plus size={14}/> Add case
         </button>
       </div>
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by code level">
+        {[['all', 'All codes'], ...CODE_LEVELS.map(l => [l.id, l.label])].map(([id, label]) => {
+          const on = levelFilter === id;
+          const st = LEVEL_STYLE[id];
+          return (
+            <button key={id} type="button" onClick={() => setLevelFilter(id)} aria-pressed={on}
+              className={`px-3 py-1.5 rounded-full text-xs font-semibold border flex items-center gap-1.5 ${
+                on ? (id === 'all' ? 'bg-stone-900 text-white border-stone-900' : CODE_LEVEL_TONE[id]) : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'}`}>
+              {st && <span className={`w-2 h-2 rounded-full ${on ? 'bg-white' : st.dot}`} aria-hidden="true"/>}
+              {label} <span className="font-mono opacity-70">{levelCounts[id] || 0}</span>
+            </button>
+          );
+        })}
+        {branches.length > 1 && (
+          <select value={branchFilter} onChange={e => setBranchFilter(e.target.value)} aria-label="Branch"
+            className="ml-auto px-3 py-1.5 border border-stone-200 rounded-full text-xs font-semibold bg-white text-stone-700">
+            <option value="All">All branches</option>
+            {branches.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        )}
+      </div>
       {tab === 'archive' && (
         <div className="flex gap-2">
           {[['all', 'All'], ['lost', 'Lost'], ['closed', 'Closed']].map(([id, label]) => (
@@ -5809,7 +5993,7 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
         <div className="text-center py-14 border border-dashed border-stone-200 rounded-lg bg-white px-6">
           <Activity size={28} className="mx-auto text-stone-300 mb-3"/>
           <div className="text-sm font-semibold text-stone-700">
-            {q ? 'No cases match' : list.length ? `Nothing in ${CASE_TABS.find(t => t.id === tab).label}` : 'No cases yet'}
+            {q || levelFilter !== 'all' || branchFilter !== 'All' ? 'No cases match' : list.length ? `Nothing in ${CASE_TABS.find(t => t.id === tab).label}` : 'No cases yet'}
           </div>
           {!list.length && (
             <div className="text-xs text-stone-500 mt-1 max-w-md mx-auto leading-relaxed">
@@ -5833,9 +6017,11 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
-                {rows.map(c => (
-                  <tr key={c.id} onClick={() => onOpen(c)} className="cursor-pointer hover:bg-stone-50">
-                    <td className="px-4 py-2.5 text-xs text-stone-600 whitespace-nowrap">{fmtWhen(c.fault && c.fault.startAt)}</td>
+                {rows.map(c => {
+                  const st = LEVEL_STYLE[levelOf(c)] || LEVEL_STYLE.critical;
+                  return (
+                  <tr key={c.id} onClick={() => onOpen(c)} className={`cursor-pointer ${st.row} hover:bg-stone-100`}>
+                    <td className={`px-4 py-2.5 text-xs text-stone-600 whitespace-nowrap border-l-4 ${st.bar}`}>{fmtWhen(c.fault && c.fault.startAt)}</td>
                     <td className="px-4 py-2.5">
                       <div className="font-medium text-stone-900">{(c.customer && c.customer.name) || '—'}</div>
                       {c.customer && c.customer.phone && <div className="text-xs text-stone-500 font-mono">{c.customer.phone}</div>}
@@ -5853,16 +6039,18 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
                     <td className="px-4 py-2.5">
                       <CaseStatusBadge status={c.status}/>
                       {caseOutcomeLine(c) && <div className="text-[11px] text-stone-500 mt-0.5 max-w-[260px] truncate">{caseOutcomeLine(c)}</div>}
+                      <FollowUpChip c={c} settings={settings} wipReceivedAt={wipReceivedAt}/>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
           <div className="md:hidden space-y-2.5">
             {rows.map(c => (
               <button key={c.id} type="button" onClick={() => onOpen(c)}
-                className="w-full text-left p-3 bg-white border border-stone-200 rounded-lg space-y-1">
+                className={`w-full text-left p-3 border border-stone-200 border-l-4 ${(LEVEL_STYLE[levelOf(c)] || LEVEL_STYLE.critical).bar} ${(LEVEL_STYLE[levelOf(c)] || LEVEL_STYLE.critical).row} rounded-lg space-y-1`}>
                 <div className="flex items-start justify-between gap-2">
                   <div className="font-semibold text-stone-900 text-sm">{(c.customer && c.customer.name) || '—'}</div>
                   <CaseStatusBadge status={c.status}/>
@@ -5871,6 +6059,7 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
                 <div><CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/> <span className="text-xs text-stone-500">{c.fault && c.fault.summary}</span></div>
                 <div className="text-[11px] text-stone-500">{fmtWhen(c.fault && c.fault.startAt)}{c.branch ? ` · ${c.branch}` : ''}</div>
                 {caseOutcomeLine(c) && <div className="text-[11px] text-stone-500">{caseOutcomeLine(c)}</div>}
+                <FollowUpChip c={c} settings={settings} wipReceivedAt={wipReceivedAt}/>
               </button>
             ))}
           </div>
@@ -6000,7 +6189,15 @@ function caseEventText(e) {
   if (e.type === 'emailed') return e.status === 'sent'
     ? `Hand-off emailed to ${(e.to || []).join(', ')}${(e.cc || []).length ? ` (cc ${e.cc.join(', ')})` : ''}`
     : `Hand-off email not sent${e.reason === 'no-recipients' ? ' — no one to send to' : ''}`;
-  if (e.type === 'work_order') return `Work order confirmed${e.number ? ` — ${e.number}` : ''}`;
+  if (e.type === 'work_order') return e.source === 'wip'
+    ? `Work order ${e.number || ''} found in the WIP report${e.openedOn ? ` (opened ${fmtDay(e.openedOn)})` : ''} — completed`
+    : `Work order confirmed${e.number ? ` — ${e.number}` : ''}`;
+  if (e.type === 'bump') return e.status === 'sent'
+    ? `Reminder ${e.n} emailed — no work order yet (${(e.to || []).join(', ')}${(e.cc || []).length ? `, cc ${e.cc.join(', ')}` : ''})`
+    : `Reminder ${e.n} not sent — no one to email`;
+  if (e.type === 'escalated') return e.status === 'sent'
+    ? `Escalated — no work order after the reminders (${(e.to || []).join(', ')})`
+    : 'Escalation not sent — no one on the escalation list';
   if (e.type === 'created') return e.source === 'manual' ? 'Case added by hand'
     : `Case created from Bobcat email${e.autoClosed ? ` — filed in the Archive (${e.autoClosed.toLowerCase()})` : ''}`;
   if (e.type === 'alert') return `Bobcat sent the code again — ${[e.code, e.summary].filter(Boolean).join(' ')}`;
@@ -6008,7 +6205,7 @@ function caseEventText(e) {
 }
 
 function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBack, onAddNote, onStartWorking, onWin, onLose,
-  onCloseCase, onConfirmWorkOrder, onReopen, onResend, onOpenSettings }) {
+  onCloseCase, onConfirmWorkOrder, onReopen, onResend, onOpenSettings, settings = null, wipReceivedAt = '' }) {
   const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
   const who = (id) => (userMap[id] && userMap[id].name) || (id ? 'Someone' : 'The LMT');
   const [note, setNote] = useState('');
@@ -6164,14 +6361,24 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
               {status === 'sent' && (
                 <div className="pt-2 border-t border-stone-100 space-y-2">
                   <div className="text-xs text-stone-500 leading-relaxed">
-                    Waiting for a work order on <span className="font-mono">{c.serial}</span>. The LMT will check the WIP for it automatically once that’s set up; until then, confirm it here.
+                    Waiting for a work order on <span className="font-mono">{c.serial}</span>. The daily WIP report completes this case on its own when one opens;
+                    you can also confirm it here.
                   </div>
+                  <FollowUpChip c={c} settings={settings} wipReceivedAt={wipReceivedAt}/>
+                  {c.followUp && (c.followUp.bumps || c.followUp.escalatedAt) && (
+                    <div className="text-[11px] text-stone-500">
+                      {c.followUp.bumps ? `${c.followUp.bumps} reminder${c.followUp.bumps === 1 ? '' : 's'} sent, last ${fmtWhen(c.followUp.lastBumpAt)}. ` : ''}
+                      {c.followUp.escalatedAt ? `Escalated ${fmtWhen(c.followUp.escalatedAt)} — close it with a reason once you know what happened.` : ''}
+                    </div>
+                  )}
                   <button onClick={() => setModal('wo')} disabled={busy} className={`${btn} w-full border border-stone-200 hover:bg-stone-50 text-stone-700`}>Work order opened</button>
                 </div>
               )}
               {c.workOrder && (
                 <div className="text-sm"><span className="text-stone-500">Work order</span> <span className="font-mono font-semibold">{c.workOrder.number || '—'}</span>
-                  <div className="text-xs text-stone-500">confirmed {fmtWhen(c.workOrder.confirmedAt)}{c.workOrder.source === 'manual' ? ` by ${who(c.workOrder.confirmedBy)}` : ' from the WIP'}</div></div>
+                  <div className="text-xs text-stone-500">{c.workOrder.source === 'wip'
+                    ? `from the WIP report${c.workOrder.openedOn ? ` · opened ${fmtDay(c.workOrder.openedOn)}` : ''}${c.workOrder.kind ? ` · ${c.workOrder.kind === 'field' ? 'field' : 'shop'}${c.workOrder.branch ? ` (${c.workOrder.branch})` : ''}` : ''}`
+                    : `confirmed ${fmtWhen(c.workOrder.confirmedAt)} by ${who(c.workOrder.confirmedBy)}`}</div></div>
               )}
               {o.result === 'lost' && status === 'lost' && (
                 <div className="text-sm"><div className="font-semibold text-stone-900">Lost — {o.reason}</div>
@@ -6365,7 +6572,7 @@ const fromDraft = (list) => list.map(d => ({
   cc: d.people.filter(p => p.role === 'cc' && (p.email || p.name)).map(p => ({ name: (p.name || '').trim(), email: (p.email || '').trim() }))
 }));
 
-function TelematicsSettingsView({ settings, error, isAdmin, branches = [], onSave }) {
+function TelematicsSettingsView({ settings, error, isAdmin, branches = [], onSave, wipStatus = null }) {
   const saved = settings && Array.isArray(settings.destinations) ? settings.destinations : [];
   const [draft, setDraft] = useState(() => toDraft(saved));
   const [dirty, setDirty] = useState(false);
@@ -6398,8 +6605,16 @@ function TelematicsSettingsView({ settings, error, isAdmin, branches = [], onSav
   const save = async () => { setBusy(true); try { if (await onSave({ destinations: out })) setDirty(false); } finally { setBusy(false); } };
   const loadSheet = async () => { setBusy(true); try { await onSave({ destinations: TELEMATICS_SEED_DESTINATIONS }); setDirty(false); } finally { setBusy(false); } };
 
+  const extras = (
+    <>
+      <WipReportCard settings={settings} wipStatus={wipStatus} onSave={onSave}/>
+      <FollowUpSettingsCard settings={settings} onSave={onSave}/>
+    </>
+  );
+
   if (!saved.length && !draft.length) {
     return (
+      <div className="max-w-4xl space-y-6">
       <div className="max-w-2xl text-center py-12 border border-dashed border-stone-200 rounded-lg bg-white px-6">
         <Send size={26} className="mx-auto text-stone-300 mb-3"/>
         <div className="text-sm font-semibold text-stone-800">No destinations yet</div>
@@ -6415,6 +6630,8 @@ function TelematicsSettingsView({ settings, error, isAdmin, branches = [], onSav
           <button onClick={() => addDest('field')} className="px-3 py-2 border border-stone-200 hover:bg-stone-50 text-sm font-semibold rounded-md text-stone-700">Start from scratch</button>
         </div>
       </div>
+      {extras}
+      </div>
     );
   }
 
@@ -6424,6 +6641,7 @@ function TelematicsSettingsView({ settings, error, isAdmin, branches = [], onSav
         When Carter wins a case he picks a destination and these people get the hand-off email. They don’t need an LMT account.
         Up to {MAX_DESTINATION_RECIPIENTS} people each. If a destination has only CCs, the email goes To them.
       </div>
+      <h3 className="text-base font-bold text-stone-900 pt-1">Destinations</h3>
       {DESTINATION_KINDS.map(kind => (
         <section key={kind.id} className="space-y-2">
           <div className="flex items-center justify-between">
@@ -6467,15 +6685,130 @@ function TelematicsSettingsView({ settings, error, isAdmin, branches = [], onSav
           ))}
         </section>
       ))}
+      {extras}
       {dirty && (
         <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-8 z-30 bg-white border border-stone-200 shadow-lg rounded-lg px-4 py-3 flex items-center gap-3">
-          <div className="text-sm text-stone-700 flex-1">{blocking ? 'Fix the problems marked in red to save.' : 'Unsaved changes'}</div>
+          <div className="text-sm text-stone-700 flex-1">{blocking ? 'Fix the problems marked in red to save.' : 'Unsaved destination changes'}</div>
           <button onClick={() => { setDraft(toDraft(saved)); setDirty(false); }} className="text-sm text-stone-600 hover:text-stone-900">Discard</button>
           <button onClick={save} disabled={busy || blocking}
             className="px-4 py-2 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-md">{busy ? 'Saving…' : 'Save'}</button>
         </div>
       )}
     </div>
+  );
+}
+
+// Settings → WIP report: the private address the daily WIP export emails
+// (a Resend receiving address — SETUP.md §9b), who may send it, and what
+// the last report did. Saved on its own.
+function WipReportCard({ settings, wipStatus, onSave }) {
+  const cur = (settings && settings.wip) || {};
+  const [inbox, setInbox] = useState(cur.inboxAddress || '');
+  const [senders, setSenders] = useState((cur.allowedSenders || []).join(', '));
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setInbox(cur.inboxAddress || ''); setSenders((cur.allowedSenders || []).join(', ')); }, [settings]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const list = senders.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+  const bad = (inbox && !isEmail(inbox)) || list.some(x => !isEmail(x));
+  const dirty = inbox.trim() !== (cur.inboxAddress || '') || list.join(',') !== (cur.allowedSenders || []).join(',');
+  const save = async () => { setBusy(true); try { await onSave({ wip: { ...cur, inboxAddress: inbox.trim().toLowerCase(), allowedSenders: list.map(x => x.toLowerCase()) } }); } finally { setBusy(false); } };
+  const good = wipStatus && wipStatus.lastGood;
+  const last = wipStatus && wipStatus.lastAttempt;
+  const stale = good ? (Date.now() - new Date(good.receivedAt).getTime()) > followUpSettings(settings).wipStaleHours * 3600e3 : true;
+  return (
+    <section className="bg-white border border-stone-200 rounded-lg p-4 space-y-3">
+      <div>
+        <h3 className="text-base font-bold text-stone-900">WIP report</h3>
+        <div className="text-xs text-stone-600 mt-0.5 leading-relaxed">
+          The daily WIP export is emailed to this private address. A work order on a “Sent to Service” case’s serial number,
+          opened on or after the day it was sent, completes the case. Keep the address to yourselves — it’s what lets a report in.
+        </div>
+      </div>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <label className="block"><span className="text-xs font-semibold text-stone-600">Receiving address</span>
+          <input value={inbox} onChange={e => setInbox(e.target.value)} placeholder="wip-…@….resend.app"
+            className={`mt-1 w-full px-3 py-2 border rounded-md text-sm font-mono ${inbox && !isEmail(inbox) ? 'border-rose-300 bg-rose-50' : 'border-stone-200'}`}/></label>
+        <label className="block"><span className="text-xs font-semibold text-stone-600">Only accept it from (optional)</span>
+          <input value={senders} onChange={e => setSenders(e.target.value)} placeholder="reports@berrycompaniesinc.com"
+            className={`mt-1 w-full px-3 py-2 border rounded-md text-sm font-mono ${list.some(x => !isEmail(x)) ? 'border-rose-300 bg-rose-50' : 'border-stone-200'}`}/></label>
+      </div>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="text-xs">
+          {good
+            ? <span className={stale ? 'text-amber-800' : 'text-emerald-700'}>{stale ? 'Overdue — ' : ''}Last report {fmtWhen(good.receivedAt)}: {good.workOrderCount} work orders, {good.matched} case{good.matched === 1 ? '' : 's'} completed.</span>
+            : <span className="text-stone-500">No WIP report received yet.</span>}
+          {last && last.status !== 'ok' && <div className="text-rose-700 mt-0.5">Last attempt {fmtWhen(last.at)} {last.status === 'refused' ? 'refused' : 'failed'}: {last.reason}</div>}
+        </div>
+        <button onClick={save} disabled={busy || !dirty || bad}
+          className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-md">{busy ? 'Saving…' : 'Save'}</button>
+      </div>
+    </section>
+  );
+}
+
+// Settings → Follow-ups: when a "Sent to Service" case with no work order is
+// bumped, how often, how many times, and who gets the escalation (Tanner).
+function FollowUpSettingsCard({ settings, onSave }) {
+  const cfg = followUpSettings(settings);
+  const curEsc = ((settings && settings.escalation) || {}).to || [];
+  const init = () => ({ fieldHours: String(cfg.fieldHours), shopDays: String(+(cfg.shopHours / 24).toFixed(2)), bumpEveryHours: String(cfg.bumpEveryHours),
+    maxBumps: String(cfg.maxBumps), wipStaleHours: String(cfg.wipStaleHours), people: curEsc.map(p => ({ name: p.name || '', email: p.email || '' })) });
+  const [f, setF] = useState(init);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setF(init()); }, [settings]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (k, v) => setF(x => ({ ...x, [k]: v }));
+  const followUps = { fieldHours: Number(f.fieldHours), shopHours: Math.round(Number(f.shopDays) * 24), bumpEveryHours: Number(f.bumpEveryHours),
+    maxBumps: Number(f.maxBumps), wipStaleHours: Number(f.wipStaleHours) };
+  const checked = followUpSettings({ followUps });
+  const badNums = Object.keys(followUps).some(k => checked[k] !== followUps[k]);
+  const people = f.people.filter(p => p.email || p.name);
+  const badPeople = people.some(p => !isEmail(p.email)) || people.length > MAX_DESTINATION_RECIPIENTS;
+  const save = async () => { setBusy(true); try { await onSave({ followUps, escalation: { to: people.map(p => ({ name: p.name.trim(), email: p.email.trim() })) } }); } finally { setBusy(false); } };
+  const num = (k, label, hint) => (
+    <label className="block"><span className="text-xs font-semibold text-stone-600">{label}</span>
+      <input value={f[k]} onChange={e => set(k, e.target.value)} inputMode="decimal"
+        className="mt-1 w-full px-3 py-2 border border-stone-200 rounded-md text-sm"/>
+      {hint && <span className="text-[11px] text-stone-500">{hint}</span>}</label>
+  );
+  return (
+    <section className="bg-white border border-stone-200 rounded-lg p-4 space-y-3">
+      <div>
+        <h3 className="text-base font-bold text-stone-900">Follow-ups</h3>
+        <div className="text-xs text-stone-600 mt-0.5 leading-relaxed">
+          When a Field or Shop win still has no work order, the destination’s people get a reminder, cc whoever sent it.
+          After the last reminder it goes to the escalation list. Reminders only go out once a WIP report received after the deadline
+          still shows no work order — if the report stops arriving, reminders pause.
+        </div>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        {num('fieldHours', 'Field Service: hours', `default ${FOLLOW_UP_DEFAULTS.fieldHours}`)}
+        {num('shopDays', 'Shop: days', `default ${FOLLOW_UP_DEFAULTS.shopHours / 24}`)}
+        {num('bumpEveryHours', 'Then every (hours)', `default ${FOLLOW_UP_DEFAULTS.bumpEveryHours}`)}
+        {num('maxBumps', 'Reminders', `default ${FOLLOW_UP_DEFAULTS.maxBumps}`)}
+        {num('wipStaleHours', 'WIP overdue after (hours)', `default ${FOLLOW_UP_DEFAULTS.wipStaleHours}`)}
+      </div>
+      <div className="space-y-2">
+        <div className="text-xs font-semibold text-stone-600">Escalation goes to</div>
+        {f.people.map((p, i) => (
+          <div key={i} className="flex flex-col sm:flex-row gap-2">
+            <input value={p.name} onChange={e => set('people', f.people.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} placeholder="Name" aria-label="Escalation name"
+              className="sm:w-48 px-3 py-1.5 border border-stone-200 rounded-md text-sm"/>
+            <input value={p.email} onChange={e => set('people', f.people.map((x, j) => j === i ? { ...x, email: e.target.value } : x))} placeholder="email" aria-label="Escalation email"
+              className={`flex-1 px-3 py-1.5 border rounded-md text-sm font-mono ${p.email && !isEmail(p.email) ? 'border-rose-300 bg-rose-50' : 'border-stone-200'}`}/>
+            <button onClick={() => set('people', f.people.filter((_, j) => j !== i))} className="text-stone-400 hover:text-rose-600 p-1 self-end sm:self-center" title="Remove"><X size={14}/></button>
+          </div>
+        ))}
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <button onClick={() => set('people', [...f.people, { name: '', email: '' }])} disabled={f.people.length >= MAX_DESTINATION_RECIPIENTS}
+            className="text-xs font-semibold text-stone-600 hover:text-stone-900 disabled:text-stone-300 flex items-center gap-1"><UserPlus size={12}/> Add person</button>
+          {!people.length && <span className="text-xs text-amber-700">No one yet — escalations will go to whoever sent the case.</span>}
+        </div>
+      </div>
+      <div className="flex items-center justify-end gap-3">
+        {badNums && <span className="text-xs text-rose-700">Check the numbers — whole hours, 1 or more.</span>}
+        <button onClick={save} disabled={busy || badNums || badPeople}
+          className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-md">{busy ? 'Saving…' : 'Save'}</button>
+      </div>
+    </section>
   );
 }
 
@@ -6516,10 +6849,17 @@ function NoAccessView() {
 // Date-only values ("2026-11-11") read as local noon, so they don't show the day before.
 const fmtDay = (d) => fmtDate(/^\d{4}-\d{2}-\d{2}$/.test(String(d || '')) ? `${d}T12:00:00` : d);
 
+// Red / blue / grey everywhere a level shows (Erin, Nov 2026) — the Code
+// List buttons, the board's rows and chips. LEVEL_STYLE below is the board's.
 const CODE_LEVEL_TONE = {
   critical:    'bg-rose-600 text-white border-rose-600',
-  noncritical: 'bg-amber-100 text-amber-900 border-amber-300',
-  ignore:      'bg-stone-700 text-white border-stone-700'
+  noncritical: 'bg-blue-600 text-white border-blue-600',
+  ignore:      'bg-stone-500 text-white border-stone-500'
+};
+const LEVEL_STYLE = {
+  critical:    { text: 'text-rose-700',  bar: 'border-l-rose-500',  row: 'bg-rose-50/50',  dot: 'bg-rose-500' },
+  noncritical: { text: 'text-blue-700',  bar: 'border-l-blue-500',  row: 'bg-blue-50/50',  dot: 'bg-blue-500' },
+  ignore:      { text: 'text-stone-500', bar: 'border-l-stone-300', row: 'bg-stone-50',    dot: 'bg-stone-400' }
 };
 
 function CodeLevelPicker({ doc, onSetLevel }) {

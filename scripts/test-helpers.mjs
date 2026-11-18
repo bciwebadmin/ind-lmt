@@ -904,6 +904,100 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('fixtures carry no real customer data', ![fx1, fx2].some(f => /FOXY|RUNYON|SUNBELT|AT6330022|B4SB33825|stanage|awstrack/i.test(f)));
 }
 
+/* ---------- Telematics step 4: WIP report, matching, follow-ups ---------- */
+{
+  const { createRequire } = await import('node:module');
+  const req = createRequire(import.meta.url);
+  const W = req('../functions/telematicsWipRules.js');
+  const T = await import('../src/lib/telematics.js');
+  const crypto = await import('node:crypto');
+
+  // Resend (Svix) signatures — sign a body the way Resend does, then verify.
+  const key = crypto.randomBytes(24); const secret = 'whsec_' + key.toString('base64');
+  const body = '{"type":"email.received","data":{"email_id":"e1"}}';
+  const now = 1794500000000, ts = String(Math.floor(now / 1000));
+  const sig = 'v1,' + crypto.createHmac('sha256', key).update(`msg_1.${ts}.${body}`).digest('base64');
+  check('webhook: a correct Resend signature passes', W.verifyResendSignature({ id: 'msg_1', timestamp: ts, signature: sig, body, secret, now }));
+  check('webhook: one of several signatures may match', W.verifyResendSignature({ id: 'msg_1', timestamp: ts, signature: `v1,AAAA ${sig}`, body: Buffer.from(body), secret, now }));
+  check('webhook: a changed body fails', !W.verifyResendSignature({ id: 'msg_1', timestamp: ts, signature: sig, body: body + ' ', secret, now }));
+  check('webhook: wrong secret / missing headers fail', !W.verifyResendSignature({ id: 'msg_1', timestamp: ts, signature: sig, body, secret: 'whsec_' + crypto.randomBytes(24).toString('base64'), now })
+    && !W.verifyResendSignature({ id: '', timestamp: ts, signature: sig, body, secret, now }) && !W.verifyResendSignature({ id: 'msg_1', timestamp: ts, signature: sig, body, secret: '', now }));
+  check('webhook: an old timestamp (replay) fails', !W.verifyResendSignature({ id: 'msg_1', timestamp: ts, signature: sig, body, secret, now: now + 6 * 60e3 }));
+
+  // CSV and the WIP layout (made-up rows, real column names)
+  check('csv: quotes, doubled quotes, commas and newlines', JSON.stringify(W.parseCsv('a,"b,c","d ""e""",\n"x\ny",2\r\n\n')) === JSON.stringify([['a', 'b,c', 'd "e"', ''], ['x\ny', '2']]));
+  const wipCsv = ['"Order#","Ord Date","Customer","Job","Description","EIN","Model Num","Serial #","Tech","Last Dt","Ptype","Assigned","Contact","P","Total Charge","Nochrg Total","Bill_hrs","Actual Hrs","Parts Total","Labor Total",',
+    '"M3000001","11/10/26","EXAMPLE CO","A","HYD FILTER","1","T770-R","at6399999","M01","11/11/26","M1020","","","A",,1.00,1,1,,1.00,',
+    '"M3000001","11/10/26","EXAMPLE CO","B","DRIVE TIME","1","T770-R","AT6399999","M01","11/11/26","M5005","","","A",,1.00,1,1,,1.00,',
+    '"T2000002","11/12/26","OTHER","A","CALL","2","T66-R","B4SB99999","M02","","M5005","","","A",,1.00,1,1,,1.00,',
+    '"M1000003","10/30/26","PRELUDE INTERNAL INDY","A","NOVEMBER SALES","","","","","","M1207","","","A",,1.00,,,,,'].join('\n');
+  const wp = W.parseWip(wipCsv);
+  check('wip: one entry per work order + serial, internal rows dropped', wp.ok && wp.rows === 4 && wp.workOrders.length === 2);
+  check('wip: fields kept, nothing else', JSON.stringify(wp.workOrders[0]) === JSON.stringify({ order: 'M3000001', serial: 'AT6399999', openedOn: '2026-11-10', model: 'T770-R', kind: 'shop', branch: 'Indy North' })
+    && !JSON.stringify(wp.workOrders).includes('EXAMPLE'));
+  check('wip: T prefix is field', wp.workOrders[1].kind === 'field' && wp.workOrders[1].branch === '');
+  check('wip: missing columns / empty', W.parseWip('a,b\n1,2').reason === 'missing-columns' && W.parseWip('').reason === 'empty');
+  check('wip: dates', W.usDate('11/2/26') === '2026-11-02' && W.usDate('01/15/2027') === '2027-01-15' && W.usDate('soon') === '');
+  check('indy date: evening UTC is still the same Indy day', W.indyDate('2026-11-12T03:30:00Z') === '2026-11-11' && W.indyDate('2026-11-12T15:00:00Z') === '2026-11-12');
+
+  // Matching
+  const sent = (o = {}) => ({ status: 'sent', serial: 'AT6399999', outcome: { result: 'won', tier: 'shop', sentAt: '2026-11-10T14:00:00Z', ...o } });
+  check('match: same serial, opened the day it was sent', W.matchWorkOrder(sent(), wp.workOrders).order === 'M3000001');
+  check('match: a work order opened before the send does not count', W.matchWorkOrder(sent({ sentAt: '2026-11-11T14:00:00Z' }), wp.workOrders) === null);
+  check('match: only Sent-to-service Field / Shop wins', W.matchWorkOrder({ ...sent(), status: 'working' }, wp.workOrders) === null && W.matchWorkOrder(sent({ tier: 'parts' }), wp.workOrders) === null);
+  check('match: earliest work order wins', W.matchWorkOrder(sent(), [{ order: 'M9', serial: 'AT6399999', openedOn: '2026-11-12' }, { order: 'M8', serial: 'AT6399999', openedOn: '2026-11-11' }]).order === 'M8');
+
+  // Follow-ups
+  const H = 3600e3, sentAt = '2026-11-10T14:00:00Z', t0 = new Date(sentAt).getTime();
+  const fc = (fu, tier = 'field') => ({ status: 'sent', outcome: { result: 'won', tier, sentAt }, followUp: fu });
+  const at = (h) => ({ now: t0 + h * H, wipReceivedAt: new Date(t0 + h * H).toISOString() });
+  check('follow-up: waits until 48 h for Field', W.followUpState(fc(), {}, at(47)).action === 'wait' && W.followUpState(fc(), {}, at(48)).action === 'bump' && W.followUpState(fc(), {}, at(48)).n === 1);
+  check('follow-up: Shop waits 7 days', W.followUpState(fc(undefined, 'shop'), {}, at(167)).action === 'wait' && W.followUpState(fc(undefined, 'shop'), {}, at(168)).action === 'bump');
+  check('follow-up: then every 24 h, 3 reminders, then escalate', W.followUpState(fc({ bumps: 1 }), {}, at(71)).action === 'wait' && W.followUpState(fc({ bumps: 1 }), {}, at(72)).n === 2
+    && W.followUpState(fc({ bumps: 2 }), {}, at(96)).n === 3 && W.followUpState(fc({ bumps: 3 }), {}, at(119)).action === 'wait' && W.followUpState(fc({ bumps: 3 }), {}, at(120)).action === 'escalate');
+  check('follow-up: reminders stay an interval apart even when overdue', W.followUpState(fc({ bumps: 1, lastBumpAt: new Date(t0 + 100 * H).toISOString() }), {}, at(110)).action === 'wait'
+    && W.followUpState(fc({ bumps: 1, lastBumpAt: new Date(t0 + 100 * H).toISOString() }), {}, at(124)).n === 2
+    && W.followUpState(fc({ bumps: 3, lastBumpAt: new Date(t0 + 130 * H).toISOString() }), {}, at(140)).action === 'wait');
+  check('follow-up: nothing after the escalation', W.followUpState(fc({ bumps: 3, escalatedAt: 'x' }), {}, at(500)).action === 'none');
+  check('follow-up: waits for a WIP report from after the deadline', W.followUpState(fc(), {}, { now: t0 + 50 * H, wipReceivedAt: new Date(t0 + 47 * H).toISOString() }).action === 'waiting-for-wip'
+    && W.followUpState(fc(), {}, { now: t0 + 50 * H, wipReceivedAt: '' }).action === 'waiting-for-wip');
+  check('follow-up: Parts and non-sent cases never bump', W.followUpState(fc(undefined, 'parts'), {}, at(500)).action === 'none' && W.followUpState({ ...fc(), status: 'completed' }, {}, at(500)).action === 'none');
+  check('follow-up: settings change the timers, bad values fall back', W.followUpState(fc(), { followUps: { fieldHours: 24 } }, at(24)).action === 'bump'
+    && JSON.stringify(W.followUpSettings({ followUps: { fieldHours: 'x', maxBumps: -1, shopHours: 0 } })) === JSON.stringify(W.FOLLOW_UP_DEFAULTS)
+    && W.followUpState(fc(), { followUps: { maxBumps: 0 } }, at(48)).action === 'escalate');
+  // Client copy agrees (the board shows what the server will do)
+  const fixtures = [[fc(), {}, at(10)], [fc(), {}, at(48)], [fc({ bumps: 2 }), { followUps: { bumpEveryHours: 12 } }, at(80)], [fc({ bumps: 3 }), {}, at(130)],
+    [fc(undefined, 'shop'), {}, { now: t0 + 200 * H, wipReceivedAt: '' }], [fc({ escalatedAt: 'x' }), {}, at(1)], [fc(undefined, 'parts'), {}, at(99)],
+    [fc({ bumps: 2, lastBumpAt: new Date(t0 + 150 * H).toISOString() }), {}, at(160)], [fc({ bumps: 3, lastBumpAt: new Date(t0 + 150 * H).toISOString() }), {}, at(175)]];
+  check('drift: followUpState matches the server', fixtures.every(([c, st, o]) => JSON.stringify(T.followUpState(c, st, o)) === JSON.stringify(W.followUpState(c, st, o))));
+  check('drift: follow-up defaults match', JSON.stringify(T.FOLLOW_UP_DEFAULTS) === JSON.stringify(W.FOLLOW_UP_DEFAULTS) && JSON.stringify(T.followUpSettings({ followUps: { fieldHours: 30 } })) === JSON.stringify(W.followUpSettings({ followUps: { fieldHours: 30 } })));
+  check('labels: due / bumped / overdue / escalated', /^Work order due/.test(T.followUpLabel(fc(), {}, at(1)).text) && /^Bumped 1×/.test(T.followUpLabel(fc({ bumps: 1 }), {}, at(50)).text)
+    && /Overdue/.test(T.followUpLabel(fc(), {}, { now: t0 + 50 * H }).text) && /Escalated/.test(T.followUpLabel(fc({ escalatedAt: 'x' }), {}, at(1)).text) && T.followUpLabel({ status: 'new' }, {}, at(1)) === null);
+  check('close reasons include "No work order opened"', T.CLOSE_REASONS.includes('No work order opened'));
+  const rules = readFileSync(join(root, 'firestore.rules'), 'utf8');
+  check('rules: WIP docs are read-only to the app', /match \/telematicsWip\/\{docId\} \{\s*allow read:\s+if canUseTelematics\(\);\s*allow write: if false;/.test(rules));
+}
+
+/* ---------- Dashboards: switcher and landing screen (Nov 2026) ---------- */
+{
+  const A = await import('../src/lib/access.js');
+  const admin = { role: 'admin' }, rep = { role: 'user' }, both = { role: 'user', telematicsAccess: true }, tele = { role: 'user', leadAccess: false, telematicsAccess: true };
+  check('dashboards: who gets which', JSON.stringify(A.workspacesFor(admin)) === '["leads","backoffice","telematics"]' && JSON.stringify(A.workspacesFor(rep)) === '["leads","backoffice"]'
+    && JSON.stringify(A.workspacesFor(both)) === '["leads","backoffice","telematics"]' && JSON.stringify(A.workspacesFor(tele)) === '["telematics"]' && A.workspacesFor(null).length === 0);
+  check('dashboards: admins land on the picker', A.landingView(admin, 'stage-incoming') === A.WORKSPACE_PICKER_VIEW);
+  check('dashboards: reps land on New, telematics-only on the board', A.landingView(rep, 'stage-incoming') === 'stage-incoming' && A.landingView(both, 'stage-incoming') === 'stage-incoming'
+    && A.landingView(tele, 'stage-incoming') === A.TELEMATICS_BOARD_VIEW);
+  check('dashboards: a refresh returns to the remembered dashboard', A.landingView(admin, 'stage-incoming', 'telematics') === A.TELEMATICS_BOARD_VIEW
+    && A.landingView(admin, 'stage-incoming', 'backoffice') === 'submittals' && A.landingView(rep, 'stage-incoming', 'telematics') === 'stage-incoming');
+  check('dashboards: every view belongs to the right one', A.workspaceOfView('stage-working') === 'leads' && A.workspaceOfView('todo') === 'leads' && A.workspaceOfView('reports') === 'leads'
+    && A.BACK_OFFICE_VIEWS.every(v => A.workspaceOfView(v) === 'backoffice') && A.TELEMATICS_VIEWS.every(v => A.workspaceOfView(v) === 'telematics')
+    && ['users', 'settings', A.WORKSPACE_PICKER_VIEW].every(v => A.workspaceOfView(v) === null));
+  check('dashboards: each opens on a view its users can open', A.WORKSPACES.every(w => [admin].every(u => A.canOpenView(A.workspaceHomeView(w.id, 'stage-incoming'), u, ['reports', 'users', 'settings'])))
+    && A.canOpenView(A.workspaceHomeView('backoffice', 'stage-incoming'), rep, []) && A.canOpenView(A.workspaceHomeView('telematics', 'stage-incoming'), tele, []));
+  check('dashboards: the picker only with a choice to make', A.canOpenView(A.WORKSPACE_PICKER_VIEW, admin, []) && A.canOpenView(A.WORKSPACE_PICKER_VIEW, rep, []) && !A.canOpenView(A.WORKSPACE_PICKER_VIEW, tele, []));
+  check('app: the sidebar groups are tagged with a dashboard', /\{ ws: 'telematics', title: 'Telematics'/.test(app) && /\{ ws: 'backoffice', title: 'Back Office'/.test(app) && /\{ ws: '\*', title: 'Admin'/.test(app));
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
