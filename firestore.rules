@@ -152,6 +152,12 @@ service cloud.firestore {
       allow read:  if canUseTelematics();
       allow write: if canUseTelematics();
     }
+    // telematicsWip/{status,latest}: the daily WIP report, written only by
+    // telematicsWipInbound (order / date / serial / type — no customer data).
+    match /telematicsWip/{docId} {
+      allow read:  if canUseTelematics();
+      allow write: if false;
+    }
 
     /* ===================== CONFIG ===================== */
     // Statuses, branches, scoring, lead routing and notification recipients all

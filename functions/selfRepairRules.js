@@ -188,7 +188,8 @@ const PROBES = [
   { name: 'restoreLoaLeadsForUser', region: 'us-south1', kind: 'callable' },
   { name: 'runHealthCheckNow', region: 'us-south1', kind: 'callable' },
   { name: 'sendTelematicsHandoff', region: 'us-south1', kind: 'callable' },
-  { name: 'telematicsIntake', region: 'us-south1', kind: 'http', method: 'POST' }
+  { name: 'telematicsIntake', region: 'us-south1', kind: 'http', method: 'POST' },
+  { name: 'telematicsWipInbound', region: 'us-south1', kind: 'http', method: 'POST' }
 ];
 
 function probeUrl(probe, projectId) {

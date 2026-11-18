@@ -170,6 +170,7 @@ export const CLOSE_REASONS = [
   'No action needed',
   'Code cleared on its own',
   'Duplicate of another case',
+  'No work order opened',       // after the bumps and escalation ran out
   'Other'
 ];
 
@@ -351,4 +352,60 @@ export function caseCounts(cases = []) {
 export function sortCases(cases = []) {
   const t = (c) => (c.fault && c.fault.startAt) || c.createdAt || '';
   return [...cases].sort((a, b) => String(t(b)).localeCompare(String(t(a))));
+}
+
+/* ===================== STEP 4: FOLLOW-UPS ===================== */
+// The daily WIP report completes a "Sent to service" case when a work order
+// opens on its serial; until then the hourly telematicsFollowUps function
+// bumps the destination + Carter, then escalates. These two are copies of
+// functions/telematicsWipRules.js (a test compares them) so the board can
+// show what's due.
+export const FOLLOW_UP_DEFAULTS = { fieldHours: 48, shopHours: 168, bumpEveryHours: 24, maxBumps: 3, wipStaleHours: 36 };
+export function followUpSettings(settings) {
+  const f = (settings && settings.followUps) || {};
+  const num = (v, d, min, max) => { const n = Number(v); return Number.isFinite(n) && n >= min && n <= max ? n : d; };
+  return {
+    fieldHours: num(f.fieldHours, FOLLOW_UP_DEFAULTS.fieldHours, 1, 24 * 60),
+    shopHours: num(f.shopHours, FOLLOW_UP_DEFAULTS.shopHours, 1, 24 * 60),
+    bumpEveryHours: num(f.bumpEveryHours, FOLLOW_UP_DEFAULTS.bumpEveryHours, 1, 24 * 30),
+    maxBumps: Math.round(num(f.maxBumps, FOLLOW_UP_DEFAULTS.maxBumps, 0, 10)),
+    wipStaleHours: num(f.wipStaleHours, FOLLOW_UP_DEFAULTS.wipStaleHours, 1, 24 * 14)
+  };
+}
+export function followUpState(c, settings, { wipReceivedAt = '', now = Date.now() } = {}) {
+  const o = (c && c.outcome) || {};
+  if (!c || c.status !== 'sent' || o.result !== 'won' || !['field', 'shop'].includes(o.tier) || !o.sentAt) return { action: 'none' };
+  const cfg = followUpSettings(settings);
+  const fu = c.followUp || {};
+  if (fu.escalatedAt) return { action: 'none', escalated: true };
+  const n = Number(fu.bumps) || 0;
+  const H = 3600e3;
+  const first = new Date(o.sentAt).getTime() + (o.tier === 'field' ? cfg.fieldHours : cfg.shopHours) * H;
+  // Never sooner than one interval after the last reminder, so a case that
+  // was already overdue (a late WIP, or go-live day) doesn't get them all at once.
+  const sinceLast = fu.lastBumpAt ? new Date(fu.lastBumpAt).getTime() + cfg.bumpEveryHours * H : 0;
+  const dueMs = Math.max(first + Math.min(n, cfg.maxBumps) * cfg.bumpEveryHours * H, n ? sinceLast : 0);
+  const dueAt = new Date(dueMs).toISOString();
+  const next = n < cfg.maxBumps ? { action: 'bump', n: n + 1 } : { action: 'escalate', n };
+  if (now < dueMs) return { action: 'wait', dueAt, n };
+  if (!wipReceivedAt || new Date(wipReceivedAt).getTime() < dueMs) return { action: 'waiting-for-wip', dueAt, n };
+  return { ...next, dueAt };
+}
+
+// One line for the board / case page: "Work order due Nov 14", "Bumped 2×",
+// "Escalated", "Overdue — waiting for today's WIP".
+export function followUpLabel(c, settings, opts = {}) {
+  const fu = (c && c.followUp) || {};
+  const st = followUpState(c, settings, opts);
+  if (st.escalated) return { tone: 'rose', text: 'Escalated — no work order' };
+  if (st.action === 'none') return null;
+  const bumped = Number(fu.bumps) || 0;
+  const when = new Date(st.dueAt).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  if (st.action === 'wait') return bumped
+    ? { tone: 'amber', text: `Bumped ${bumped}× · next ${when}` }
+    : { tone: 'stone', text: `Work order due ${when}` };
+  const pre = bumped ? `Bumped ${bumped}× · ` : '';
+  if (st.action === 'bump') return { tone: 'amber', text: `${pre}Overdue — reminder ${st.n} going out` };
+  if (st.action === 'escalate') return { tone: 'rose', text: `${pre}Overdue — escalating` };
+  return { tone: 'amber', text: `${pre}Overdue — checking the next WIP` };
 }

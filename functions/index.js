@@ -23,6 +23,7 @@ const { onSchedule } = require('firebase-functions/v2/scheduler');
 const selfRepair = require('./selfRepairRules');
 const telematics = require('./telematicsRules');
 const telematicsIntakeRules = require('./telematicsIntakeRules');
+const telematicsWip = require('./telematicsWipRules');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -109,6 +110,14 @@ const TELEMATICS_INTAKE_SECRET = defineSecret('TELEMATICS_INTAKE_SECRET');
 //   firebase functions:secrets:set GOOGLE_MAPS_KEY
 // Set it to "none" to run intake without address lookups.
 const GOOGLE_MAPS_KEY = defineSecret('GOOGLE_MAPS_KEY');
+
+// The daily WIP report arrives by email at a private Resend receiving address
+// (SETUP.md §9b). RESEND_WEBHOOK_SECRET is the "whsec_…" signing secret of
+// the Resend webhook; RESEND_INBOUND_KEY is a Resend API key with full access
+// (a sending-only key can't download received attachments). Both via
+//   firebase functions:secrets:set <NAME>
+const RESEND_WEBHOOK_SECRET = defineSecret('RESEND_WEBHOOK_SECRET');
+const RESEND_INBOUND_KEY = defineSecret('RESEND_INBOUND_KEY');
 // The repo issues are filed in. A plain constant on purpose: a defineString
 // param needs a value in functions/.env.ind-lmt, and the non-interactive CI
 // deploy fails without one even when a default is given.
@@ -2221,7 +2230,7 @@ exports.sendTelematicsHandoff = onCall(
   }
 );
 
-function buildTelematicsHandoffHtml({ c, dest, sender }) {
+function buildTelematicsHandoffHtml({ c, dest, sender, notice = null }) {
   const row = (label, value) => {
     const v = value === undefined || value === null ? '' : String(value).trim();
     if (!v) return '';
@@ -2282,12 +2291,19 @@ function buildTelematicsHandoffHtml({ c, dest, sender }) {
                 </td>
                 <td>
                   <div style="color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">BOBCAT OF INDY</div>
-                  <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">Telematics hand-off</div>
+                  <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">${escapeHtml(notice ? notice.label : 'Telematics hand-off')}</div>
                 </td>
               </tr>
             </table>
           </td>
         </tr>
+        ${notice ? `<tr>
+          <td style="padding: 24px 28px 0;">
+            <div style="background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 6px; padding: 12px 16px; font-size: 14px; color: #7c2d12; line-height: 1.5;">
+              <div style="font-weight: 700; margin-bottom: 2px;">${escapeHtml(notice.heading)}</div>${escapeHtml(notice.text)}
+            </div>
+          </td>
+        </tr>` : ''}
         <tr>
           <td style="padding: 28px 28px 16px;">
             <div style="font-size: 20px; font-weight: 700; color: #1c1917;">${escapeHtml(tier ? tier.label : 'Hand-off')}: ${escapeHtml(cust.name || 'Customer')}</div>
@@ -2320,6 +2336,219 @@ function buildTelematicsHandoffHtml({ c, dest, sender }) {
 </body>
 </html>`;
 }
+
+/* ===================== TELEMATICS: WIP REPORT + FOLLOW-UPS ===================== */
+// The WIP export (open work orders) is emailed daily to the private Resend
+// receiving address set in Telematics Settings → WIP report. Resend posts an
+// `email.received` webhook here; we check Resend's signature, check the
+// address and sender, download the CSV attachment, keep only order / date /
+// serial / type (telematicsWip/latest — no customer names or amounts), and
+// complete every "Sent to service" case whose serial has a work order opened
+// on or after the day it was sent. Then the follow-ups run, so a bump that
+// was waiting for fresh WIP goes out right away.
+//   telematicsWip/status  what the Settings screen shows (last report, counts)
+//   telematicsWip/latest  the work orders from the last good report
+async function telematicsSettingsDoc() {
+  try {
+    const d = await db.collection('telematicsConfig').doc('settings').get();
+    return d.exists ? (d.data() || {}) : {};
+  } catch (err) {
+    console.error('[telematics] settings read failed', err);
+    return {};
+  }
+}
+
+async function recordWipAttempt(attempt) {
+  try {
+    await db.collection('telematicsWip').doc('status').set({ lastAttempt: { ...attempt, at: new Date().toISOString() } }, { merge: true });
+  } catch (err) {
+    console.error('[telematics-wip] status write failed', err);
+  }
+}
+
+async function matchWipToCases(workOrders, now) {
+  const snap = await db.collection('telematicsCases').where('status', '==', 'sent').get();
+  let matched = 0;
+  for (const d of snap.docs) {
+    const c = { id: d.id, ...d.data() };
+    const wo = telematicsWip.matchWorkOrder(c, workOrders);
+    if (!wo) continue;
+    await d.ref.update({
+      status: 'completed', completedAt: now, statusChangedAt: now, statusChangedBy: '', updatedAt: now,
+      workOrder: { number: wo.order, openedOn: wo.openedOn, kind: wo.kind, branch: wo.branch, source: 'wip', matchedAt: now },
+      history: admin.firestore.FieldValue.arrayUnion({ id: uid('h'), type: 'work_order', at: now, by: '', source: 'wip', number: wo.order, openedOn: wo.openedOn })
+    });
+    matched++;
+  }
+  return matched;
+}
+
+exports.telematicsWipInbound = onRequest(
+  { secrets: [RESEND_WEBHOOK_SECRET, RESEND_INBOUND_KEY, RESEND_API_KEY], region: 'us-south1', timeoutSeconds: 120 },
+  async (req, res) => {
+    if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
+    const okSig = telematicsWip.verifyResendSignature({
+      id: req.headers['svix-id'], timestamp: req.headers['svix-timestamp'], signature: req.headers['svix-signature'],
+      body: req.rawBody || JSON.stringify(req.body || {}), secret: RESEND_WEBHOOK_SECRET.value()
+    });
+    if (!okSig) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+
+    const event = req.body && typeof req.body === 'object' ? req.body : {};
+    if (event.type !== 'email.received') return res.json({ ok: true, action: 'ignored', reason: `event ${event.type || '?'}` });
+    const data = event.data || {};
+    const settings = await telematicsSettingsDoc();
+    const wipCfg = settings.wip || {};
+    const inbox = String(wipCfg.inboxAddress || '').trim().toLowerCase();
+    const to = [...(data.to || []), ...(data.received_for || [])].map(x => String(x).toLowerCase());
+    const from = String(data.from || '').trim().toLowerCase();
+    const meta = { emailId: data.email_id || '', from, subject: String(data.subject || '').slice(0, 200) };
+
+    // Only the address set in Settings, from an allowed sender (when listed).
+    if (!inbox || !to.some(a => a.includes(inbox))) {
+      return res.json({ ok: true, action: 'ignored', reason: 'not the WIP address' });
+    }
+    const allowed = (Array.isArray(wipCfg.allowedSenders) ? wipCfg.allowedSenders : []).map(x => String(x).trim().toLowerCase()).filter(Boolean);
+    if (allowed.length && !allowed.includes(from)) {
+      console.warn(`[telematics-wip] Ignored a report from ${from} — not an allowed sender`);
+      await recordWipAttempt({ ...meta, status: 'refused', reason: `${from} isn't an allowed sender` });
+      return res.json({ ok: true, action: 'refused', reason: 'sender' });
+    }
+    const atts = (Array.isArray(data.attachments) ? data.attachments : [])
+      .filter(a => /\.csv$/i.test(String(a.filename || '')) || /csv/i.test(String(a.content_type || '')));
+    if (!atts.length) {
+      console.warn('[telematics-wip] The WIP email had no CSV attachment');
+      await recordWipAttempt({ ...meta, status: 'failed', reason: 'no CSV attachment' });
+      return res.json({ ok: true, action: 'failed', reason: 'no-attachment' });
+    }
+
+    let csv = '', filename = atts[0].filename || 'wip.csv';
+    try {
+      const list = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(meta.emailId)}/attachments`, {
+        headers: { Authorization: `Bearer ${RESEND_INBOUND_KEY.value()}` }
+      });
+      if (!list.ok) throw new Error(`attachment list answered HTTP ${list.status}${list.status === 401 || list.status === 403 ? ' — is RESEND_INBOUND_KEY a full-access key?' : ''}`);
+      const items = ((await list.json()) || {}).data || [];
+      const item = items.find(x => x.id === atts[0].id) || items.find(x => /\.csv$/i.test(String(x.filename || '')));
+      if (!item || !item.download_url) throw new Error('no download URL for the CSV');
+      if (Number(item.size) > 20 * 1024 * 1024) throw new Error(`CSV is too large (${item.size} bytes)`);
+      const file = await fetch(item.download_url);
+      if (!file.ok) throw new Error(`download answered HTTP ${file.status}`);
+      csv = await file.text();
+      filename = item.filename || filename;
+    } catch (err) {
+      console.error('[telematics-wip] Could not download the WIP attachment:', err && err.message ? err.message : err);
+      await recordWipAttempt({ ...meta, status: 'failed', reason: String(err && err.message ? err.message : err).slice(0, 300) });
+      return res.status(502).json({ ok: false, error: 'download-failed' });
+    }
+
+    const parsed = telematicsWip.parseWip(csv);
+    if (!parsed.ok) {
+      console.error(`[telematics-wip] The WIP CSV couldn't be read (${parsed.reason}) — have its columns changed? File: ${filename}`);
+      await recordWipAttempt({ ...meta, filename, status: 'failed', reason: parsed.reason === 'missing-columns' ? 'the CSV is missing Order#, Ord Date or Serial # columns' : 'the CSV was empty' });
+      return res.status(422).json({ ok: false, error: parsed.reason });
+    }
+
+    const now = new Date().toISOString();
+    try {
+      await db.collection('telematicsWip').doc('latest').set({ receivedAt: now, workOrders: parsed.workOrders });
+      const matched = await matchWipToCases(parsed.workOrders, now);
+      const summary = { ...meta, filename, receivedAt: now, rows: parsed.rows, workOrderCount: parsed.workOrders.length, matched };
+      await db.collection('telematicsWip').doc('status').set({ lastGood: summary, lastAttempt: { ...summary, status: 'ok', at: now } });
+      const followUps = await runTelematicsFollowUps({ wipReceivedAt: now });
+      console.log(`[telematics-wip] WIP ${filename}: ${parsed.workOrders.length} work orders, ${matched} case(s) completed, ${followUps.sent} follow-up email(s)`);
+      return res.json({ ok: true, action: 'processed', workOrders: parsed.workOrders.length, matched, followUps: followUps.sent });
+    } catch (err) {
+      console.error('[telematics-wip] Failed to save the WIP report:', err);
+      return res.status(500).json({ ok: false, error: 'save-failed' });
+    }
+  }
+);
+
+// Bumps and escalation for "Sent to service" cases with no work order yet
+// (followUpState in telematicsWipRules.js). A bump emails the destination's
+// people, cc whoever sent the case (Carter); the escalation emails the
+// Settings → Escalation list (Tanner), cc the sender. Runs hourly and right
+// after each WIP report.
+async function runTelematicsFollowUps({ wipReceivedAt = '' } = {}) {
+  const out = { checked: 0, sent: 0, failed: 0 };
+  const settings = await telematicsSettingsDoc();
+  if (!wipReceivedAt) {
+    try {
+      const st = await db.collection('telematicsWip').doc('status').get();
+      wipReceivedAt = (st.exists && st.data().lastGood && st.data().lastGood.receivedAt) || '';
+    } catch (err) { console.error('[telematics-followups] WIP status read failed', err); }
+  }
+  const snap = await db.collection('telematicsCases').where('status', '==', 'sent').get();
+  if (snap.empty) return out;
+  const dests = Array.isArray(settings.destinations) ? settings.destinations : [];
+  const escalateTo = telematics.resolveRecipients({ to: ((settings.escalation || {}).to) || [] }).to;
+  const userCache = {};
+  const userOf = async (id) => {
+    if (!id) return null;
+    if (!(id in userCache)) {
+      try { const u = await db.collection('users').doc(id).get(); userCache[id] = u.exists ? u.data() : null; } catch { userCache[id] = null; }
+    }
+    return userCache[id];
+  };
+  const resend = new Resend(RESEND_API_KEY.value());
+  for (const d of snap.docs) {
+    const c = { id: d.id, ...d.data() };
+    out.checked++;
+    const st = telematicsWip.followUpState(c, settings, { wipReceivedAt, now: Date.now() });
+    if (st.action !== 'bump' && st.action !== 'escalate') continue;
+    const now = new Date().toISOString();
+    const sender = await userOf(c.outcome.sentBy);
+    const senderEmail = sender && telematics.isEmail(sender.email) ? sender.email.trim() : '';
+    const dest = dests.find(x => x.id === c.outcome.destinationId) || { name: c.outcome.destinationName || 'service', to: [], cc: [] };
+    const sentOn = fmtDateTime(c.outcome.sentAt);
+    let to, cc, notice, subject;
+    if (st.action === 'bump') {
+      const r = telematics.resolveRecipients(dest);
+      to = r.to; cc = [...r.cc, senderEmail].filter(Boolean);
+      notice = { label: `Telematics reminder ${st.n}`, heading: `Reminder ${st.n}: no work order yet`,
+        text: `${(sender && sender.name) || 'Our telematics specialist'} sent this to ${dest.name} on ${sentOn}, and the WIP report still shows no work order on serial ${c.serial}. Please contact the customer and open one — or reply if it isn't going ahead.` };
+      subject = `Reminder ${st.n}: no work order yet — ${telematics.handoffSubject(c)}`.slice(0, 180);
+    } else {
+      to = escalateTo.length ? escalateTo : (senderEmail ? [senderEmail] : []);
+      cc = escalateTo.length && senderEmail ? [senderEmail] : [];
+      notice = { label: 'Telematics escalation', heading: 'No work order after every reminder',
+        text: `Sent to ${dest.name} on ${sentOn} by ${(sender && sender.name) || 'the telematics specialist'}. ${Number((c.followUp || {}).bumps) || 0} reminder(s) went out and the WIP report still shows no work order on serial ${c.serial}.` };
+      subject = `Escalation: no work order — ${telematics.handoffSubject(c)}`.slice(0, 180);
+    }
+    cc = cc.filter(e => !to.some(t => t.toLowerCase() === e.toLowerCase()));
+    const event = { id: uid('h'), type: st.action === 'bump' ? 'bump' : 'escalated', at: now, by: '', n: st.n || 0, to, cc };
+    const patch = st.action === 'bump'
+      ? { 'followUp.bumps': st.n, 'followUp.lastBumpAt': now, updatedAt: now }
+      : { 'followUp.escalatedAt': now, 'followUp.escalatedTo': to, updatedAt: now };
+    if (!to.length) {
+      // Nobody to tell: record it and move on, so it doesn't retry every hour.
+      console.warn(`[telematics-followups] ${c.id}: ${st.action} has no recipients`);
+      await d.ref.update({ ...patch, history: admin.firestore.FieldValue.arrayUnion({ ...event, status: 'failed', reason: 'no-recipients' }) });
+      out.failed++;
+      continue;
+    }
+    try {
+      const html = buildTelematicsHandoffHtml({ c, dest, sender, notice });
+      const result = await resend.emails.send({ from: EMAIL_FROM.value(), to, ...(cc.length ? { cc } : {}), ...(senderEmail ? { reply_to: senderEmail } : {}), subject, html });
+      if (result.error) throw new Error(result.error.message || JSON.stringify(result.error));
+      await d.ref.update({ ...patch, history: admin.firestore.FieldValue.arrayUnion({ ...event, status: 'sent' }) });
+      out.sent++;
+    } catch (err) {
+      // Not recorded as sent, so the next hourly run tries again.
+      console.warn(`[telematics-followups] ${c.id}: ${st.action} email failed:`, err && err.message ? err.message : err);
+      out.failed++;
+    }
+  }
+  return out;
+}
+
+exports.telematicsFollowUps = onSchedule(
+  { schedule: '43 * * * *', timeZone: 'America/Indiana/Indianapolis', region: 'us-central1', secrets: [RESEND_API_KEY], timeoutSeconds: 300 },
+  async () => {
+    const r = await runTelematicsFollowUps();
+    if (r.sent || r.failed) console.log(`[telematics-followups] ${r.checked} checked, ${r.sent} sent, ${r.failed} not sent`);
+  }
+);
 
 // "3 files — open the LMT to view: a.pdf, b.jpg, c.docx". Files stay in
 // Storage behind sign-in; the email only names them.
@@ -3455,6 +3684,21 @@ async function runHealthCheck({ trigger }) {
   const problems = selfRepair.configChecks(config, users);
   for (const p of problems) checks.push({ id: `cfg-${p.id}`, group: 'Settings', label: p.title, ok: false, severity: p.severity, detail: p.detail, fix: '' });
   if (!problems.length) checks.push({ id: 'cfg-ok', group: 'Settings', label: 'Settings and lead routing look complete', ok: true, severity: 'warning', detail: '' });
+  // Telematics: once a WIP address is set, the report must keep arriving —
+  // without it nothing completes and bumps pause.
+  try {
+    const tset = await telematicsSettingsDoc();
+    if (tset.wip && tset.wip.inboxAddress) {
+      const st = await db.collection('telematicsWip').doc('status').get();
+      const s = st.exists ? st.data() : {};
+      const last = s.lastGood && s.lastGood.receivedAt;
+      const hrs = telematicsWip.followUpSettings(tset).wipStaleHours;
+      const fresh = !!last && (now - new Date(last).getTime()) <= hrs * 3600e3;
+      checks.push({ id: 'telematics-wip', group: 'Telematics', label: `The WIP report arrived in the last ${hrs} hours`, ok: fresh, severity: 'warning',
+        detail: fresh ? '' : `${last ? `Last report ${fmtDateTime(last)}.` : 'No WIP report has been received yet.'}${s.lastAttempt && s.lastAttempt.status !== 'ok' ? ` Last attempt: ${s.lastAttempt.reason || s.lastAttempt.status}.` : ''} Work orders can't be matched and bumps are paused until it does.`,
+        fix: 'Check that the daily WIP export is still emailing the CSV to the address in Telematics Settings → WIP report, and the Resend webhook (SETUP.md §9b).' });
+    }
+  } catch (err) { originalConsoleError('[self-repair] telematics WIP check failed:', err.message); }
   checks.push({ id: 'github-token', group: 'Self-repair', label: 'GitHub issue filing is set up', ok: !!githubToken(), severity: 'warning',
     detail: githubToken() ? '' : 'GITHUB_ISSUES_TOKEN is not set, so problems are listed here but no issues are filed.', fix: 'See SETUP.md → "Self-repair loop".' });
 

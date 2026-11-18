@@ -347,6 +347,62 @@ What the endpoint does:
 email — the answer should be `"action":"created"` and the case appears on the
 board. Logs: `firebase functions:log --only telematicsIntake`.
 
+### The daily WIP report (work order matching and reminders)
+
+The WIP export is **emailed** to a private Resend receiving address. It
+never sits on the website. (The old public `…/shopifyupdates/boi_wip.csv`
+should be removed: it exposed open work orders to anyone with the link.)
+
+1. **Receiving address.** Resend → Emails → **Receiving** → ⋯ → *Receiving
+   address* shows your `<id>.resend.app` domain. Pick an address nobody would
+   guess, e.g. `wip-` plus 10 random characters:
+   `wip-7hq2kx9wpd@<id>.resend.app`. Any name on that domain works without
+   setup.
+2. **LMT:** Telematics Settings → **WIP report** → paste the address, and the
+   address the report is sent **from** under *Only accept it from*. Save.
+3. **Webhook.** Resend → **Webhooks** → Add webhook →
+   URL `https://us-south1-ind-lmt.cloudfunctions.net/telematicsWipInbound`,
+   event **email.received** → Add. Open it and copy the **signing secret**
+   (`whsec_…`).
+4. **API key.** Resend → **API Keys** → Create → name *LMT inbound*,
+   permission **Full access** (a sending-only key can't download
+   attachments).
+5. **Secrets, before the push that includes this:**
+
+```powershell
+firebase functions:secrets:set RESEND_WEBHOOK_SECRET   # the whsec_… value
+firebase functions:secrets:set RESEND_INBOUND_KEY      # the new re_… key
+gcloud secrets add-iam-policy-binding RESEND_WEBHOOK_SECRET --project=ind-lmt --member="serviceAccount:9450023146-compute@developer.gserviceaccount.com" --role=roles/secretmanager.secretAccessor
+gcloud secrets add-iam-policy-binding RESEND_INBOUND_KEY --project=ind-lmt --member="serviceAccount:9450023146-compute@developer.gserviceaccount.com" --role=roles/secretmanager.secretAccessor
+```
+
+6. **The export.** Have the daily WIP job email the CSV, **as an
+   attachment**, to the receiving address, from the sender you entered in
+   step 2. Same columns as today (`Order#`, `Ord Date`, `Serial #` are the
+   ones that matter).
+7. **Test:** email a WIP CSV to the address from that sender. Within a
+   minute Telematics Settings → WIP report shows *Last report … N work
+   orders*. Logs: `firebase functions:log --only telematicsWipInbound`.
+
+What happens with each report:
+
+- Resend's signature is checked, then the address and sender. Anything
+  else is ignored (or noted as *refused* in Settings).
+- Only order number, open date, serial number and order type are kept
+  (`telematicsWip/latest`). No customer names, contacts or amounts.
+- A **Sent to Service** Field or Shop case whose serial has a work order
+  opened **on or after the day it was sent** is completed ("Work order
+  M6020231 found in the WIP report").
+- **Reminders** (`telematicsFollowUps`, hourly, and right after each
+  report): if a Field win still has no work order after **48 h** (Shop:
+  **7 days**), the destination's people are emailed, cc whoever sent it.
+  Again every **24 h**, **3** reminders, then the **escalation list** gets
+  it (Tanner). All of these are set in Telematics Settings → Follow-ups. A
+  reminder only goes out once a report received *after* its deadline still
+  shows no work order, so a late or broken report pauses reminders instead
+  of nagging service.
+- System Health warns when no report has arrived for **36 h** (Settings).
+
 ## 10. Post-launch checklist
 
 - [ ] All five branches appear under Settings

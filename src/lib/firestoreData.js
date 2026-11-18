@@ -254,3 +254,11 @@ export function subscribeToTelematicsConfig(callback, onError) {
 export async function saveTelematicsConfig(patch) {
   await setDoc(doc(db, 'telematicsConfig', 'settings'), patch, { merge: true });
 }
+
+// telematicsWip/status — when the last WIP report arrived and what it did.
+// Written only by the telematicsWipInbound function.
+export function subscribeToTelematicsWipStatus(callback) {
+  return onSnapshot(doc(db, 'telematicsWip', 'status'),
+    (snap) => callback(snap.exists() ? snap.data() : null),
+    (err) => { console.warn('subscribeToTelematicsWipStatus error:', err.code || err); callback(null); });
+}
