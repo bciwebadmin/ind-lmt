@@ -184,6 +184,7 @@ const PROBES = [
   { name: 'sendRecordEmail', region: 'us-south1', kind: 'callable' },
   { name: 'sendWelcomeEmail', region: 'us-south1', kind: 'callable' },
   { name: 'adminResetUserPassword', region: 'us-south1', kind: 'callable' },
+  { name: 'requestPasswordReset', region: 'us-south1', kind: 'callable' },
   { name: 'reassignUserLeads', region: 'us-south1', kind: 'callable' },
   { name: 'restoreLoaLeadsForUser', region: 'us-south1', kind: 'callable' },
   { name: 'runHealthCheckNow', region: 'us-south1', kind: 'callable' },

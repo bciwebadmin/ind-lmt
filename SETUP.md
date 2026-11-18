@@ -205,6 +205,23 @@ firebase functions:log --only onLeadCreate
 
 ---
 
+### Password resets (Nov 2026)
+
+"Forgot password?" is sent by the `requestPasswordReset` function through
+Resend. Anyone can call it (people who've forgotten their password aren't
+signed in), so after the first deploy that includes it:
+
+```powershell
+gcloud run services add-iam-policy-binding requestpasswordreset --region=us-south1 --project=ind-lmt --member=allUsers --role=roles/run.invoker
+```
+
+Until then the app quietly falls back to Firebase's own reset email. So that
+the reset page offers a "Continue" back to the LMT, add `lmt.bobcatofindy.com`
+under **Authentication → Settings → Authorized domains** (optional — without it
+the email still works, just without that button).
+
+---
+
 ## 8. Custom domain
 
 **Hosting → Add custom domain** → `lmt.bobcatofindy.com` → add the records
@@ -415,6 +432,10 @@ What happens with each report:
 - [ ] Attach a file to a lead and open it again — proves Storage and its rules
 - [ ] Approve a test access request — temp password starts `IND-`
 - [ ] Settings → System Health: Run health check now — all green
+- [ ] "Forgot password?" on the sign-in screen → email arrives from the LMT
+      domain (not `firebaseapp.com`) and the link sets a new password
+- [ ] Users → key icon → *Set it myself* → sign in as that user → asked to
+      choose a new password
 - [x] Node runtime: functions run on Node 22 (`engines.node`); set
       `node-version: 22` in `deploy.yml` too (Node 20 is decommissioned
       30 October 2026)

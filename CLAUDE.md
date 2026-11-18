@@ -453,7 +453,8 @@ notification setting is absent until Settings is saved once.
 ## Duplicated by necessity
 
 `branchRouting.js` exists in `src/lib/` and `functions/`, identical apart from
-the export style. Change one, change the other.
+the export style. Change one, change the other. Same for `passwordProblem`
+(`src/lib/password.js` ↔ `functions/passwordRules.js`) — a test fails if they drift.
 
 ## Region split (deliberate)
 
@@ -639,6 +640,37 @@ telematics-only account; the Users page gets everyone (`allUsersConfig`).
 Storage attachments are still readable by any signed-in user (Storage rules
 can't cheaply read Firestore) — paths aren't listed anywhere a telematics user
 can see, but it isn't enforced.
+
+## Password resets (Nov 2026)
+
+Three ways, all through Resend from the LMT's own domain. Rules in
+`functions/passwordRules.js` / `src/lib/password.js` (tested); new passwords
+need 8–128 characters, no leading/trailing space.
+
+- **Forgot password?** (sign-in screen) → `requestPasswordReset` (onCall,
+  us-south1, **no sign-in**, in `PROBES`, needs the `allUsers` invoker
+  binding). `generatePasswordResetLink` → branded email; the link lands on
+  Firebase's hosted reset page. It used to be Firebase's own email from
+  `noreply@ind-lmt.firebaseapp.com`, which Outlook quarantined (Erin, Nov 18).
+  - Always `{ ok: true }` for a well-formed address — unknown, disabled,
+    system or throttled included — so the form can't reveal who has an account.
+  - Throttle: 1 a minute, 5 an hour per address in `passwordResets/{sha256}`
+    (Admin SDK only — no rule; stores no address).
+  - Asks for a Continue link to `CRM_URL`; if that domain isn't on Auth's
+    authorized list it falls back to the plain link (`console.warn`, not an incident).
+  - If the function throws, `sendResetEmail` falls back to Firebase's own
+    email, so a Resend outage or an undeployed function still sends something.
+- **Admin → Users → key icon** → `adminResetUserPassword`, two modes:
+  - *Email a temporary password* — as before (random, emailed, admin never
+    sees it unless the email fails).
+  - *Set it myself* — `data.password`; no email, shown once in the modal to
+    copy. Works for a user with no email on file.
+- Both admin modes set `users/{uid}.mustChangePassword: true`
+  (+ `passwordResetAt`, `passwordResetBy`). App shows `ChangePasswordScreen`
+  instead of the app until the user re-enters the temporary password
+  (`reauthenticateWithCredential`) and picks a new one, then clears the flag.
+  firestore.rules lets a user clear it, never set it. A failed clear is logged
+  `[must-change-pw]` and doesn't trap them (`pwChangedLocally`).
 
 ## Working from the user's local copy
 

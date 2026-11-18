@@ -24,6 +24,7 @@ const selfRepair = require('./selfRepairRules');
 const telematics = require('./telematicsRules');
 const telematicsIntakeRules = require('./telematicsIntakeRules');
 const telematicsWip = require('./telematicsWipRules');
+const passwordRules = require('./passwordRules');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -2775,7 +2776,7 @@ function buildPasswordResetEmailHtml({ name, email, password, crmUrl, adminName 
               <tr>
                 <td style="padding: 12px 14px;">
                   <div style="font-size: 12px; color: #92400e; line-height: 1.5;">
-                    <strong>Security tip:</strong> Your previous password no longer works. After signing in with this temporary password, use "Forgot password?" on the sign-in screen to set a new one only you know.
+                    <strong>Security tip:</strong> Your previous password no longer works. After you sign in with this temporary password, the LMT will ask you to choose a new one that only you know.
                   </div>
                 </td>
               </tr>
@@ -2846,6 +2847,9 @@ function generateRandomPassword() {
  * The admin never sees the new password — it's sent directly to the target's
  * inbox. This avoids the "admin knows every user's password" anti-pattern.
  */
+//   Manual mode (Nov 2026, Erin): pass `password` and the admin sets it
+//   themselves — no email; the admin shares it. Both modes set
+//   users/{uid}.mustChangePassword so the user picks their own at sign-in.
 exports.adminResetUserPassword = onCall(
   {
     secrets: [RESEND_API_KEY],
@@ -2872,9 +2876,14 @@ exports.adminResetUserPassword = onCall(
     }
 
     // 3. Validate inputs
-    const { targetUid } = request.data || {};
+    const { targetUid, password: manualPassword } = request.data || {};
     if (!targetUid || typeof targetUid !== 'string') {
       throw new HttpsError('invalid-argument', 'A target user ID is required.');
+    }
+    const manual = manualPassword !== undefined && manualPassword !== null;
+    if (manual) {
+      const problem = passwordRules.passwordProblem(manualPassword);
+      if (problem) throw new HttpsError('invalid-argument', problem);
     }
     if (targetUid === callerUid) {
       throw new HttpsError('failed-precondition', 'To change your own password, sign out and use "Forgot password?" on the sign-in screen.');
@@ -2895,17 +2904,37 @@ exports.adminResetUserPassword = onCall(
     if (targetData.isSystem) {
       throw new HttpsError('failed-precondition', 'System users cannot have their password reset.');
     }
-    if (!targetData.email) {
-      throw new HttpsError('failed-precondition', 'Target user has no email on file — cannot send new password.');
+    if (!targetData.email && !manual) {
+      throw new HttpsError('failed-precondition', 'Target user has no email on file — cannot send new password. Use "Set it myself" instead.');
     }
 
-    // 5. Generate a new password and update Firebase Auth
-    const newPassword = generateRandomPassword();
+    // 5. Generate (or take the admin's) new password and update Firebase Auth
+    const newPassword = manual ? manualPassword : generateRandomPassword();
     try {
       await admin.auth().updateUser(targetUid, { password: newPassword });
     } catch (err) {
+      if (manual && err && err.code === 'auth/invalid-password') {
+        throw new HttpsError('invalid-argument', 'Firebase refused that password. Try a longer one.');
+      }
       console.error(`[reset-pw] Failed to update Auth password for ${targetUid}:`, err);
       throw new HttpsError('internal', 'Failed to update the user\'s password in Firebase Auth. The password was NOT changed.');
+    }
+
+    // The user chooses their own password at their next sign-in. Best effort:
+    // the reset itself has already happened.
+    try {
+      await db.collection('users').doc(targetUid).set({
+        mustChangePassword: true,
+        passwordResetAt: new Date().toISOString(),
+        passwordResetBy: callerUid
+      }, { merge: true });
+    } catch (err) {
+      console.error(`[reset-pw] Password reset for ${targetUid} but could not flag mustChangePassword:`, err);
+    }
+
+    if (manual) {
+      console.log(`[reset-pw] Password set manually for ${targetData.email || targetUid} by ${callerName}`);
+      return { ok: true, manual: true };
     }
 
     // 6. Send the notification email. If email fails, we still return an error
@@ -2943,6 +2972,195 @@ exports.adminResetUserPassword = onCall(
         `Password was reset, but the email could not be sent. Share this new password with the user manually: ${newPassword}`
       );
     }
+  }
+);
+
+/* ===================== FORGOT PASSWORD (sign-in screen) ===================== */
+
+/**
+ * The "Forgot password?" email. Sent through Resend from the LMT's verified
+ * domain (Nov 2026) — Firebase's own reset email, from
+ * noreply@ind-lmt.firebaseapp.com, was being quarantined by Outlook.
+ */
+function buildForgotPasswordEmailHtml({ name, email, link }) {
+  const safeName  = escapeHtml(name || 'there');
+  const safeEmail = escapeHtml(email);
+  const safeLink  = escapeHtml(link);
+
+  return `<!DOCTYPE html>
+<html>
+<body style="margin: 0; padding: 0; background-color: #f5f5f4; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background-color: #f5f5f4; padding: 24px 0;">
+    <tr><td align="center">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="max-width: 600px; background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
+
+        <!-- Header -->
+        <tr>
+          <td style="background-color: #1c1917; padding: 20px 28px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td style="padding-right: 12px;">
+                  <div style="width: 36px; height: 36px; background-color: #ff3300; display: inline-block; text-align: center; line-height: 36px; font-size: 22px; font-weight: 800; color: #ffffff; border-radius: 4px;">B</div>
+                </td>
+                <td>
+                  <div style="color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: 0.5px;">BOBCAT OF INDY</div>
+                  <div style="color: #a8a29e; font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; margin-top: 1px;">LMT · Forgot password</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Headline -->
+        <tr>
+          <td style="padding: 28px 28px 12px;">
+            <div style="font-size: 22px; font-weight: 700; color: #1c1917;">Choose a new password</div>
+            <div style="font-size: 14px; color: #57534e; margin-top: 4px; line-height: 1.5;">Hi ${safeName}, someone asked to reset the Bobcat of Indy LMT password for <strong>${safeEmail}</strong>. Click the button below to choose a new one.</div>
+          </td>
+        </tr>
+
+        <!-- CTA button -->
+        <tr>
+          <td align="center" style="padding: 16px 28px 8px;">
+            <a href="${safeLink}" style="display: inline-block; background-color: #d62b00; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-size: 14px; font-weight: 700; letter-spacing: 0.3px;">Reset my password →</a>
+          </td>
+        </tr>
+
+        <!-- Expiry + fallback link -->
+        <tr>
+          <td style="padding: 12px 28px 0;">
+            <div style="font-size: 12px; color: #78716c; line-height: 1.5;">
+              The link works once and expires in about an hour. If the button doesn't work, copy this address into your browser:
+            </div>
+            <div style="font-size: 11px; color: #57534e; font-family: 'SF Mono', Menlo, Consolas, monospace; word-break: break-all; margin-top: 6px; padding: 8px 10px; background-color: #fafaf9; border: 1px solid #e7e5e4; border-radius: 4px;">${safeLink}</div>
+          </td>
+        </tr>
+
+        <!-- Did-not-request note -->
+        <tr>
+          <td style="padding: 16px 28px 0;">
+            <div style="font-size: 12px; color: #78716c; line-height: 1.5;">
+              <strong>Didn't ask for this?</strong> You can ignore this email — your password stays the same unless you click the link.
+            </div>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="padding: 20px 28px 28px; text-align: center; color: #a8a29e; font-size: 11px;">
+            You received this email because "Forgot password?" was used on the Bobcat of Indy LMT sign-in screen.
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
+/**
+ * HTTPS Callable (no sign-in needed): "Forgot password?" on the sign-in screen.
+ *
+ * Always answers { ok: true } for a well-formed email — whether or not it has
+ * an account, and when throttled — so the form can't be used to find out who
+ * has one. Throttle: one email a minute, five an hour, per address
+ * (passwordResets/{sha256(email)}, Admin SDK only; stores no address).
+ * Errors only when the email genuinely couldn't be sent; the browser then
+ * falls back to Firebase's own reset email.
+ */
+exports.requestPasswordReset = onCall(
+  {
+    secrets: [RESEND_API_KEY],
+    region: 'us-south1'
+  },
+  async (request) => {
+    const email = passwordRules.normalizeEmail(request.data && request.data.email);
+    if (!email) throw new HttpsError('invalid-argument', 'Please enter a valid email address.');
+    const masked = email.replace(/^(.).*(@.*)$/, '$1…$2');
+
+    // 1. Throttle
+    const key = require('crypto').createHash('sha256').update(email).digest('hex');
+    const ref = db.collection('passwordResets').doc(key);
+    let allowed = true;
+    try {
+      allowed = await db.runTransaction(async (tx) => {
+        const snap = await tx.get(ref);
+        const d = passwordRules.resetRateDecision(snap.exists ? snap.data() : null, Date.now());
+        if (d.allowed) tx.set(ref, d.next);
+        return d.allowed;
+      });
+    } catch (err) {
+      // Don't block a real user over the throttle store.
+      console.warn(`[forgot-pw] Throttle check failed for ${masked}; sending anyway:`, err && err.message);
+    }
+    if (!allowed) {
+      console.warn(`[forgot-pw] Throttled ${masked}`);
+      return { ok: true };
+    }
+
+    // 2. Is there an account? (Silently done if not.)
+    let authUser;
+    try {
+      authUser = await admin.auth().getUserByEmail(email);
+    } catch (err) {
+      if (err && err.code === 'auth/user-not-found') {
+        console.warn(`[forgot-pw] No account for ${masked}`);
+        return { ok: true };
+      }
+      console.error(`[forgot-pw] Account lookup failed for ${masked}:`, err);
+      throw new HttpsError('internal', 'Could not send reset email.');
+    }
+    if (authUser.disabled) {
+      console.warn(`[forgot-pw] Account disabled: ${masked}`);
+      return { ok: true };
+    }
+    let name = authUser.displayName || '';
+    try {
+      const profile = await db.collection('users').doc(authUser.uid).get();
+      if (profile.exists) {
+        if (profile.data().isSystem) return { ok: true };
+        name = profile.data().name || name;
+      }
+    } catch (err) {
+      console.warn(`[forgot-pw] Could not read the profile for ${masked}:`, err && err.message);
+    }
+
+    // 3. The reset link. Ask for a "Continue" back to the LMT; if that domain
+    //    isn't on Firebase Auth's authorized list, send the plain link.
+    let link;
+    try {
+      link = await admin.auth().generatePasswordResetLink(email, { url: CRM_URL.value() });
+    } catch (err) {
+      console.warn(`[forgot-pw] Reset link with continue URL refused (${err && err.code}); using the plain link`);
+      try {
+        link = await admin.auth().generatePasswordResetLink(email);
+      } catch (err2) {
+        console.error(`[forgot-pw] Could not create a reset link for ${masked}:`, err2);
+        throw new HttpsError('internal', 'Could not send reset email.');
+      }
+    }
+
+    // 4. Send it.
+    try {
+      const resend = new Resend(RESEND_API_KEY.value());
+      const result = await resend.emails.send({
+        from: EMAIL_FROM.value(),
+        to: email,
+        subject: 'Reset your Bobcat of Indy LMT password',
+        html: buildForgotPasswordEmailHtml({ name, email, link })
+      });
+      if (result && result.error) {
+        console.error(`[forgot-pw] Resend error for ${masked}:`, result.error);
+        throw new HttpsError('internal', 'Could not send reset email.');
+      }
+    } catch (err) {
+      if (err instanceof HttpsError) throw err;
+      console.error(`[forgot-pw] Failed to send reset email to ${masked}:`, err);
+      throw new HttpsError('internal', 'Could not send reset email.');
+    }
+    console.log(`[forgot-pw] Reset email sent to ${masked}`);
+    return { ok: true };
   }
 );
 

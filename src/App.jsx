@@ -53,12 +53,13 @@ import {
   byBranch, byDestination, lostReasons, weekly, formatHours, formatDays, formatPct
 } from './lib/telematicsStats';
 import { setErrorContext } from './lib/errorReporter';
+import { passwordProblem, newPasswordProblem, changePasswordError } from './lib/password';
 
 import {
   signInWithCredentials, signOutCurrent, watchAuthState,
   sendResetEmail, createUserOnSecondaryApp, sendWelcomeEmailToUser,
   reassignUserLeadsViaFunction, restoreLoaLeadsForUserViaFunction,
-  adminResetUserPasswordViaFunction,
+  adminResetUserPasswordViaFunction, changeOwnPassword,
   sendImportSummaryEmailViaFunction,
   sendTelematicsHandoffViaFunction,
   sendSalesRequestEmailViaFunction,
@@ -1233,6 +1234,12 @@ export default function BobcatIndyCRM() {
     return users.find(u => u.id === currentUserId && !u.isSystem) || null;
   }, [currentUserId, users]);
 
+  // An admin reset this user's password: they choose their own before going
+  // on (ChangePasswordScreen). Set locally once done, so a failed flag write
+  // can't trap them on that screen.
+  const [pwChangedLocally, setPwChangedLocally] = useState(false);
+  const mustChangePassword = !!currentUser?.mustChangePassword && !pwChangedLocally;
+
   // Module access (src/lib/access.js). Both are false until the user's profile
   // has loaded, so nothing subscribes before we know what they may read.
   const leadAccess = hasLeadAccess(currentUser);
@@ -1629,6 +1636,7 @@ export default function BobcatIndyCRM() {
     // The next sign-in asks for a dashboard again.
     try { window.sessionStorage.removeItem('lmt.workspace'); } catch { /* storage blocked */ }
     await signOutCurrent();
+    setPwChangedLocally(false);
     setView(DEFAULT_VIEW);
     setSelectedLead(null);
   };
@@ -2619,6 +2627,25 @@ export default function BobcatIndyCRM() {
           onSignIn={signIn}
           onRequestAccess={submitAccessRequest}
           onForgotPassword={requestPasswordReset}
+        />
+      </div>
+    );
+  }
+
+  // Signed in after an admin password reset → choose a new password first
+  if (mustChangePassword) {
+    return (
+      <div style={{fontFamily: "'Manrope', system-ui, sans-serif"}}>
+        <FontStyles />
+        <ChangePasswordScreen
+          user={currentUser}
+          onSignOut={signOut}
+          onChanged={async () => {
+            setPwChangedLocally(true);
+            try { await saveUserDoc(currentUser.id, { mustChangePassword: false }); }
+            catch (err) { console.error('[must-change-pw] Password changed but the flag could not be cleared', err); }
+            showToast('Password changed');
+          }}
         />
       </div>
     );
@@ -7466,13 +7493,14 @@ function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, onS
     setResetError('');
   };
 
-  const confirmResetPassword = async () => {
+  // `password` set = "Set it myself" (no email); otherwise emailed.
+  const confirmResetPassword = async (password) => {
     if (!resetTarget) return;
     setResetBusy(true);
     setResetError('');
     try {
-      const result = await adminResetUserPasswordViaFunction({ targetUid: resetTarget.id });
-      setResetResult(result);  // { ok: true, emailSentTo: ... }
+      const result = await adminResetUserPasswordViaFunction({ targetUid: resetTarget.id, password });
+      setResetResult(result);  // { ok: true, emailSentTo } or { ok: true, manual: true }
     } catch (err) {
       // If email failed but password DID reset, the error message contains the new password.
       // Show it to the admin so they can share it manually.
@@ -7785,7 +7813,7 @@ function UsersView({ config, onSave, leads, onApprove, onDeny, onToggleRole, onS
                     <button
                       onClick={() => openResetPassword(u.id)}
                       className="text-stone-400 hover:text-brand-600 hover:bg-brand-50 p-1 rounded"
-                      title={`Reset password — sends ${u.name || 'user'} a new temporary password by email`}>
+                      title={`Reset password — email ${u.name || 'user'} a temporary password, or set one yourself`}>
                       <Key size={14}/>
                     </button>
                     <button
@@ -8002,19 +8030,52 @@ function ReturnFromLoaModal({ target, busy, onConfirm, onCancel }) {
 
 /* ===================== RESET PASSWORD MODAL =====================
  * Confirms an admin wants to reset another user's password, then shows
- * the outcome inline (success or error).
+ * the outcome inline (success or error). Two ways (Nov 2026, Erin):
  *
- * The Cloud Function generates a random password server-side and emails
- * it directly to the target — the admin never sees the plaintext (unless
- * the email send fails, in which case the error message contains it as
- * a fallback so the admin can share it manually).
+ *   Email  — the Cloud Function generates a random password and emails it
+ *            straight to the user; the admin never sees it (unless the email
+ *            fails, when the error message carries it so it can be shared).
+ *   Manual — the admin types one (or clicks Generate), it's applied with no
+ *            email, and shown here once to copy and share by text / in person.
+ *
+ * Either way the user is asked to choose their own at their next sign-in
+ * (users/{uid}.mustChangePassword → ChangePasswordScreen).
  */
 function ResetPasswordModal({ target, busy, result, error, onConfirm, onClose }) {
   // Three states rendered as three different bodies:
   //   1. Initial     — confirm the action
   //   2. Success     — result is set
-  //   3. Error       — error is set (usually with the new password embedded)
+  //   3. Error       — error is set (email mode: usually with the new password embedded)
   const state = result ? 'success' : error ? 'error' : 'confirm';
+  const canEmail = !!target.email;
+  const [mode, setMode] = useState(canEmail ? 'email' : 'manual');
+  const [pw, setPw] = useState(canEmail ? '' : generateStrongPassword(12));
+  const [copied, setCopied] = useState(false);
+  const pwIssue = mode === 'manual' ? passwordProblem(pw) : '';
+  const strength = useMemo(() => scorePassword(pw), [pw]);
+
+  const chooseMode = (m) => {
+    setMode(m);
+    if (m === 'manual' && !pw) setPw(generateStrongPassword(12));
+  };
+  const copyPw = async () => {
+    try { await navigator.clipboard.writeText(pw); setCopied(true); setTimeout(() => setCopied(false), 1800); }
+    catch { /* clipboard blocked — the password is on screen to copy by hand */ }
+  };
+  const submit = () => {
+    if (busy) return;
+    if (mode === 'manual') { if (!pwIssue) onConfirm(pw); }
+    else onConfirm();
+  };
+
+  const modeBtn = (m, label, disabled) => (
+    <button type="button" onClick={() => chooseMode(m)} disabled={disabled || busy}
+      aria-pressed={mode === m}
+      className={`flex-1 px-3 py-2 text-xs font-semibold rounded-md border transition-colors disabled:opacity-40 ${
+        mode === m ? 'border-brand-500 bg-brand-50 text-brand-700' : 'border-stone-200 bg-white text-stone-600 hover:bg-stone-50'}`}>
+      {label}
+    </button>
+  );
 
   return (
     <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
@@ -8023,8 +8084,8 @@ function ResetPasswordModal({ target, busy, result, error, onConfirm, onClose })
           <div className="flex items-center gap-2 mb-1">
             <Key size={18} className={state === 'success' ? 'text-emerald-600 shrink-0' : state === 'error' ? 'text-amber-600 shrink-0' : 'text-brand-600 shrink-0'}/>
             <div className="text-base font-semibold text-stone-900">
-              {state === 'success' && 'Password reset'}
-              {state === 'error'   && 'Password reset — email failed'}
+              {state === 'success' && (result.manual ? 'Password set' : 'Password reset')}
+              {state === 'error'   && (mode === 'manual' ? 'Password not changed' : 'Password reset — email failed')}
               {state === 'confirm' && 'Reset password'}
             </div>
           </div>
@@ -8036,21 +8097,57 @@ function ResetPasswordModal({ target, busy, result, error, onConfirm, onClose })
         <div className="px-5 py-4 space-y-3">
           {state === 'confirm' && (
             <>
+              <div className="flex gap-2" role="group" aria-label="How to reset">
+                {modeBtn('email', 'Email a temporary password', !canEmail)}
+                {modeBtn('manual', 'Set it myself', false)}
+              </div>
               <div className="text-sm text-stone-700 leading-relaxed">
-                A new random password will be generated and applied immediately. {target.name}'s current password will stop working.
+                {target.name}'s current password stops working immediately.
               </div>
-              <div className="p-3 border border-stone-200 rounded-md bg-stone-50 text-xs text-stone-700 leading-relaxed">
-                <strong>What happens next:</strong>
-                <ol className="mt-1.5 ml-4 list-decimal space-y-0.5">
-                  <li>{target.name} receives an email with the new temporary password</li>
-                  <li>They sign in with it, then can use "Forgot password?" to set their own</li>
-                  <li>You never see the new password — it's sent straight to their inbox</li>
-                </ol>
-              </div>
+              {mode === 'email' ? (
+                <div className="p-3 border border-stone-200 rounded-md bg-stone-50 text-xs text-stone-700 leading-relaxed">
+                  <strong>What happens next:</strong>
+                  <ol className="mt-1.5 ml-4 list-decimal space-y-0.5">
+                    <li>{target.name} receives an email with a new temporary password</li>
+                    <li>When they sign in with it, they're asked to choose their own</li>
+                    <li>You never see the new password — it's sent straight to their inbox</li>
+                  </ol>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <label className="block text-[11px] uppercase tracking-wider font-semibold text-stone-500" htmlFor="reset-manual-pw">
+                    New temporary password
+                  </label>
+                  <div className="flex gap-2">
+                    <input id="reset-manual-pw" type="text" value={pw} autoComplete="off" spellCheck={false}
+                      onChange={e => setPw(e.target.value)} disabled={busy}
+                      className="flex-1 min-w-0 px-3 py-2 border border-stone-200 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/30"/>
+                    <button type="button" onClick={() => setPw(generateStrongPassword(12))} disabled={busy}
+                      className="px-2.5 py-1.5 border border-stone-200 hover:bg-stone-50 text-xs font-semibold rounded-md flex items-center gap-1.5 text-stone-700 shrink-0"
+                      title="Generate a strong password">
+                      <Sparkles size={12} className="text-brand-500"/> Generate
+                    </button>
+                  </div>
+                  {pw && (
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 flex gap-1">
+                        {[0, 1, 2, 3].map(i => (
+                          <div key={i} className={`h-1.5 flex-1 rounded-full ${i < strength.segments ? strength.barColor : 'bg-stone-200'}`}/>
+                        ))}
+                      </div>
+                      <span className={`text-[10px] uppercase tracking-wider font-semibold whitespace-nowrap ${strength.textColor}`}>{strength.label}</span>
+                    </div>
+                  )}
+                  {pwIssue && pw && <div className="text-xs text-rose-600">{pwIssue}</div>}
+                  <div className="p-3 border border-stone-200 rounded-md bg-stone-50 text-xs text-stone-700 leading-relaxed">
+                    No email is sent. You'll share this password with {target.name} yourself; when they sign in with it, they're asked to choose their own.
+                  </div>
+                </div>
+              )}
             </>
           )}
 
-          {state === 'success' && (
+          {state === 'success' && !result.manual && (
             <div className="p-3 border border-emerald-200 rounded-md bg-emerald-50">
               <div className="flex items-start gap-2">
                 <Check size={16} className="text-emerald-600 shrink-0 mt-0.5"/>
@@ -8058,6 +8155,25 @@ function ResetPasswordModal({ target, busy, result, error, onConfirm, onClose })
                   New temporary password sent to <strong>{result.emailSentTo || target.email}</strong>. They can sign in with it right away.
                 </div>
               </div>
+            </div>
+          )}
+
+          {state === 'success' && result.manual && (
+            <div className="p-3 border border-emerald-200 rounded-md bg-emerald-50 space-y-2">
+              <div className="flex items-start gap-2">
+                <Check size={16} className="text-emerald-600 shrink-0 mt-0.5"/>
+                <div className="text-sm text-emerald-900 leading-relaxed">
+                  Password changed. Share it with <strong>{target.name}</strong> directly — it won't be shown again.
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <div className="flex-1 min-w-0 px-3 py-2 bg-white border border-emerald-200 rounded-md text-sm font-mono text-stone-900 break-all select-all" data-testid="reset-manual-result">{pw}</div>
+                <button type="button" onClick={copyPw}
+                  className="px-2.5 py-1.5 border border-emerald-200 bg-white hover:bg-emerald-50 text-xs font-semibold rounded-md flex items-center gap-1.5 text-emerald-800 shrink-0">
+                  {copied ? <><Check size={12}/> Copied</> : <><Copy size={12}/> Copy</>}
+                </button>
+              </div>
+              <div className="text-xs text-emerald-800">They'll be asked to choose their own password when they sign in.</div>
             </div>
           )}
 
@@ -8069,9 +8185,11 @@ function ResetPasswordModal({ target, busy, result, error, onConfirm, onClose })
                   {error}
                 </div>
               </div>
-              <div className="mt-2 text-xs text-amber-800">
-                If the message above contains a password, share it with {target.name} directly (e.g. text or in-person). Their old password no longer works.
-              </div>
+              {mode === 'email' && (
+                <div className="mt-2 text-xs text-amber-800">
+                  If the message above contains a password, share it with {target.name} directly (e.g. text or in-person). Their old password no longer works.
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -8086,12 +8204,14 @@ function ResetPasswordModal({ target, busy, result, error, onConfirm, onClose })
                 Cancel
               </button>
               <button
-                onClick={onConfirm}
-                disabled={busy}
+                onClick={submit}
+                disabled={busy || !!pwIssue}
                 className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 disabled:bg-brand-300 text-white text-sm font-semibold rounded-md flex items-center gap-1.5">
                 {busy
                   ? <><RefreshCw size={13} className="animate-spin"/> Resetting…</>
-                  : <><Key size={13}/> Reset & email new password</>
+                  : mode === 'manual'
+                    ? <><Key size={13}/> Set password</>
+                    : <><Key size={13}/> Reset & email new password</>
                 }
               </button>
             </>
@@ -8105,6 +8225,86 @@ function ResetPasswordModal({ target, busy, result, error, onConfirm, onClose })
         </div>
       </div>
     </div>
+  );
+}
+
+/* ===================== CHANGE PASSWORD SCREEN =====================
+ * Shown instead of the app when users/{uid}.mustChangePassword is set — after
+ * an admin reset (Nov 2026). The user confirms the temporary password and
+ * chooses their own; App then clears the flag.
+ */
+function ChangePasswordScreen({ user, onChanged, onSignOut }) {
+  const [form, setForm] = useState({ current: '', next: '', confirm: '' });
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const strength = useMemo(() => scorePassword(form.next), [form.next]);
+  const set = (k) => (e) => { setForm(f => ({ ...f, [k]: e.target.value })); setErr(''); };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    const problem = newPasswordProblem(form);
+    if (problem) { setErr(problem); return; }
+    setBusy(true);
+    try {
+      await changeOwnPassword(form.current, form.next);
+      await onChanged();
+    } catch (ex) {
+      setErr(changePasswordError(ex?.code || ''));
+      setBusy(false);
+    }
+  };
+
+  const field = (k, label, autoComplete) => (
+    <div>
+      <label htmlFor={`cpw-${k}`} className="block text-[11px] uppercase tracking-wider font-semibold text-stone-500 mb-1">{label}</label>
+      <input id={`cpw-${k}`} type={show ? 'text' : 'password'} value={form[k]} onChange={set(k)} disabled={busy}
+        autoComplete={autoComplete}
+        className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/30"/>
+    </div>
+  );
+
+  return (
+    <AuthShell subtitle="LMT · Choose a new password">
+      <form onSubmit={submit} className="space-y-4">
+        <div>
+          <div className="font-semibold text-stone-900">Hi {user.name || user.email}, choose your own password</div>
+          <div className="text-xs text-stone-500 mt-1 leading-relaxed">
+            An administrator reset your password. Enter the temporary one you just signed in with, then pick a new one only you know.
+          </div>
+        </div>
+        {field('current', 'Temporary password', 'current-password')}
+        {field('next', 'New password', 'new-password')}
+        {form.next && (
+          <div className="flex items-center gap-2 -mt-2">
+            <div className="flex-1 flex gap-1">
+              {[0, 1, 2, 3].map(i => (
+                <div key={i} className={`h-1.5 flex-1 rounded-full ${i < strength.segments ? strength.barColor : 'bg-stone-200'}`}/>
+              ))}
+            </div>
+            <span className={`text-[10px] uppercase tracking-wider font-semibold whitespace-nowrap ${strength.textColor}`}>{strength.label}</span>
+          </div>
+        )}
+        {field('confirm', 'Confirm new password', 'new-password')}
+        <label className="flex items-center gap-2 text-xs text-stone-600">
+          <input type="checkbox" checked={show} onChange={e => setShow(e.target.checked)}/> Show passwords
+        </label>
+        {err && (
+          <div className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-md px-3 py-2 flex items-center gap-2" role="alert">
+            <AlertCircle size={12}/> {err}
+          </div>
+        )}
+        <button type="submit" disabled={busy}
+          className="w-full px-3 py-2.5 bg-stone-900 hover:bg-stone-800 disabled:bg-stone-400 text-white text-sm font-semibold rounded-md">
+          {busy ? 'Saving…' : 'Save new password'}
+        </button>
+        <div className="text-center">
+          <button type="button" onClick={onSignOut} disabled={busy} className="text-xs text-stone-500 hover:text-stone-900">
+            Sign out
+          </button>
+        </div>
+      </form>
+    </AuthShell>
   );
 }
 

@@ -9,6 +9,9 @@ import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
   sendPasswordResetEmail,
+  reauthenticateWithCredential,
+  updatePassword,
+  EmailAuthProvider,
   getAuth
 } from 'firebase/auth';
 import { httpsCallable } from 'firebase/functions';
@@ -36,8 +39,31 @@ export async function registerNewUser(email, password) {
 }
 
 export async function sendResetEmail(email) {
-  // Lets users recover forgotten passwords without admin intervention
-  return sendPasswordResetEmail(auth, email.trim());
+  // "Forgot password?" (Nov 2026): the requestPasswordReset function sends the
+  // link through Resend from the LMT's own domain — Firebase's built-in email
+  // (noreply@ind-lmt.firebaseapp.com) was being quarantined by Outlook. If
+  // the function can't send (not deployed yet, Resend down), fall back to
+  // Firebase's email so the user still gets something.
+  const trimmed = email.trim();
+  try {
+    const fn = httpsCallable(fns, 'requestPasswordReset');
+    await fn({ email: trimmed });
+    return;
+  } catch (err) {
+    if (/invalid-argument/.test(err?.code || '')) throw err;
+    console.warn('[forgot-pw] requestPasswordReset failed; using Firebase\'s reset email', err?.code || err);
+  }
+  return sendPasswordResetEmail(auth, trimmed);
+}
+
+// The signed-in user replaces the temporary password an admin gave them.
+// Re-checks the current one first (Firebase requires a recent sign-in to
+// change a password, and this makes that always true).
+export async function changeOwnPassword(currentPassword, newPassword) {
+  const user = auth.currentUser;
+  if (!user || !user.email) throw Object.assign(new Error('Not signed in'), { code: 'auth/no-current-user' });
+  await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, currentPassword));
+  await updatePassword(user, newPassword);
 }
 
 export function getCurrentUserId() {
@@ -202,9 +228,12 @@ export async function restoreLoaLeadsForUserViaFunction({ userId }) {
  * but the password was successfully reset, the error message will contain
  * the new password so the admin can share it manually.
  */
-export async function adminResetUserPasswordViaFunction({ targetUid }) {
+//
+// Manual mode (Nov 2026): pass `password` to set it yourself — no email is
+// sent, and the result is { ok: true, manual: true }.
+export async function adminResetUserPasswordViaFunction({ targetUid, password }) {
   const fn = httpsCallable(fns, 'adminResetUserPassword');
-  const result = await fn({ targetUid });
+  const result = await fn(password === undefined ? { targetUid } : { targetUid, password });
   return result.data;
 }
 // Settings → System Health → "Run health check now" (admins).

@@ -67,8 +67,12 @@ service cloud.firestore {
     match /users/{userId} {
       allow read:   if isSignedIn();
       allow create: if isAdmin();
+      // A user may rename themselves, and clear (never set) the
+      // mustChangePassword flag an admin password reset puts on them.
       allow update: if isAdmin()
-                    || (isSelf(userId) && changed().hasOnly(['name']));
+                    || (isSelf(userId) && changed().hasOnly(['name']))
+                    || (isSelf(userId) && changed().hasOnly(['name', 'mustChangePassword'])
+                        && request.resource.data.mustChangePassword == false);
       // u_1 is the "Unassigned" system user. Every lead without an owner points
       // at it, so deleting it would strand them.
       allow delete: if isAdmin() && userId != 'u_1';

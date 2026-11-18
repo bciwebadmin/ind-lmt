@@ -1053,6 +1053,40 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
     && A.canOpenView(A.TELEMATICS_DASHBOARD_VIEW, { role: 'user', leadAccess: false, telematicsAccess: true }, []) && !A.canOpenView(A.TELEMATICS_DASHBOARD_VIEW, { role: 'user' }, []));
 }
 
+/* ---------- Password resets (Nov 2026) ---------- */
+{
+  const { createRequire } = await import('node:module');
+  const P = createRequire(import.meta.url)('../functions/passwordRules.js');
+  const C = await import('../src/lib/password.js');
+  const samples = ['', 'short', 'exactly8', ' leading1', 'trailing1 ', 'x'.repeat(128), 'x'.repeat(129), 'Good-Pass-2026', null, 42];
+  check('pw: browser and server rules agree', samples.every(s => P.passwordProblem(s) === C.passwordProblem(s)) && P.PASSWORD_MIN === C.PASSWORD_MIN && P.PASSWORD_MAX === C.PASSWORD_MAX);
+  check('pw: rules', P.passwordProblem('exactly8') === '' && /at least 8/.test(P.passwordProblem('short')) && /at most/.test(P.passwordProblem('x'.repeat(129)))
+    && /space/.test(P.passwordProblem(' leading1')) && P.passwordProblem('') === 'Enter a password.' && P.passwordProblem(null) === 'Enter a password.');
+  check('pw: normalizeEmail', P.normalizeEmail('  Erin@Example.COM ') === 'erin@example.com' && P.normalizeEmail('nope') === '' && P.normalizeEmail('a b@c.d') === '' && P.normalizeEmail(undefined) === '');
+  const T0 = Date.parse('2026-11-18T15:00:00Z');
+  const d1 = P.resetRateDecision(null, T0);
+  check('pw: first reset allowed and recorded', d1.allowed && d1.next.times.length === 1 && d1.next.times[0] === T0);
+  check('pw: second within a minute throttled', !P.resetRateDecision(d1.next, T0 + 30e3).allowed);
+  check('pw: after a minute allowed', P.resetRateDecision(d1.next, T0 + 61e3).allowed);
+  const five = { times: [0, 1, 2, 3, 4].map(i => T0 + i * 120e3) };
+  check('pw: five an hour, then throttled', !P.resetRateDecision(five, T0 + 10 * 60e3).allowed);
+  const later = P.resetRateDecision(five, T0 + 3600e3 + 1);
+  check('pw: old attempts age out', later.allowed && later.next.times.length === 5);
+  check('pw: junk stored state is ignored', P.resetRateDecision({ times: ['x', null, T0 + 9e9] }, T0).allowed);
+  check('pw: change-password checks', C.newPasswordProblem({ current: '', next: 'abcdefgh', confirm: 'abcdefgh' }).startsWith('Enter the temporary')
+    && /match/.test(C.newPasswordProblem({ current: 'tmp', next: 'abcdefgh', confirm: 'abcdefgX' }))
+    && /different/.test(C.newPasswordProblem({ current: 'abcdefgh', next: 'abcdefgh', confirm: 'abcdefgh' }))
+    && /at least 8/.test(C.newPasswordProblem({ current: 'tmp', next: 'abc', confirm: 'abc' }))
+    && C.newPasswordProblem({ current: 'tmp-pass', next: 'New-Pass-2026', confirm: 'New-Pass-2026' }) === '');
+  check('pw: Firebase error messages', /incorrect/.test(C.changePasswordError('auth/invalid-credential')) && /incorrect/.test(C.changePasswordError('auth/wrong-password'))
+    && /weak/.test(C.changePasswordError('auth/weak-password')) && /Too many/.test(C.changePasswordError('auth/too-many-requests')) && /Could not/.test(C.changePasswordError('')));
+  const idx = readFileSync(join(root, 'functions/index.js'), 'utf8');
+  check('pw: forgot-password is a us-south1 callable in PROBES', /exports\.requestPasswordReset = onCall\(\s*\{\s*secrets: \[RESEND_API_KEY\],\s*region: 'us-south1'/.test(idx));
+  const rules = readFileSync(join(root, 'firestore.rules'), 'utf8');
+  check('pw: a user may clear, never set, mustChangePassword', /changed\(\)\.hasOnly\(\['name', 'mustChangePassword'\]\)\s*&& request\.resource\.data\.mustChangePassword == false/.test(rules));
+  check('pw: app gates on mustChangePassword and the modal offers both modes', /if \(mustChangePassword\) \{/.test(app) && /'Set it myself'/.test(app) && /'Email a temporary password'/.test(app));
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
