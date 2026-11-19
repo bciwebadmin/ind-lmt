@@ -3,7 +3,7 @@
 // "Telematics" (phase 2: the "how are we doing" view Tanner asked for).
 //
 // Definitions (keep the dashboard's wording in step with these):
-//   Won     a case currently Sent to service or Completed with outcome won.
+//   Won     a case currently Sent On or Completed with outcome won.
 //   Lost    a case currently Lost.
 //   Win rate          won / (won + lost). Closed cases (no action, duplicates,
 //                     codes filed automatically) are left out — Carter never

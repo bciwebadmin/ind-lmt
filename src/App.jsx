@@ -3346,7 +3346,7 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
     // telematics access.
     { ws: 'telematics', title: 'Telematics', items: [
       { id: TELEMATICS_BOARD_VIEW, label: 'Board', icon: Activity, badge: telematicsNewCount, badgeAccent: telematicsNewCount > 0 },
-      { id: TELEMATICS_DASHBOARD_VIEW, label: 'Dashboard', icon: BarChart3 },
+      { id: TELEMATICS_DASHBOARD_VIEW, label: 'Reports', icon: BarChart3 },
       { id: TELEMATICS_CODES_VIEW, label: 'Code List', icon: ClipboardList },
       { id: TELEMATICS_SETTINGS_VIEW, label: 'Telematics Settings', icon: SettingsIcon }
     ] },
@@ -3580,7 +3580,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
     [TELEMATICS_CODES_VIEW]: 'Critical Code List',
     [TELEMATICS_BOARD_VIEW]: 'Telematics Board',
     [TELEMATICS_SETTINGS_VIEW]: 'Telematics Settings',
-    [TELEMATICS_DASHBOARD_VIEW]: 'Telematics Dashboard',
+    [TELEMATICS_DASHBOARD_VIEW]: 'Telematics Report',
     [WORKSPACE_PICKER_VIEW]: 'Choose a dashboard',
     [NO_ACCESS_VIEW]: 'No access yet'
   };
@@ -6540,7 +6540,7 @@ function WinCaseModal({ c, destinations = [], onSend, onCancel, onOpenSettings }
       </label>
       <div className="text-[11px] text-stone-500">
         {tier.needsWorkOrder
-          ? 'The case moves to Sent to Service until a work order opens on this serial number.'
+          ? 'The case moves to Sent On until a work order opens on this serial number.'
           : 'Parts wins are complete once sent — there’s no work order to wait for.'}
       </div>
     </ModalShell>
@@ -6656,7 +6656,7 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
   const lost = useMemo(() => lostReasons(list), [list]);
   const weeks = useMemo(() => weekly(scoped, 12), [scoped]);
 
-  if (error) return <div className="max-w-2xl px-4 py-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-800">The dashboard couldn’t load the cases ({error}).</div>;
+  if (error) return <div className="max-w-2xl px-4 py-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-800">The report couldn’t load the cases ({error}).</div>;
   if (cases === null) return <div className="text-sm text-stone-500 py-8">Loading…</div>;
 
   const periodLabel = PERIODS.find(p => p.id === period).label.toLowerCase();
@@ -6681,7 +6681,7 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
 
       {!all.length ? (
         <div className="text-center py-16 border border-dashed border-stone-200 rounded-lg bg-white text-sm text-stone-500">
-          No cases yet — the dashboard fills in as Bobcat’s fault codes arrive and Carter works them.
+          No cases yet — the report fills in as Bobcat’s fault codes arrive and Carter works them.
         </div>
       ) : (
       <>
@@ -6966,7 +6966,7 @@ function WipReportCard({ settings, wipStatus, onSave }) {
       <div>
         <h3 className="text-base font-bold text-stone-900">WIP report</h3>
         <div className="text-xs text-stone-600 mt-0.5 leading-relaxed">
-          The daily WIP export is emailed to this private address. A work order on a “Sent to Service” case’s serial number,
+          The daily WIP export is emailed to this private address. A work order on a “Sent On” case’s serial number,
           opened on or after the day it was sent, completes the case. Keep the address to yourselves — it’s what lets a report in.
         </div>
       </div>
@@ -6992,7 +6992,7 @@ function WipReportCard({ settings, wipStatus, onSave }) {
   );
 }
 
-// Settings → Follow-ups: when a "Sent to Service" case with no work order is
+// Settings → Follow-ups: when a "Sent On" case with no work order is
 // bumped, how often, how many times, and who gets the escalation (Tanner).
 function FollowUpSettingsCard({ settings, onSave }) {
   const cfg = followUpSettings(settings);

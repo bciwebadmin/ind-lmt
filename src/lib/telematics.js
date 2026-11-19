@@ -118,7 +118,7 @@ export function sortCodes(docs = []) {
 export const CASE_STATUSES = [
   { id: 'new',       label: 'New' },
   { id: 'working',   label: 'Working' },
-  { id: 'sent',      label: 'Sent to service' },  // won to Field / Shop: waiting on a work order
+  { id: 'sent',      label: 'Sent On' },          // won to Field / Shop: waiting on a work order (Erin, Nov 19: was "Sent to service")
   { id: 'completed', label: 'Completed' },        // work order confirmed, or won to Parts
   { id: 'lost',      label: 'Lost' },
   { id: 'closed',    label: 'Closed' }            // no action needed, duplicate, …
@@ -129,7 +129,7 @@ export const OPEN_CASE_STATUSES = ['new', 'working', 'sent'];
 export const CASE_TABS = [
   { id: 'new',       label: 'New',             statuses: ['new'] },
   { id: 'working',   label: 'Working',         statuses: ['working'] },
-  { id: 'sent',      label: 'Sent to Service', statuses: ['sent'] },
+  { id: 'sent',      label: 'Sent On',         statuses: ['sent'] },
   { id: 'completed', label: 'Completed',       statuses: ['completed'] },
   // One archive with filters (Tanner, discovery call).
   { id: 'archive',   label: 'Archive',         statuses: ['lost', 'closed'] }
@@ -355,7 +355,7 @@ export function sortCases(cases = []) {
 }
 
 /* ===================== STEP 4: FOLLOW-UPS ===================== */
-// The daily WIP report completes a "Sent to service" case when a work order
+// The daily WIP report completes a "Sent On" case when a work order
 // opens on its serial; until then the hourly telematicsFollowUps function
 // bumps the destination + Carter, then escalates. These two are copies of
 // functions/telematicsWipRules.js (a test compares them) so the board can

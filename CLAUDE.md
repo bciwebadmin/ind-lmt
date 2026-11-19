@@ -489,14 +489,14 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
   Don't hand-edit it.
 - The rule's level list and `CODE_LEVEL_IDS` must match — a test checks.
 - **Cases** — `telematicsCases/{id}`. Board tabs derive from `status`
-  (`CASE_TABS`; never store a tab): New · Working · Sent to Service ·
+  (`CASE_TABS`; never store a tab): New · Working · Sent On ·
   Completed · Archive (lost, closed — one archive with filters, Tanner).
   Status changes are pure (`winChange`, `loseChange`, `closeChange`,
   `confirmWorkOrderChange`, `reopenChange`, `startWorkingChange`) and return
   `{ patch, event }`; history and notes are appended with `arrayUnion`
   (`updateTelematicsCase`). A note on a New case moves it to Working. The
   rules' status list must match `CASE_STATUS_IDS` — a test checks.
-- **Win tiers** (`WIN_TIERS`): Field Service and Shop → *Sent to service*
+- **Win tiers** (`WIN_TIERS`): Field Service and Shop → *Sent On* (labelled "Sent to service" before Nov 19)
   (wait for a work order on the serial — manual "Work order opened" until
   step 4's WIP match); Parts → *Completed* at once (no serial to match).
 - **Destinations** — `telematicsConfig/settings.destinations[]`
@@ -517,7 +517,7 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
   test fails if they drift. New callable → needs the Cloud Run `allUsers`
   invoker binding (`sendtelematicshandoff`, us-south1) after its first deploy.
 - `?case=<id>` opens a case page (for step 4's bump emails).
-- **Dashboard** (Telematics → Dashboard, `TELEMATICS_DASHBOARD_VIEW`) — every
+- **Reports** (Telematics → Reports, page title "Telematics Report"; renamed from Dashboard Nov 19 — the view id is still `TELEMATICS_DASHBOARD_VIEW` / `telematics-dashboard`) — every
   figure from `src/lib/telematicsStats.js` (pure, tested): win rate = won ÷
   (won + lost) with **closed excluded**; work-order rate = Field/Shop wins
   with a work order ÷ Field/Shop wins; first response = created → first

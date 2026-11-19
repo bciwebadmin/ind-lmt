@@ -407,7 +407,7 @@ What happens with each report:
   else is ignored (or noted as *refused* in Settings).
 - Only order number, open date, serial number and order type are kept
   (`telematicsWip/latest`). No customer names, contacts or amounts.
-- A **Sent to Service** Field or Shop case whose serial has a work order
+- A **Sent On** Field or Shop case whose serial has a work order
   opened **on or after the day it was sent** is completed ("Work order
   M6020231 found in the WIP report").
 - **Reminders** (`telematicsFollowUps`, hourly, and right after each
