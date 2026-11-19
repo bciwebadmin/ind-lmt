@@ -1156,6 +1156,19 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('reports: service due by interval', ti.length === 2 && ti[0].interval === 1500 && ti[0].cases === 2 && ti[0].won === 1 && ti[0].winRate === 0.5 && ti[0].workOrders === 1 && ti[1].winRate === null);
 }
 
+/* ---------- LMT inbox: only wip@ (Nov 19, 2026) ---------- */
+{
+  const { createRequire } = await import('node:module');
+  const W = createRequire(import.meta.url)('../functions/telematicsWipRules.js');
+  const IN = 'wip@eakooxena.resend.app';
+  check('inbox: exact address is ours', W.isAddressedTo({ to: ['wip@eakooxena.resend.app'] }, IN) && W.isAddressedTo({ to: ['LMT <WIP@Eakooxena.Resend.App>'] }, IN)
+    && W.isAddressedTo({ to: ['someone@x.com'], cc: ['wip@eakooxena.resend.app'] }, IN) && W.isAddressedTo({ received_for: ['wip@eakooxena.resend.app'] }, IN));
+  check('inbox: PTN mail is ignored', !W.isAddressedTo({ to: ['ptn@eakooxena.resend.app'] }, IN) && !W.isAddressedTo({ to: ['PTN Orders <ptn@eakooxena.resend.app>'], received_for: ['ptn@eakooxena.resend.app'] }, IN));
+  check('inbox: look-alikes are ignored', !W.isAddressedTo({ to: ['xwip@eakooxena.resend.app'] }, IN) && !W.isAddressedTo({ to: ['wip@eakooxena.resend.app.evil.com'] }, IN)
+    && !W.isAddressedTo({ to: ['wip@other.resend.app'] }, IN));
+  check('inbox: no address set = nothing is ours', !W.isAddressedTo({ to: ['wip@eakooxena.resend.app'] }, '') && !W.isAddressedTo({}, IN));
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

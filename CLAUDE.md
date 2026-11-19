@@ -555,6 +555,12 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
   (with counts in the tab) and branch.
 - **How Bobcat's emails arrive (Nov 19)** — **forwarded from Erin's inbox to
   the LMT's Resend receiving address** (the same one as the WIP report).
+  Resend's webhook fires for **every** address on the receiving domain
+  (`ptn@eakooxena.resend.app` is partstradingnetwork.com's); the LMT only
+  touches mail addressed **exactly** to Settings → LMT inbox
+  (`wip@eakooxena.resend.app`) — `isAddressedTo` in telematicsWipRules.js
+  (to / cc / received_for, "Name <addr>" unwrapped, no substring matching).
+  Everything else → 200 `ignored`, nothing stored.
   `telematicsWipInbound` sorts: a CSV attachment → WIP report; no CSV → it
   fetches the body (`GET https://api.resend.com/emails/receiving/{email_id}` —
   webhooks carry metadata only) and hands it to `saveBobcatAlert`, which both

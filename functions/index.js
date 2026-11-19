@@ -2477,14 +2477,15 @@ exports.telematicsWipInbound = onRequest(
     const settings = await telematicsSettingsDoc();
     const wipCfg = settings.wip || {};
     const inbox = String(wipCfg.inboxAddress || '').trim().toLowerCase();
-    const to = [...(data.to || []), ...(data.received_for || [])].map(x => String(x).toLowerCase());
     // "Erin Charboneau <echarboneau@…>" → the address.
     const fromRaw = String(data.from || '').trim().toLowerCase();
     const from = (fromRaw.match(/<([^>]+)>/) || [null, fromRaw])[1].trim();
     const meta = { emailId: data.email_id || '', from, subject: String(data.subject || '').slice(0, 200) };
 
-    // Only the address set in Settings.
-    if (!inbox || !to.some(a => a.includes(inbox))) {
+    // Only mail addressed exactly to the address set in Settings — ptn@…
+    // and every other address on the receiving domain is left alone (Erin).
+    // Answers 200 so Resend doesn't retry; nothing is stored or logged.
+    if (!telematicsWip.isAddressedTo(data, inbox)) {
       return res.json({ ok: true, action: 'ignored', reason: 'not the LMT address' });
     }
     const atts = (Array.isArray(data.attachments) ? data.attachments : [])

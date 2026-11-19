@@ -39,6 +39,26 @@ function verifyResendSignature({ id, timestamp, signature, body, secret, now = D
   });
 }
 
+/* ---------- Which emails are ours ---------- */
+// Resend's webhook fires for every address on the account's receiving domain
+// (ptn@… for partstradingnetwork.com, wip@… for the LMT, …). Only mail
+// addressed EXACTLY to the LMT's address counts — not a look-alike such as
+// "xwip@…" or "wip@….resend.app.evil.com" (a plain substring check would
+// accept those). "Name <a@b>" forms are unwrapped; case doesn't matter.
+function emailAddressOf(v) {
+  const s = String(v || '').trim().toLowerCase();
+  const m = s.match(/<([^<>\s]+@[^<>\s]+)>/);
+  return (m ? m[1] : s).trim();
+}
+function isAddressedTo(data = {}, inbox = '') {
+  const want = emailAddressOf(inbox);
+  if (!want || !want.includes('@')) return false;
+  const list = ['to', 'cc', 'received_for']
+    .flatMap(k => (Array.isArray(data[k]) ? data[k] : (data[k] ? [data[k]] : [])))
+    .map(emailAddressOf);
+  return list.includes(want);
+}
+
 /* ---------- CSV ---------- */
 // RFC 4180-ish: quoted fields, doubled quotes, commas and newlines inside quotes.
 function parseCsv(text) {
@@ -176,6 +196,7 @@ function followUpState(c, settings, { wipReceivedAt = '', now = Date.now() } = {
 }
 
 module.exports = {
+  emailAddressOf, isAddressedTo,
   verifyResendSignature, parseCsv, usDate, workOrderKind, parseWip, indyDate, matchWorkOrder,
   FOLLOW_UP_DEFAULTS, followUpSettings, followUpState, SHOP_PREFIX_BRANCH
 };
