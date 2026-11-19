@@ -308,9 +308,11 @@ function isDuplicateMessage(cases = [], messageId) {
     || (Array.isArray(c.alerts) && c.alerts.some(a => a.messageId === messageId)));
 }
 
-// Codes the Code List keeps off the board file straight into the Archive
-// (Carter can reopen them). Unknown / unreviewed codes are critical.
-const AUTO_CLOSE = { noncritical: 'Non-critical code', ignore: 'Ignored code' };
+// Every new fault case starts in New, whatever its Code List level — Carter
+// sorts through them (Erin, Nov 19; until then Non-critical / Ignore codes
+// were filed straight into the Archive). The level is stored as `codeLevel`
+// and colours the row; the board's level filter hides what he doesn't want.
+// Old auto-archived cases (closure.auto) keep working: repeats still log there.
 
 // A service-due email → a new case on Service Due (always New; there is no
 // Code List for these).
@@ -341,15 +343,13 @@ function serviceLabel(c) {
 
 function newCaseFromAlert(alert, { level = 'critical', now, messageId = '', receivedAt = '' } = {}) {
   if (alert && alert.kind === 'service') return newServiceCaseFromAlert(alert, { now, messageId, receivedAt });
-  const auto = AUTO_CLOSE[level];
   const at = now || new Date().toISOString();
   const { dealer, planned, branch, ...rest } = alert;
   return {
     ...rest,
     kind: 'fault',
     source: 'email',
-    status: auto ? 'closed' : 'new',
-    ...(auto ? { closure: { reason: auto, auto: true, at, by: '' } } : {}),
+    status: 'new',
     codeLevel: level,
     branch: branch || '',
     dealer, planned,
@@ -357,7 +357,7 @@ function newCaseFromAlert(alert, { level = 'critical', now, messageId = '', rece
     alerts: [{ at, code: alert.fault.code, summary: alert.fault.summary, startAt: alert.fault.startAt, messageId }],
     intake: { messageId, receivedAt: receivedAt || at },
     notes: [],
-    history: [{ id: `h_${at}_intake`, type: 'created', at, by: '', source: 'email', ...(auto ? { autoClosed: auto } : {}) }],
+    history: [{ id: `h_${at}_intake`, type: 'created', at, by: '', source: 'email' }],
     createdAt: at, createdBy: 'intake', updatedAt: at
   };
 }
@@ -365,5 +365,5 @@ function newCaseFromAlert(alert, { level = 'critical', now, messageId = '', rece
 module.exports = {
   htmlToText, sectionsOf, parseBobcatDate, parseCodeLine, branchFromDealer, looksLikeFaultEmail,
   looksLikeServiceEmail, parseFaultEmail, parseServiceEmail, parseBobcatEmail, caseKindOf, serviceLabel,
-  caseForAlert, isDuplicateMessage, newCaseFromAlert, newServiceCaseFromAlert, AUTO_CLOSE, KNOWN_AR
+  caseForAlert, isDuplicateMessage, newCaseFromAlert, newServiceCaseFromAlert, KNOWN_AR
 };

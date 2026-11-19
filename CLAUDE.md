@@ -585,9 +585,12 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
   can't read → 422 + `console.error('[telematics-intake] …')` (self-repair);
   other mail → `skipped`. Repeats on a machine's open case attach to it
   (`alertCount`, `alerts[]`, an `alert` history entry); the same
-  `messageId` twice is a duplicate. New cases: Code List level decides —
-  critical / unknown / unreviewed → New; noncritical / ignore → `closed`
-  with `closure.auto` (Archive; its repeats keep logging there). Every
+  `messageId` twice is a duplicate. **Every new fault case starts in New**,
+  whatever its Code List level — Carter sorts through them (Erin, Nov 19).
+  The level is stored (`codeLevel`) and colours the row; the board's level
+  filter hides the rest. (Before Nov 19, noncritical / ignore went straight
+  to the Archive as `closed` + `closure.auto`; those old cases still collect
+  their repeats — `caseForAlert`.) Every
   code is counted (`seenCount`) and an unseen one is added to the Code List,
   not reviewed. Email cases have `createdBy: 'intake'`.
 - **WIP report** — emailed daily (CSV attachment) to a private Resend

@@ -6476,7 +6476,7 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
               )}
               {status === 'closed' && c.closure && (
                 <div className="text-sm"><div className="font-semibold text-stone-900">Closed — {c.closure.reason}</div>
-                  {c.closure.auto && <div className="text-xs text-stone-500">Filed automatically: the Code List keeps this code off the board. Reopen to work it anyway.</div>}
+                  {c.closure.auto && <div className="text-xs text-stone-500">Filed automatically (before Nov 19, non-critical codes went straight to the Archive). Reopen to work it.</div>}
                   {c.closure.note && <div className="text-xs text-stone-600 whitespace-pre-wrap">{c.closure.note}</div>}
                   {!c.closure.auto && <div className="text-xs text-stone-500">{fmtWhen(c.closure.at)} by {who(c.closure.by)}</div>}</div>
               )}
@@ -6876,7 +6876,7 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
         </ChartCard>
       </div>
       <div className="text-[11px] text-stone-500 leading-relaxed">
-        Win rate = won ÷ (won + lost); closed cases (no action, duplicates, codes filed automatically) aren’t counted.
+        Win rate = won ÷ (won + lost); closed cases (no action, duplicates) aren’t counted.
         Work orders opened = field and shop wins with a work order from the WIP report or confirmed by hand.
         First response = case created → the first note or status change by a person.
         Service due cases are counted the same way as fault codes, so the totals cover both unless you pick one above.
@@ -7342,9 +7342,9 @@ function TelematicsCodesView({ codes, error, users = [], isAdmin = false, onSetL
       <div className="flex items-start gap-3 px-3.5 py-3 bg-stone-100 border border-stone-200 rounded-lg text-xs text-stone-600 leading-relaxed">
         <Activity size={16} className="text-stone-500 shrink-0 mt-0.5"/>
         <div>
-          Bobcat marks every fault code critical. Choose what each one really is: <b>Critical</b> codes go on
-          Carter’s board, <b>Non-critical</b> ones are logged but kept off it, <b>Ignore</b> is logged only.
-          Codes nobody has reviewed yet count as Critical.
+          Bobcat marks every fault code critical. Choose what each one really is. Every case still lands in
+          <b> New</b> for Carter to sort through; the level colours it — <b>Critical</b> red, <b>Non-critical</b> blue,
+          <b>Ignore</b> grey — and the level filter on Fault Codes hides what he doesn’t need. Codes nobody has reviewed yet count as Critical.
         </div>
       </div>
 

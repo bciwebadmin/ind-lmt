@@ -898,8 +898,10 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   const n1 = I.newCaseFromAlert(a1, { level: 'critical', now: 'N', messageId: 'm' });
   check('new case: critical → New, with intake details', n1.status === 'new' && n1.source === 'email' && n1.createdBy === 'intake' && n1.alertCount === 1 && n1.alerts[0].messageId === 'm' && n1.branch === 'Indy North' && n1.history[0].type === 'created');
   const n2 = I.newCaseFromAlert(a1, { level: 'noncritical', now: 'N' });
-  check('new case: non-critical / ignored → Archive, auto-closed', n2.status === 'closed' && n2.closure.auto === true && n2.closure.reason === 'Non-critical code' && I.newCaseFromAlert(a1, { level: 'ignore' }).closure.reason === 'Ignored code');
-  check('new case: statuses the rules accept, tab derived', [n1, n2].every(c => T.CASE_STATUS_IDS.includes(c.status)) && T.caseTab(n2) === 'archive');
+  const n3 = I.newCaseFromAlert(a1, { level: 'ignore', now: 'N' });
+  check('new case: non-critical / ignored still start in New for Carter (Erin, Nov 19)', n2.status === 'new' && !n2.closure && n2.codeLevel === 'noncritical'
+    && n3.status === 'new' && !n3.closure && n3.codeLevel === 'ignore' && !n2.history[0].autoClosed);
+  check('new case: statuses the rules accept, tab derived', [n1, n2].every(c => T.CASE_STATUS_IDS.includes(c.status)) && T.caseTab(n2) === 'new');
   check('new case: the hand-off can read it', (() => { const R = createRequire(import.meta.url)('../functions/telematicsRules.js'); return R.handoffSubject({ ...n1, outcome: { tier: 'shop' } }).includes('AT6399999'); })());
   check('fixtures carry no real customer data', ![fx1, fx2].some(f => /FOXY|RUNYON|SUNBELT|AT6330022|B4SB33825|stanage|awstrack/i.test(f)));
 }

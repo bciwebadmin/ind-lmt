@@ -8,8 +8,8 @@
 // What the board does with a code. Order = display order.
 export const CODE_LEVELS = [
   { id: 'critical',    label: 'Critical',     hint: 'On Carter’s board' },
-  { id: 'noncritical', label: 'Non-critical', hint: 'Logged, kept off the main board' },
-  { id: 'ignore',      label: 'Ignore',       hint: 'Logged only' }
+  { id: 'noncritical', label: 'Non-critical', hint: 'Still lands in New, shown blue' },
+  { id: 'ignore',      label: 'Ignore',       hint: 'Still lands in New, shown grey' }
 ];
 export const CODE_LEVEL_IDS = CODE_LEVELS.map(l => l.id);
 // A code nobody has classified yet counts as critical until it is reviewed
