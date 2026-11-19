@@ -476,7 +476,24 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
 **4. WIP report by email, serial matching, reminders, escalation (done)**.
 
 - Pure rules in `src/lib/telematics.js` (tested). Views: `TELEMATICS_VIEWS`
-  in `access.js`; sidebar group **Telematics**.
+  in `access.js`; sidebar group **Telematics**: Fault Codes · Service Due ·
+  Reports · Code List · Telematics Settings.
+- **Two boards (Nov 19, Erin)** — `case.kind`: `'fault'` (Bobcat "Critical
+  Fault Code" emails → **Fault Codes**, `TELEMATICS_BOARD_VIEW` =
+  `telematics-board`, the original board so old links work) or `'service'`
+  ("<n> Hr Service Due" emails → **Service Due**, `TELEMATICS_SERVICE_VIEW` =
+  `telematics-service`). **No `kind` = fault** (every case before the split);
+  always read it with `caseKind(c)`. Same process for both — tabs, win tiers,
+  destinations, hand-off, WIP match, reminders. A service case has
+  `service { interval, dueAt, kitNumber, pmEndDate, pmEndHours }` instead of
+  `fault`, no `codeLevel` (the Code List is faults only), its own lost reasons
+  (`SERVICE_LOST_REASONS`), an amber row bar, and "Service due" in the
+  hand-off email and subject. Fault and service cases never share: a service
+  reminder on a machine with an open fault case gets its own case, and a
+  repeat service reminder joins the machine's open *service* case (the
+  higher interval wins). One work order on a serial completes every `sent`
+  case on it, fault or service. Reports has a Fault codes / Service due /
+  both filter and a "Service due by interval" table (`ofKind`, `topIntervals`).
 - **Code list** — `telematicsCodes/{code}` (doc id = the code, upper case,
   letters/digits/dashes only — `isValidCode`). `level`: `critical` |
   `noncritical` | `ignore`; `reviewed` + `reviewedBy` / `reviewedAt`.
@@ -536,9 +553,23 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
   the Code List's *current* classification of its code (`classifyCode`), so
   re-classifying a code recolours its cases. Board filters: code level chips
   (with counts in the tab) and branch.
+- **How Bobcat's emails arrive (Nov 19)** — **forwarded from Erin's inbox to
+  the LMT's Resend receiving address** (the same one as the WIP report).
+  `telematicsWipInbound` sorts: a CSV attachment → WIP report; no CSV → it
+  fetches the body (`GET https://api.resend.com/emails/receiving/{email_id}` —
+  webhooks carry metadata only) and hands it to `saveBobcatAlert`, which both
+  paths share. Optional sender list `settings.wip.alertSenders` (separate from
+  the WIP's `allowedSenders`). Dedupe key = the email's `message_id`, so a
+  Resend retry is a duplicate. An unreadable Bobcat email logs
+  `[telematics-intake]` and answers **200** (a retry won't help); a failed body
+  fetch logs `[telematics-inbox]` and answers **502** (Resend retries).
+  `telematicsWip/status.lastAlert` feeds Settings → LMT inbox. Forwarded mail
+  carries the forwarder's signature and a From/Sent/To/Subject block above
+  Bobcat's text — it lands before the first section heading and is ignored.
 - **Email intake** — `telematicsIntake` (onRequest POST, **us-south1**, in
   `PROBES`; `Authorization: Bearer <TELEMATICS_INTAKE_SECRET>` — its own
-  secret, not `INTAKE_SECRET`). A Zap (web admin Outlook → Webhooks) posts
+  secret, not `INTAKE_SECRET`). The original path, still working for both
+  kinds: a Zap (web admin Outlook → Webhooks) posts
   `{ subject, html, messageId, receivedAt }`; setup in SETUP.md §9b. The
   email is **read server-side** by `functions/telematicsIntakeRules.js`
   (pure, tested against made-up copies of real emails in
@@ -586,7 +617,13 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
 - Known from the samples: the email gives serial, model, hours, nearest city
   **and lat/long**, customer + address, primary code ("CRITICAL - M0217") and
   other active codes, and the servicing dealer's AR number (2000007726 Indy,
-  2000008174 Indy North, 2000008159 Anderson). The asset link is
+  2000008174 Indy North, 2000008159 Anderson, 2000007727 Ellettsville,
+  2000007728 Columbus). Service Due emails (Erin's samples, Nov 19): the same
+  sections minus Fault Information; Service Information has PM End Date / PM
+  End Hours (usually "Invalid date" / "undefined"), Next Maintenance Interval,
+  Event Date (CST) and Kit Number (sometimes blank); Customer and Owner
+  Account are sometimes missing — the subject then has no customer either
+  (`1500 Hr Service Due - b4sb35276 - T66`). The asset link is
   `https://dealer.bobcat.com/dmiq/AssetDetails/<serial lower-case>` — build
   it; don't store Bobcat's expiring tracking links. WIP order prefixes look
   like M1–M6 = branch shop, T* = field truck (to confirm with Tanner).

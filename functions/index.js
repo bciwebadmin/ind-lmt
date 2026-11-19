@@ -2033,8 +2033,15 @@ exports.sendRecordEmail = onCall(
 );
 
 /* ===================== TELEMATICS EMAIL INTAKE ===================== */
-// A Zap (Outlook "New Email" in the web admin inbox → Webhooks POST) sends
-// each Bobcat "Critical Fault Code" email here:
+// Bobcat sends two kinds of email, and each becomes a case (Nov 19, Erin):
+//   "Critical Fault Code - …"  → kind 'fault'   → Telematics → Fault Codes
+//   "<n> Hr Service Due - …"   → kind 'service' → Telematics → Service Due
+// They reach saveBobcatAlert two ways:
+//   1. Forwarded from Erin's inbox to the LMT's Resend receiving address
+//      (telematicsWipInbound below sorts them from the WIP report) — the
+//      way they arrive now.
+//   2. The original Zap (Outlook "New Email" → Webhooks POST) to
+//      telematicsIntake, kept working for either kind:
 //   POST  Authorization: Bearer <TELEMATICS_INTAKE_SECRET>
 //   { subject, html, text?, messageId?, receivedAt? }
 // The email is read by functions/telematicsIntakeRules.js (pure, tested).
@@ -2070,6 +2077,84 @@ async function reverseGeocode(lat, lng) {
   }
 }
 
+// Read one Bobcat email and file it. → { code, json } for the HTTP answer.
+//   json.action: created | attached | duplicate | skipped | unreadable
+async function saveBobcatAlert({ subject = '', html = '', text = '', messageId = '', receivedAt = '', via = 'zap' }) {
+  const appConfig = await getAppConfig();
+  const parsed = telematicsIntakeRules.parseBobcatEmail({ subject, html, text }, appConfig.branches || []);
+  if (!parsed.ok) {
+    if (parsed.reason === 'not-bobcat') {
+      console.warn(`[telematics-intake] Skipped an email that isn't a Bobcat fault code or service due (${via}): "${subject.slice(0, 120)}"`);
+      return { code: 200, json: { ok: true, action: 'skipped', reason: 'not-bobcat' } };
+    }
+    console.error(`[telematics-intake] Could not read a Bobcat ${parsed.type === 'service' ? 'service due' : 'fault'} email (${parsed.detail}) — has the layout changed? Subject: "${subject.slice(0, 120)}"`);
+    return { code: 422, json: { ok: false, action: 'unreadable', error: 'unreadable', kind: parsed.type, detail: parsed.detail } };
+  }
+
+  const a = parsed.alert;
+  const isService = a.kind === 'service';
+  const what = isService ? `${a.service.interval} hr service` : a.fault.code;
+  const now = new Date().toISOString();
+  const FV = admin.firestore.FieldValue;
+  try {
+    const casesRef = db.collection('telematicsCases');
+    const snap = await casesRef.where('serial', '==', a.serial).get();
+    const cases = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (telematicsIntakeRules.isDuplicateMessage(cases, messageId)) {
+      console.log(`[telematics-intake] Already have message ${messageId.slice(0, 40)} — ignored`);
+      return { code: 200, json: { ok: true, action: 'duplicate', kind: a.kind } };
+    }
+
+    // The Code List (fault codes only): classify, and count what Bobcat sends.
+    let level = 'critical';
+    if (!isService) {
+      const codeRef = db.collection('telematicsCodes').doc(a.fault.code);
+      const codeSnap = await codeRef.get();
+      const codeDoc = codeSnap.exists ? codeSnap.data() : null;
+      level = codeDoc && ['critical', 'noncritical', 'ignore'].includes(codeDoc.level) ? codeDoc.level : 'critical';
+      if (codeDoc) {
+        await codeRef.update({ seenCount: FV.increment(1), lastSeen: now.slice(0, 10), updatedAt: now });
+      } else {
+        await codeRef.set({
+          code: a.fault.code, summary: a.fault.summary || '', level: 'critical', reviewed: false,
+          seenCount: 1, topModels: a.model ? [a.model] : [], lastSeen: now.slice(0, 10), notes: '',
+          createdAt: now, createdBy: 'intake', updatedAt: now
+        });
+        console.log(`[telematics-intake] New code ${a.fault.code} added to the Code List (not reviewed)`);
+      }
+    }
+
+    const existing = telematicsIntakeRules.caseForAlert(cases, a);
+    if (existing) {
+      const patch = { alertCount: FV.increment(1), lastAlertAt: now, updatedAt: now };
+      if (isService) {
+        patch.alerts = FV.arrayUnion({ at: now, interval: a.service.interval, dueAt: a.service.dueAt, messageId });
+        patch.history = FV.arrayUnion({ id: uid('h'), type: 'alert', at: now, by: '', kind: 'service', interval: a.service.interval });
+        // The next interval came due before this one was dealt with: show the latest.
+        if (!existing.service || !(Number(existing.service.interval) > a.service.interval)) patch.service = a.service;
+      } else {
+        patch.alerts = FV.arrayUnion({ at: now, code: a.fault.code, summary: a.fault.summary, startAt: a.fault.startAt, messageId });
+        patch.history = FV.arrayUnion({ id: uid('h'), type: 'alert', at: now, by: '', code: a.fault.code, summary: a.fault.summary });
+      }
+      if (a.hours != null) patch.hours = a.hours;
+      await casesRef.doc(existing.id).update(patch);
+      console.log(`[telematics-intake] ${a.serial} ${what} attached to case ${existing.id} (${via})`);
+      return { code: 200, json: { ok: true, action: 'attached', kind: a.kind, caseId: existing.id } };
+    }
+
+    const geo = await reverseGeocode(a.location.lat, a.location.lng);
+    const doc = telematicsIntakeRules.newCaseFromAlert(a, { level, now, messageId, receivedAt });
+    doc.location = { ...doc.location, address: geo.address || '', geocodeStatus: geo.status };
+    doc.intake = { ...doc.intake, via };
+    const ref = await casesRef.add(doc);
+    console.log(`[telematics-intake] Case ${ref.id} created: ${a.serial} ${what} (${doc.status}${doc.branch ? `, ${doc.branch}` : ''}, ${via})`);
+    return { code: 200, json: { ok: true, action: 'created', kind: a.kind, caseId: ref.id, status: doc.status } };
+  } catch (err) {
+    console.error('[telematics-intake] Failed to save a Bobcat email:', err);
+    return { code: 500, json: { ok: false, error: 'save-failed' } };
+  }
+}
+
 exports.telematicsIntake = onRequest(
   { secrets: [TELEMATICS_INTAKE_SECRET, GOOGLE_MAPS_KEY], region: 'us-south1' },
   async (req, res) => {
@@ -2084,69 +2169,8 @@ exports.telematicsIntake = onRequest(
     const messageId = String(body.messageId || '').trim().slice(0, 300);
     const receivedAt = String(body.receivedAt || '').slice(0, 40);
     if (!html && !text) return res.status(400).json({ ok: false, error: 'Send the email body as html (or text).' });
-
-    const appConfig = await getAppConfig();
-    const parsed = telematicsIntakeRules.parseFaultEmail({ subject, html, text }, appConfig.branches || []);
-    if (!parsed.ok) {
-      if (parsed.reason === 'not-a-fault-email') {
-        console.warn(`[telematics-intake] Skipped an email that isn't a fault code: "${subject.slice(0, 120)}"`);
-        return res.json({ ok: true, action: 'skipped', reason: parsed.reason });
-      }
-      console.error(`[telematics-intake] Could not read a Bobcat fault email (${parsed.detail}) — has the layout changed? Subject: "${subject.slice(0, 120)}"`);
-      return res.status(422).json({ ok: false, error: 'unreadable', detail: parsed.detail });
-    }
-
-    const a = parsed.alert;
-    const now = new Date().toISOString();
-    const FV = admin.firestore.FieldValue;
-    try {
-      const casesRef = db.collection('telematicsCases');
-      const snap = await casesRef.where('serial', '==', a.serial).get();
-      const cases = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      if (telematicsIntakeRules.isDuplicateMessage(cases, messageId)) {
-        console.log(`[telematics-intake] Already have message ${messageId.slice(0, 40)} — ignored`);
-        return res.json({ ok: true, action: 'duplicate' });
-      }
-
-      // The Code List: classify, and count what Bobcat sends.
-      const codeRef = db.collection('telematicsCodes').doc(a.fault.code);
-      const codeSnap = await codeRef.get();
-      const codeDoc = codeSnap.exists ? codeSnap.data() : null;
-      const level = codeDoc && ['critical', 'noncritical', 'ignore'].includes(codeDoc.level) ? codeDoc.level : 'critical';
-      if (codeDoc) {
-        await codeRef.update({ seenCount: FV.increment(1), lastSeen: now.slice(0, 10), updatedAt: now });
-      } else {
-        await codeRef.set({
-          code: a.fault.code, summary: a.fault.summary || '', level: 'critical', reviewed: false,
-          seenCount: 1, topModels: a.model ? [a.model] : [], lastSeen: now.slice(0, 10), notes: '',
-          createdAt: now, createdBy: 'intake', updatedAt: now
-        });
-        console.log(`[telematics-intake] New code ${a.fault.code} added to the Code List (not reviewed)`);
-      }
-
-      const existing = telematicsIntakeRules.caseForAlert(cases, a);
-      if (existing) {
-        const patch = {
-          alertCount: FV.increment(1), lastAlertAt: now, updatedAt: now,
-          alerts: FV.arrayUnion({ at: now, code: a.fault.code, summary: a.fault.summary, startAt: a.fault.startAt, messageId }),
-          history: FV.arrayUnion({ id: uid('h'), type: 'alert', at: now, by: '', code: a.fault.code, summary: a.fault.summary })
-        };
-        if (a.hours != null) patch.hours = a.hours;
-        await casesRef.doc(existing.id).update(patch);
-        console.log(`[telematics-intake] ${a.serial} ${a.fault.code} attached to case ${existing.id}`);
-        return res.json({ ok: true, action: 'attached', caseId: existing.id });
-      }
-
-      const geo = await reverseGeocode(a.location.lat, a.location.lng);
-      const doc = telematicsIntakeRules.newCaseFromAlert(a, { level, now, messageId, receivedAt });
-      doc.location = { ...doc.location, address: geo.address || '', geocodeStatus: geo.status };
-      const ref = await casesRef.add(doc);
-      console.log(`[telematics-intake] Case ${ref.id} created: ${a.serial} ${a.fault.code} (${doc.status}${doc.branch ? `, ${doc.branch}` : ''})`);
-      return res.json({ ok: true, action: 'created', caseId: ref.id, status: doc.status });
-    } catch (err) {
-      console.error('[telematics-intake] Failed to save a fault email:', err);
-      return res.status(500).json({ ok: false, error: 'save-failed' });
-    }
+    const r = await saveBobcatAlert({ subject, html, text, messageId, receivedAt, via: 'zap' });
+    return res.status(r.code).json(r.json);
   }
 );
 
@@ -2270,9 +2294,14 @@ function buildTelematicsHandoffHtml({ c, dest, sender, notice = null }) {
     + row('Owner contact', [cust.ownerContact, cust.ownerEmail].filter(Boolean).join(' · '));
   const machineRows = row('Model', c.model) + row('Serial number', c.serial)
     + row('Hours', c.hours != null ? String(c.hours) : '') + row('Inventory status', c.inventoryStatus);
-  const faultRows = row('Code', [fault.severity, fault.code].filter(Boolean).join(' - '))
-    + row('Summary', fault.summary) + row('Other active codes', others)
-    + row('Started', fault.startAt ? fmtDateTime(fault.startAt) : '');
+  const isService = c.kind === 'service';
+  const svc = c.service || {};
+  const faultRows = isService
+    ? row('Service due', svc.interval ? `${svc.interval} hour service` : 'Planned maintenance')
+      + row('Kit number', svc.kitNumber) + row('Bobcat sent it', svc.dueAt ? fmtDateTime(svc.dueAt) : '')
+    : row('Code', [fault.severity, fault.code].filter(Boolean).join(' - '))
+      + row('Summary', fault.summary) + row('Other active codes', others)
+      + row('Started', fault.startAt ? fmtDateTime(fault.startAt) : '');
   const locationRows = row('Machine address', loc.address) + row('Near', loc.city)
     + row('Coordinates', maps ? `${loc.lat}, ${loc.lng}` : '');
   const callRows = row(`Message from ${senderName}`, c.outcome.message) + row('Call notes', notes);
@@ -2309,15 +2338,15 @@ function buildTelematicsHandoffHtml({ c, dest, sender, notice = null }) {
           <td style="padding: 28px 28px 16px;">
             <div style="font-size: 20px; font-weight: 700; color: #1c1917;">${escapeHtml(tier ? tier.label : 'Hand-off')}: ${escapeHtml(cust.name || 'Customer')}</div>
             <div style="font-size: 14px; color: #57534e; margin-top: 6px; line-height: 1.5;">
-              ${escapeHtml(senderName)} spoke with this customer about a Bobcat critical fault code and is passing it to ${escapeHtml(dest.name)}.
-              ${tier && tier.needsWorkOrder ? 'Please contact the customer and open a work order on this serial number — the LMT watches the WIP for it.' : 'Please contact the customer about the parts they need.'}
+              ${escapeHtml(senderName)} spoke with this customer about ${isService ? 'a scheduled maintenance service coming due' : 'a Bobcat critical fault code'} and is passing it to ${escapeHtml(dest.name)}.
+              ${tier && tier.needsWorkOrder ? 'Please contact the customer and open a work order on this serial number — the LMT watches the WIP for it.' : `Please contact the customer about the parts they need${isService && svc.kitNumber ? ` (kit ${escapeHtml(svc.kitNumber)})` : ''}.`}
               Reply to this email to reach ${escapeHtml(senderName)}.
             </div>
           </td>
         </tr>
         ${block('Customer', customerRows)}
         ${block('Machine', machineRows)}
-        ${block('Fault', faultRows)}
+        ${block(isService ? 'Service due' : 'Fault', faultRows)}
         ${block('Location', locationRows)}
         ${block('From the call', callRows)}
         <tr>
@@ -2384,8 +2413,56 @@ async function matchWipToCases(workOrders, now) {
   return matched;
 }
 
+// Bobcat's fault-code and service-due emails, forwarded to the same address
+// (Nov 19, Erin), come through here too: no CSV attachment → the body is
+// fetched from Resend (webhooks carry metadata only) and filed by
+// saveBobcatAlert. Optional sender list: settings.wip.alertSenders.
+async function recordAlertAttempt(attempt) {
+  try {
+    await db.collection('telematicsWip').doc('status').set({ lastAlert: { ...attempt, at: new Date().toISOString() } }, { merge: true });
+  } catch (err) {
+    console.error('[telematics-inbox] status write failed', err);
+  }
+}
+
+async function handleInboundAlert(meta, data, wipCfg) {
+  const allowed = (Array.isArray(wipCfg.alertSenders) ? wipCfg.alertSenders : []).map(x => String(x).trim().toLowerCase()).filter(Boolean);
+  if (allowed.length && !allowed.includes(meta.from)) {
+    console.warn(`[telematics-inbox] Ignored an email from ${meta.from} — not on the Bobcat alert sender list`);
+    await recordAlertAttempt({ ...meta, status: 'refused', reason: `${meta.from} isn't on the sender list` });
+    return { code: 200, json: { ok: true, action: 'refused', reason: 'sender' } };
+  }
+  let email;
+  try {
+    const r = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(meta.emailId)}`, {
+      headers: { Authorization: `Bearer ${RESEND_INBOUND_KEY.value()}` }
+    });
+    if (!r.ok) throw new Error(`Resend answered HTTP ${r.status}${r.status === 401 || r.status === 403 ? ' — is RESEND_INBOUND_KEY a full-access key?' : ''}`);
+    email = (await r.json()) || {};
+  } catch (err) {
+    console.error('[telematics-inbox] Could not fetch a forwarded email from Resend:', err && err.message ? err.message : err);
+    await recordAlertAttempt({ ...meta, status: 'failed', reason: String(err && err.message ? err.message : err).slice(0, 300) });
+    return { code: 502, json: { ok: false, error: 'fetch-failed' } };   // Resend retries
+  }
+  const subject = String(email.subject || meta.subject || '').slice(0, 500);
+  const r = await saveBobcatAlert({
+    subject,
+    html: String(email.html || '').slice(0, 2000000),
+    text: String(email.text || '').slice(0, 500000),
+    messageId: String(email.message_id || meta.emailId || '').trim().slice(0, 300),
+    receivedAt: String(email.created_at || data.created_at || '').slice(0, 40),
+    via: 'email'
+  });
+  const j = r.json;
+  await recordAlertAttempt({ ...meta, subject: subject.slice(0, 200), status: j.ok ? 'ok' : 'failed', action: j.action || j.error, kind: j.kind || '', caseId: j.caseId || '',
+    ...(j.action === 'skipped' ? { reason: 'not a Bobcat fault code or service due email' } : {}),
+    ...(j.action === 'unreadable' ? { reason: `couldn't read it (${j.detail})` } : {}) });
+  // An unreadable email won't read better on a retry, so don't ask Resend for one.
+  return { code: r.code === 422 ? 200 : r.code, json: j };
+}
+
 exports.telematicsWipInbound = onRequest(
-  { secrets: [RESEND_WEBHOOK_SECRET, RESEND_INBOUND_KEY, RESEND_API_KEY], region: 'us-south1', timeoutSeconds: 120 },
+  { secrets: [RESEND_WEBHOOK_SECRET, RESEND_INBOUND_KEY, RESEND_API_KEY, GOOGLE_MAPS_KEY], region: 'us-south1', timeoutSeconds: 120 },
   async (req, res) => {
     if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
     const okSig = telematicsWip.verifyResendSignature({
@@ -2401,25 +2478,28 @@ exports.telematicsWipInbound = onRequest(
     const wipCfg = settings.wip || {};
     const inbox = String(wipCfg.inboxAddress || '').trim().toLowerCase();
     const to = [...(data.to || []), ...(data.received_for || [])].map(x => String(x).toLowerCase());
-    const from = String(data.from || '').trim().toLowerCase();
+    // "Erin Charboneau <echarboneau@…>" → the address.
+    const fromRaw = String(data.from || '').trim().toLowerCase();
+    const from = (fromRaw.match(/<([^>]+)>/) || [null, fromRaw])[1].trim();
     const meta = { emailId: data.email_id || '', from, subject: String(data.subject || '').slice(0, 200) };
 
-    // Only the address set in Settings, from an allowed sender (when listed).
+    // Only the address set in Settings.
     if (!inbox || !to.some(a => a.includes(inbox))) {
-      return res.json({ ok: true, action: 'ignored', reason: 'not the WIP address' });
+      return res.json({ ok: true, action: 'ignored', reason: 'not the LMT address' });
     }
+    const atts = (Array.isArray(data.attachments) ? data.attachments : [])
+      .filter(a => /\.csv$/i.test(String(a.filename || '')) || /csv/i.test(String(a.content_type || '')));
+    // No CSV → a forwarded Bobcat fault code / service due email.
+    if (!atts.length) {
+      const r = await handleInboundAlert(meta, data, wipCfg);
+      return res.status(r.code).json(r.json);
+    }
+    // The WIP report, from an allowed sender (when listed).
     const allowed = (Array.isArray(wipCfg.allowedSenders) ? wipCfg.allowedSenders : []).map(x => String(x).trim().toLowerCase()).filter(Boolean);
     if (allowed.length && !allowed.includes(from)) {
       console.warn(`[telematics-wip] Ignored a report from ${from} — not an allowed sender`);
       await recordWipAttempt({ ...meta, status: 'refused', reason: `${from} isn't an allowed sender` });
       return res.json({ ok: true, action: 'refused', reason: 'sender' });
-    }
-    const atts = (Array.isArray(data.attachments) ? data.attachments : [])
-      .filter(a => /\.csv$/i.test(String(a.filename || '')) || /csv/i.test(String(a.content_type || '')));
-    if (!atts.length) {
-      console.warn('[telematics-wip] The WIP email had no CSV attachment');
-      await recordWipAttempt({ ...meta, status: 'failed', reason: 'no CSV attachment' });
-      return res.json({ ok: true, action: 'failed', reason: 'no-attachment' });
     }
 
     let csv = '', filename = atts[0].filename || 'wip.csv';

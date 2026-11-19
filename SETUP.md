@@ -375,8 +375,9 @@ should be removed: it exposed open work orders to anyone with the link.)
    guess, e.g. `wip-` plus 10 random characters:
    `wip-7hq2kx9wpd@<id>.resend.app`. Any name on that domain works without
    setup.
-2. **LMT:** Telematics Settings → **WIP report** → paste the address, and the
-   address the report is sent **from** under *Only accept it from*. Save.
+2. **LMT:** Telematics Settings → **LMT inbox** → paste the address, and the
+   address the report is sent **from** under *Only accept the WIP report
+   from*. Save.
 3. **Webhook.** Resend → **Webhooks** → Add webhook →
    URL `https://us-south1-ind-lmt.cloudfunctions.net/telematicsWipInbound`,
    event **email.received** → Add. Open it and copy the **signing secret**
@@ -419,6 +420,37 @@ What happens with each report:
   shows no work order, so a late or broken report pauses reminders instead
   of nagging service.
 - System Health warns when no report has arrived for **36 h** (Settings).
+
+### Bobcat's fault code and service due emails (Nov 2026)
+
+Bobcat's **Critical Fault Code** and **Hr Service Due** emails are forwarded
+from Erin's Outlook to the **same receiving address** as the WIP report. No
+CSV attachment = a Bobcat email: the LMT reads it and files a case on
+**Fault Codes** or **Service Due**. This needs the Resend steps above done
+(webhook, `RESEND_WEBHOOK_SECRET`, and a full-access `RESEND_INBOUND_KEY` —
+with the `none` placeholder every forwarded email fails with HTTP 401).
+
+1. **Outlook rule** (Outlook on the web → Settings → Mail → **Rules** → Add):
+   *From* `no-reply@bobcat.com` and *Subject includes* `Critical Fault Code`
+   **or** `Service Due` → **Forward to** the receiving address. Keep "Stop
+   processing more rules" off.
+2. **Microsoft 365 must allow it.** Forwarding to an outside address is
+   blocked by default (the forward bounces with *550 5.7.520 Access denied,
+   Your organization does not allow external forwarding*). A Microsoft 365
+   admin allows it for this mailbox only: Microsoft Defender → Email &
+   collaboration → Policies → **Anti-spam** → *Outbound* policy → Create (or
+   edit) one for this mailbox → **Automatic forwarding rules: On**.
+3. **Optional:** Telematics Settings → LMT inbox → *Only accept Bobcat emails
+   forwarded by* → Erin's address (and `no-reply@bobcat.com`, in case a rule
+   *redirects* instead of forwarding). Leave it empty to accept any sender —
+   only real Bobcat emails ever become cases.
+4. **Test:** forward one of each kind. Settings → LMT inbox shows *Last
+   Bobcat email … new Fault Codes case / new Service Due case*, and the case
+   is on its board. Logs: `firebase functions:log --only telematicsWipInbound`.
+
+The Zap (above) still works for either kind. Turn it off once forwarding
+works: with both on, each email reaches the LMT twice and is counted twice on
+its case ("Bobcat sent the code again").
 
 ## 10. Post-launch checklist
 

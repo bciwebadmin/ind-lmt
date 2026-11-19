@@ -13,7 +13,7 @@
 //   First response    case created → the first thing a person did on it
 //                     (a note, Start working, Won, Lost, Close).
 //   Win → work order  the day Carter sent it → the day the work order opened.
-import { classifyCode, winTier } from './telematics.js';
+import { classifyCode, winTier, caseKind } from './telematics.js';
 
 const H = 3600e3, D = 864e5;
 const t = (iso) => { const n = new Date(iso).getTime(); return Number.isFinite(n) ? n : NaN; };
@@ -159,6 +159,33 @@ export function serialBreaks(cases = [], limit = 12) {
   }
   return [...m.values()].sort((a, b) => b.cases - a.cases || a.model.localeCompare(b.model)).slice(0, limit)
     .map(r => ({ model: r.model, prefix: r.prefix, cases: r.cases, machines: r.machines.size, topCode: topOf(r.codes) }));
+}
+
+// Reports → "What's" filter (Nov 19): 'all' | 'fault' | 'service'.
+export const REPORT_KINDS = [
+  { id: 'all', label: 'Fault codes + service due' },
+  { id: 'fault', label: 'Fault codes' },
+  { id: 'service', label: 'Service due' }
+];
+export function ofKind(cases = [], kind = 'all') {
+  return kind === 'fault' || kind === 'service' ? cases.filter(c => caseKind(c) === kind) : cases;
+}
+
+// Service Due cases by maintenance interval: how many, won, work orders.
+export function topIntervals(cases = [], limit = 12) {
+  const m = new Map();
+  for (const c of cases) {
+    if (caseKind(c) !== 'service') continue;
+    const interval = Number(c.service && c.service.interval) || 0;
+    const r = m.get(interval) || { interval, label: interval ? `${interval} hr` : 'Unknown', cases: 0, won: 0, lost: 0, workOrders: 0 };
+    r.cases++;
+    if (isWon(c)) r.won++;
+    if (isLost(c)) r.lost++;
+    if (hasWorkOrder(c)) r.workOrders++;
+    m.set(interval, r);
+  }
+  return [...m.values()].sort((a, b) => b.cases - a.cases || a.interval - b.interval).slice(0, limit)
+    .map(r => ({ ...r, winRate: r.won + r.lost ? r.won / (r.won + r.lost) : null }));
 }
 
 export function byBranch(cases = [], branches = []) {

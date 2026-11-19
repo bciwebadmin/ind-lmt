@@ -18,6 +18,16 @@
 //                         Possible Cause (sometimes)
 //   Service Information   Planned Maintenance End Date / End Hours
 //   Servicing Dealer      AR Number, Name: BRIGHT EQUIPMENT INC. BOBCAT OF INDY NORTH
+//
+// Service Due (Nov 19, Erin): "<n> Hr Service Due - <customer> - <serial> -
+// <model>". Same sections minus Fault Information; Service Information holds
+//   PM End Date, PM End Hours, Next Maintenance Interval: 1500,
+//   Event Date: Nov 18, 2026 01:12 PM (CST), Kit Number: 7402488 (may be blank)
+// and Customer / Owner Account may be missing altogether.
+//
+// Both arrive forwarded ("Fw: …" with the forwarder's signature and a
+// From / Sent / To / Subject header above Bobcat's text). That preamble lands
+// before the first section heading and is ignored.
 
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', reg: '®', copy: '©', deg: '°', trade: '™', ndash: '–', mdash: '—' };
 
@@ -108,7 +118,7 @@ function parseCodeLine(s) {
 // The servicing dealer → one of the LMT's branches. The name carries it
 // ("… BOBCAT OF INDY NORTH"); longest branch first so Indy North isn't Indy.
 // Known AR numbers are a fallback for an oddly-named email.
-const KNOWN_AR = { '2000007726': 'Indy', '2000008174': 'Indy North', '2000008159': 'Anderson' };
+const KNOWN_AR = { '2000007726': 'Indy', '2000008174': 'Indy North', '2000008159': 'Anderson', '2000007727': 'Ellettsville', '2000007728': 'Columbus' };
 function branchFromDealer({ ar = '', name = '' } = {}, branches = []) {
   const n = String(name).toUpperCase().replace(/\s+/g, ' ');
   const byLength = [...branches].sort((a, b) => b.length - a.length);
@@ -122,25 +132,17 @@ function looksLikeFaultEmail(subject, text) {
   return /fault code/i.test(String(subject || '')) || /reported a (critical )?fault code/i.test(String(text || '')) || /^Primary Code:/im.test(String(text || ''));
 }
 
-// → { ok: true, alert } | { ok: false, reason }
-// reason: 'not-a-fault-email' (skip quietly) | 'unreadable' (Bobcat changed the layout).
-function parseFaultEmail({ subject = '', html = '', text = '' } = {}, branches = []) {
-  const body = html ? htmlToText(html) : String(text || '');
-  if (!looksLikeFaultEmail(subject, body)) return { ok: false, reason: 'not-a-fault-email' };
-  const S = sectionsOf(body);
+function looksLikeServiceEmail(subject, text) {
+  return /\bHr Service Due\b/i.test(String(subject || '')) || /coming due for service/i.test(String(text || '')) || /^Next Maintenance Interval:/im.test(String(text || ''));
+}
+
+// The parts both emails share: machine, customer, owner, location, dealer.
+function commonParts(S, branches) {
   const asset = S['Asset Information'] || [];
   const cust = S['Customer Information'] || [];
   const owner = S['Owner Account'] || [];
-  const fault = S['Fault Information'] || [];
-  const svc = S['Service Information'] || [];
   const dealer = S['Servicing Dealer Information'] || [];
-
   const serial = clean(field(asset, 'Serial Number'), 30).toUpperCase().replace(/\s+/g, '');
-  const primary = parseCodeLine(field(fault, 'Primary Code'));
-  if (!/^[A-Z0-9]{5,20}$/.test(serial) || !primary) {
-    return { ok: false, reason: 'unreadable', detail: !serial ? 'no serial number' : 'no primary code' };
-  }
-
   const locRaw = field(asset, 'Location');
   const lm = locRaw.match(/^(.*?)\s*\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)\s*$/);
   const lat = lm ? Number(lm[2]) : null, lng = lm ? Number(lm[3]) : null;
@@ -153,6 +155,47 @@ function parseFaultEmail({ subject = '', html = '', text = '' } = {}, branches =
   const ownerRest = owner.filter(l => !/^Owner Account:/i.test(l));
   const ownerEmail = ownerRest.find(l => EMAIL_RE.test(l)) || '';
   const ownerContact = ownerRest.find(l => !EMAIL_RE.test(l) && !LABEL_RE.test(l)) || '';
+  const dealerName = clean(field(dealer, 'Name'), 200);
+  const dealerAr = clean(field(dealer, 'AR Number'), 20);
+  return {
+    serial,
+    model: clean(field(asset, 'Model'), 40),
+    hours,
+    inventoryStatus: clean(field(asset, 'Inventory Status'), 60),
+    customer: {
+      name: clean(field(cust, 'Retail Customer'), 200),
+      phone: clean(field(cust, 'Telephone'), 40),
+      address: clean(field(cust, 'Address'), 300),
+      ownerAccount: ownerName,
+      ownerContact: clean(ownerContact, 120),
+      ownerEmail: clean(ownerEmail, 254)
+    },
+    location: {
+      city: clean(lm ? lm[1] : locRaw, 120).replace(/\s+US$/, ''),
+      lat: okCoord ? lat : null,
+      lng: okCoord ? lng : null
+    },
+    dealer: { ar: dealerAr, name: dealerName },
+    branch: branchFromDealer({ ar: dealerAr, name: dealerName }, branches)
+  };
+}
+
+const stripFw = (subject) => String(subject || '').replace(/&amp;/gi, '&').replace(/^\s*((fw|fwd|re):\s*)+/i, '').trim();
+
+// → { ok: true, alert } | { ok: false, reason }
+// reason: 'not-a-fault-email' (skip quietly) | 'unreadable' (Bobcat changed the layout).
+function parseFaultEmail({ subject = '', html = '', text = '' } = {}, branches = []) {
+  const body = html ? htmlToText(html) : String(text || '');
+  if (!looksLikeFaultEmail(subject, body)) return { ok: false, reason: 'not-a-fault-email' };
+  const S = sectionsOf(body);
+  const fault = S['Fault Information'] || [];
+  const svc = S['Service Information'] || [];
+  const base = commonParts(S, branches);
+  const serial = base.serial;
+  const primary = parseCodeLine(field(fault, 'Primary Code'));
+  if (!/^[A-Z0-9]{5,20}$/.test(serial) || !primary) {
+    return { ok: false, reason: 'unreadable', detail: !serial ? 'no serial number' : 'no primary code' };
+  }
 
   // "Other Active Fault Codes:" — one code per line after the label.
   const otherCodes = [];
@@ -165,30 +208,15 @@ function parseFaultEmail({ subject = '', html = '', text = '' } = {}, branches =
     }
   }
 
-  const sm = String(subject).replace(/^\s*((fw|fwd|re):\s*)+/i, '').match(/^Critical Fault Code - (.+) - (.+) - (.+)$/i);
-  const dealerName = clean(field(dealer, 'Name'), 200);
-  const dealerAr = clean(field(dealer, 'AR Number'), 20);
+  const sm = stripFw(subject).match(/^Critical Fault Code - (.+) - (.+) - (.+)$/i);
 
   return {
     ok: true,
     alert: {
-      serial,
-      model: clean(field(asset, 'Model'), 40) || (sm ? sm[3].trim() : ''),
-      hours,
-      inventoryStatus: clean(field(asset, 'Inventory Status'), 60),
-      customer: {
-        name: clean(field(cust, 'Retail Customer'), 200) || (sm ? sm[1].trim() : ''),
-        phone: clean(field(cust, 'Telephone'), 40),
-        address: clean(field(cust, 'Address'), 300),
-        ownerAccount: ownerName,
-        ownerContact: clean(ownerContact, 120),
-        ownerEmail: clean(ownerEmail, 254)
-      },
-      location: {
-        city: clean(lm ? lm[1] : locRaw, 120).replace(/\s+US$/, ''),
-        lat: okCoord ? lat : null,
-        lng: okCoord ? lng : null
-      },
+      ...base,
+      kind: 'fault',
+      model: base.model || (sm ? sm[3].trim() : ''),
+      customer: { ...base.customer, name: base.customer.name || (sm ? sm[1].trim() : '') },
       fault: {
         severity: primary.severity,
         code: primary.code,
@@ -201,20 +229,73 @@ function parseFaultEmail({ subject = '', html = '', text = '' } = {}, branches =
       planned: {
         endDate: clean(field(svc, 'End Date'), 40),
         endHours: clean(field(svc, 'End Hours'), 20)
-      },
-      dealer: { ar: dealerAr, name: dealerName },
-      branch: branchFromDealer({ ar: dealerAr, name: dealerName }, branches)
+      }
     }
   };
 }
+
+// A "Service Due" email → { ok, alert } with alert.service instead of .fault.
+function parseServiceEmail({ subject = '', html = '', text = '' } = {}, branches = []) {
+  const body = html ? htmlToText(html) : String(text || '');
+  if (!looksLikeServiceEmail(subject, body)) return { ok: false, reason: 'not-a-service-email' };
+  const S = sectionsOf(body);
+  const svc = S['Service Information'] || [];
+  const base = commonParts(S, branches);
+  // "1500 Hr Service Due - JAY CREW LANDSCAPE INC. - b4sb49895 - T66"; the customer part is sometimes missing.
+  const sub = stripFw(subject);
+  const sm = sub.match(/^(\d+)\s*Hr Service Due\s*-\s*(.+)$/i);
+  const parts = sm ? sm[2].split(' - ').map(x => x.trim()) : [];
+  const subModel = parts.length >= 2 ? parts[parts.length - 1] : '';
+  const subSerial = parts.length >= 2 ? parts[parts.length - 2].toUpperCase().replace(/\s+/g, '') : '';
+  const subCustomer = parts.length >= 3 ? parts.slice(0, -2).join(' - ') : '';
+  const serial = base.serial || (/^[A-Z0-9]{5,20}$/.test(subSerial) ? subSerial : '');
+  const intRaw = field(svc, 'Next Maintenance Interval') || (sm ? sm[1] : '');
+  const interval = /^\d{2,6}$/.test(String(intRaw).trim()) ? Number(intRaw) : null;
+  if (!/^[A-Z0-9]{5,20}$/.test(serial) || !interval) {
+    return { ok: false, reason: 'unreadable', detail: !serial ? 'no serial number' : 'no maintenance interval' };
+  }
+  const kit = clean(field(svc, 'Kit Number'), 40);
+  return {
+    ok: true,
+    alert: {
+      ...base,
+      kind: 'service',
+      serial,
+      model: base.model || subModel,
+      customer: { ...base.customer, name: base.customer.name || subCustomer },
+      service: {
+        interval,
+        dueAt: parseBobcatDate(field(svc, 'Event Date')),
+        kitNumber: /^[A-Z0-9-]{3,40}$/i.test(kit) ? kit : '',
+        pmEndDate: clean(field(svc, 'PM End Date'), 40),
+        pmEndHours: clean(field(svc, 'PM End Hours'), 20)
+      }
+    }
+  };
+}
+
+// Either kind of Bobcat email. → { ok, alert } | { ok: false, reason: 'not-bobcat' | 'unreadable', type?, detail? }
+function parseBobcatEmail(msg = {}, branches = []) {
+  const f = parseFaultEmail(msg, branches);
+  if (f.ok || f.reason === 'unreadable') return { ...f, type: 'fault' };
+  const s = parseServiceEmail(msg, branches);
+  if (s.ok || s.reason === 'unreadable') return { ...s, type: 'service' };
+  return { ok: false, reason: 'not-bobcat' };
+}
+
+const caseKindOf = (c) => (c && c.kind === 'service' ? 'service' : 'fault');
 
 // Which existing case a new alert belongs to: the machine's open case, or
 // — for a code the list keeps off the board — the auto-closed case already
 // logging that same code. Otherwise null (start a new case).
 const OPEN = ['new', 'working', 'sent'];
+// Fault and service cases never share: a service reminder on a machine with
+// an open fault case gets its own case on Service Due, and vice versa.
 function caseForAlert(cases = [], alert) {
-  const mine = cases.filter(c => c && String(c.serial || '').toUpperCase() === alert.serial)
+  const kind = alert.kind === 'service' ? 'service' : 'fault';
+  const mine = cases.filter(c => c && caseKindOf(c) === kind && String(c.serial || '').toUpperCase() === alert.serial)
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  if (kind === 'service') return mine.find(c => OPEN.includes(c.status || 'new')) || null;
   return mine.find(c => OPEN.includes(c.status || 'new'))
     || mine.find(c => c.status === 'closed' && c.closure && c.closure.auto && c.fault && c.fault.code === alert.fault.code)
     || null;
@@ -231,12 +312,41 @@ function isDuplicateMessage(cases = [], messageId) {
 // (Carter can reopen them). Unknown / unreviewed codes are critical.
 const AUTO_CLOSE = { noncritical: 'Non-critical code', ignore: 'Ignored code' };
 
+// A service-due email → a new case on Service Due (always New; there is no
+// Code List for these).
+function newServiceCaseFromAlert(alert, { now, messageId = '', receivedAt = '' } = {}) {
+  const at = now || new Date().toISOString();
+  const { dealer, branch, ...rest } = alert;
+  return {
+    ...rest,
+    kind: 'service',
+    source: 'email',
+    status: 'new',
+    branch: branch || '',
+    dealer,
+    alertCount: 1, lastAlertAt: at,
+    alerts: [{ at, interval: alert.service.interval, dueAt: alert.service.dueAt, messageId }],
+    intake: { messageId, receivedAt: receivedAt || at },
+    notes: [],
+    history: [{ id: `h_${at}_intake`, type: 'created', at, by: '', source: 'email', kind: 'service' }],
+    createdAt: at, createdBy: 'intake', updatedAt: at
+  };
+}
+
+// One line for a service case: "1500 hr service".
+function serviceLabel(c) {
+  const n = c && c.service && c.service.interval;
+  return n ? `${n} hr service` : 'Service';
+}
+
 function newCaseFromAlert(alert, { level = 'critical', now, messageId = '', receivedAt = '' } = {}) {
+  if (alert && alert.kind === 'service') return newServiceCaseFromAlert(alert, { now, messageId, receivedAt });
   const auto = AUTO_CLOSE[level];
   const at = now || new Date().toISOString();
   const { dealer, planned, branch, ...rest } = alert;
   return {
     ...rest,
+    kind: 'fault',
     source: 'email',
     status: auto ? 'closed' : 'new',
     ...(auto ? { closure: { reason: auto, auto: true, at, by: '' } } : {}),
@@ -254,5 +364,6 @@ function newCaseFromAlert(alert, { level = 'critical', now, messageId = '', rece
 
 module.exports = {
   htmlToText, sectionsOf, parseBobcatDate, parseCodeLine, branchFromDealer, looksLikeFaultEmail,
-  parseFaultEmail, caseForAlert, isDuplicateMessage, newCaseFromAlert, AUTO_CLOSE, KNOWN_AR
+  looksLikeServiceEmail, parseFaultEmail, parseServiceEmail, parseBobcatEmail, caseKindOf, serviceLabel,
+  caseForAlert, isDuplicateMessage, newCaseFromAlert, newServiceCaseFromAlert, AUTO_CLOSE, KNOWN_AR
 };

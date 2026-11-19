@@ -35,13 +35,15 @@ import {
 import {
   hasLeadAccess, hasTelematicsAccess, canOpenView, defaultViewFor, accessLabel, ACCESS_PRESETS,
   TELEMATICS_CODES_VIEW, TELEMATICS_BOARD_VIEW, TELEMATICS_SETTINGS_VIEW, TELEMATICS_DASHBOARD_VIEW, NO_ACCESS_VIEW,
+  TELEMATICS_SERVICE_VIEW,
   WORKSPACES, WORKSPACE_PICKER_VIEW, workspaceOfView, workspacesFor, workspaceHomeView, landingView
 } from './lib/access';
 import {
   CODE_LEVELS, codeLevelLabel, reviewPatch, newCodeDoc, isValidCode, normalizeCode,
   codeMatchesFilter, codeMatchesQuery, codeCounts, sortCodes, classifyCode,
   CASE_TABS, caseTab, caseStatusLabel, caseCounts, sortCases, caseMatchesQuery,
-  WIN_TIERS, winTier, LOST_REASONS, CLOSE_REASONS, DESTINATION_KINDS, MAX_DESTINATION_RECIPIENTS,
+  CASE_KINDS, caseKind, serviceLabel, lostReasonsFor, caseRaisedAt,
+  WIN_TIERS, winTier, CLOSE_REASONS, DESTINATION_KINDS, MAX_DESTINATION_RECIPIENTS,
   resolveRecipients, destinationsForTier, suggestedDestination, destinationProblems, isEmail,
   assetUrl, mapsUrl, startWorkingChange, winChange, loseChange, closeChange,
   confirmWorkOrderChange, reopenChange, noteEntry, buildManualCase,
@@ -50,7 +52,8 @@ import {
 import { TELEMATICS_SEED_CODES, TELEMATICS_SEED_SOURCE, TELEMATICS_SEED_DESTINATIONS } from './lib/telematicsSeed';
 import {
   PERIODS, inPeriod, summary, outcomeBreakdown, topCodes, levelCounts, topMachines, serialBreaks,
-  byBranch, byDestination, lostReasons, weekly, formatHours, formatDays, formatPct
+  byBranch, byDestination, lostReasons, weekly, formatHours, formatDays, formatPct, topIntervals,
+  REPORT_KINDS, ofKind
 } from './lib/telematicsStats';
 import { setErrorContext } from './lib/errorReporter';
 import { passwordProblem, newPasswordProblem, changePasswordError } from './lib/password';
@@ -1057,7 +1060,7 @@ export default function BobcatIndyCRM() {
     try {
       const requested = new URLSearchParams(window.location.search).get('view');
       const valid = [HOME_VIEW, 'todo', ...STAGE_VIEWS, 'submittals', 'requests', 'finance', 'trade-ins', 'add', 'reports', 'users', 'settings',
-        TELEMATICS_BOARD_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW, TELEMATICS_DASHBOARD_VIEW, WORKSPACE_PICKER_VIEW];
+        TELEMATICS_BOARD_VIEW, TELEMATICS_SERVICE_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW, TELEMATICS_DASHBOARD_VIEW, WORKSPACE_PICKER_VIEW];
       // ?case=<id> (bump emails, step 4) opens the board.
       if (new URLSearchParams(window.location.search).get('case')) return TELEMATICS_BOARD_VIEW;
       if (requested && valid.includes(requested)) return requested;
@@ -1304,8 +1307,13 @@ export default function BobcatIndyCRM() {
   const telematicsDestinations = useMemo(
     () => (telematicsSettings && Array.isArray(telematicsSettings.destinations) ? telematicsSettings.destinations : []),
     [telematicsSettings]);
-  const telematicsNewCount = useMemo(
-    () => (telematicsCases || []).filter(c => caseTab(c) === 'new').length, [telematicsCases]);
+  // New cases on each board (Fault Codes / Service Due), and both together.
+  const telematicsNewByKind = useMemo(() => {
+    const n = { fault: 0, service: 0 };
+    (telematicsCases || []).forEach(c => { if (caseTab(c) === 'new') n[caseKind(c)]++; });
+    return n;
+  }, [telematicsCases]);
+  const telematicsNewCount = telematicsNewByKind.fault + telematicsNewByKind.service;
 
   // The open case page. ?case=<id> opens one on arrival and stays in the URL
   // while it is open, so a refresh (or a bump email link) reopens it.
@@ -2668,7 +2676,7 @@ export default function BobcatIndyCRM() {
           todoCount={todoCount}
           backOfficeCounts={{ submittals: openSubmittalCount, requests: openRequestCount, finance: openFinanceCount, tradeIns: pendingTradeInCount }}
           user={currentUser}
-          telematicsNewCount={telematicsNewCount}
+          telematicsNewCount={telematicsNewCount} telematicsNewByKind={telematicsNewByKind}
           workspace={activeWorkspace} workspaces={myWorkspaces} onSwitchWorkspace={switchWorkspace}
           pendingCount={accessRequests.length}
           mobileOpen={mobileNavOpen}
@@ -2853,7 +2861,8 @@ export default function BobcatIndyCRM() {
                 onSeed={seedTelematicsCodeList}
               />
             )}
-            {view === TELEMATICS_BOARD_VIEW && telematicsAccess && (() => {
+            {(view === TELEMATICS_BOARD_VIEW || view === TELEMATICS_SERVICE_VIEW) && telematicsAccess && (() => {
+              const boardKind = view === TELEMATICS_SERVICE_VIEW ? 'service' : 'fault';
               const openCase = selectedCaseId ? (telematicsCases || []).find(c => c.id === selectedCaseId) : null;
               if (selectedCaseId && telematicsCases === null && !telematicsCasesError) {
                 return <div className="text-sm text-stone-500 py-8">Loading the case…</div>;
@@ -2864,7 +2873,7 @@ export default function BobcatIndyCRM() {
                     c={openCase} codesById={telematicsCodesById} users={users}
                     destinations={telematicsDestinations}
                     settings={telematicsSettings} wipReceivedAt={telematicsWipReceivedAt}
-                    onBack={() => setSelectedCaseId(null)}
+                    onBack={() => goTo(caseKind(openCase) === 'service' ? TELEMATICS_SERVICE_VIEW : TELEMATICS_BOARD_VIEW)}
                     onAddNote={(text) => addCaseNote(openCase, text)}
                     onStartWorking={() => changeCase(openCase.id, startWorkingChange(currentUser.id))}
                     onWin={(args) => winCase(openCase, args)}
@@ -2878,8 +2887,9 @@ export default function BobcatIndyCRM() {
                 );
               }
               return (
-                <TelematicsBoardView
-                  cases={telematicsCases} error={telematicsCasesError} isAdmin={currentUser.role === 'admin'}
+                <TelematicsBoardView key={boardKind} kind={boardKind}
+                  cases={telematicsCases === null ? null : telematicsCases.filter(c => caseKind(c) === boardKind)}
+                  error={telematicsCasesError} isAdmin={currentUser.role === 'admin'}
                   codesById={telematicsCodesById} codes={telematicsCodes || []}
                   branches={config.branches || []} currentUser={currentUser}
                   settings={telematicsSettings} wipReceivedAt={telematicsWipReceivedAt}
@@ -3317,7 +3327,7 @@ const STAGE_ADD_KIND = {
 };
 
 function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user, pendingCount, mobileOpen, onMobileClose, onNew, todoCount = 0, telematicsNewCount = 0,
-  workspace = 'leads', workspaces = [], onSwitchWorkspace }) {
+  telematicsNewByKind = { fault: telematicsNewCount, service: 0 }, workspace = 'leads', workspaces = [], onSwitchWorkspace }) {
   const [newOpen, setNewOpen] = useState(false);
   const [switchOpen, setSwitchOpen] = useState(false);
   const userRole = user ? user.role : 'user';
@@ -3345,7 +3355,8 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
     // A separate module (CLAUDE.md → "Telematics"); only shown to people with
     // telematics access.
     { ws: 'telematics', title: 'Telematics', items: [
-      { id: TELEMATICS_BOARD_VIEW, label: 'Board', icon: Activity, badge: telematicsNewCount, badgeAccent: telematicsNewCount > 0 },
+      { id: TELEMATICS_BOARD_VIEW, label: 'Fault Codes', icon: Activity, badge: telematicsNewByKind.fault, badgeAccent: telematicsNewByKind.fault > 0 },
+      { id: TELEMATICS_SERVICE_VIEW, label: 'Service Due', icon: Wrench, badge: telematicsNewByKind.service, badgeAccent: telematicsNewByKind.service > 0 },
       { id: TELEMATICS_DASHBOARD_VIEW, label: 'Reports', icon: BarChart3 },
       { id: TELEMATICS_CODES_VIEW, label: 'Code List', icon: ClipboardList },
       { id: TELEMATICS_SETTINGS_VIEW, label: 'Telematics Settings', icon: SettingsIcon }
@@ -3578,7 +3589,8 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
     users: 'Users', scoring: 'Scoring Rules', settings: 'Settings',
     'lead-routing': 'Lead Routing',
     [TELEMATICS_CODES_VIEW]: 'Critical Code List',
-    [TELEMATICS_BOARD_VIEW]: 'Telematics Board',
+    [TELEMATICS_BOARD_VIEW]: 'Fault Codes',
+    [TELEMATICS_SERVICE_VIEW]: 'Service Due',
     [TELEMATICS_SETTINGS_VIEW]: 'Telematics Settings',
     [TELEMATICS_DASHBOARD_VIEW]: 'Telematics Report',
     [WORKSPACE_PICKER_VIEW]: 'Choose a dashboard',
@@ -3637,6 +3649,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
               {view === 'settings' && 'Configure statuses, branches, departments, and lead sources'}
               {view === TELEMATICS_CODES_VIEW && 'Telematics · which Bobcat fault codes Carter should call on'}
               {view === TELEMATICS_BOARD_VIEW && 'Critical fault codes to call on, and where each win was sent'}
+              {view === TELEMATICS_SERVICE_VIEW && 'Machines coming due for scheduled service — book it or sell the parts'}
               {view === TELEMATICS_SETTINGS_VIEW && 'Who a win is emailed to, for each place Carter can send it'}
               {view === TELEMATICS_DASHBOARD_VIEW && 'Win rate, response times, machines and codes'}
             </div>
@@ -5913,6 +5926,11 @@ function CaseCodeChip({ code, codesById }) {
   );
 }
 
+// "1500 HR SERVICE" on Service Due rows and the case page.
+function ServiceChip({ c }) {
+  return <span className="whitespace-nowrap text-xs font-bold text-amber-800 uppercase tracking-wider">{serviceLabel(c)}</span>;
+}
+
 const fmtWhen = (iso) => iso ? fmtDateTime(iso) : '—';
 const daysAgo = (iso) => {
   if (!iso) return '';
@@ -5940,7 +5958,12 @@ function caseOutcomeLine(c) {
   return '';
 }
 
-function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches, currentUser, onOpen, onAdd, settings = null, wipReceivedAt = '' }) {
+// Service Due rows: one amber bar (no Code List levels for these).
+const SERVICE_ROW_STYLE = { bar: 'border-l-amber-500', row: 'bg-white' };
+
+// One board per kind (Nov 19): kind 'fault' = Fault Codes, 'service' = Service Due.
+function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById, codes, branches, currentUser, onOpen, onAdd, settings = null, wipReceivedAt = '' }) {
+  const isService = kind === 'service';
   const [tab, setTab] = useState('new');
   const [archiveFilter, setArchiveFilter] = useState('all');
   const [levelFilter, setLevelFilter] = useState('all');
@@ -5952,6 +5975,7 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
   // The level comes from the Code List as it is now, so re-classifying a code
   // recolours its cases straight away. Unknown / unreviewed = critical.
   const levelOf = (c) => classifyCode(c.fault && c.fault.code, codesById).level;
+  const rowStyle = (c) => (isService ? SERVICE_ROW_STYLE : (LEVEL_STYLE[levelOf(c)] || LEVEL_STYLE.critical));
   const inTab = useMemo(() => list.filter(c =>
     caseTab(c) === tab
     && (tab !== 'archive' || archiveFilter === 'all' || c.status === archiveFilter)
@@ -5962,7 +5986,7 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
     inTab.forEach(c => { n[levelOf(c)]++; });
     return n;
   }, [inTab, codesById]);   // eslint-disable-line react-hooks/exhaustive-deps
-  const rows = useMemo(() => sortCases(inTab.filter(c => levelFilter === 'all' || levelOf(c) === levelFilter)),
+  const rows = useMemo(() => sortCases(inTab.filter(c => isService || levelFilter === 'all' || levelOf(c) === levelFilter)),
     [inTab, levelFilter, codesById]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   if (error) {
@@ -5986,7 +6010,7 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
       <div className="flex flex-col sm:flex-row gap-2">
         <div className="relative flex-1">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400"/>
-          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search customer, serial, model, code, phone…"
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder={isService ? 'Search customer, serial, model, interval, phone…' : 'Search customer, serial, model, code, phone…'}
             className="w-full pl-8 pr-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
         </div>
         <button onClick={() => setAdding(true)}
@@ -5994,8 +6018,8 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
           <Plus size={14}/> Add case
         </button>
       </div>
-      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by code level">
-        {[['all', 'All codes'], ...CODE_LEVELS.map(l => [l.id, l.label])].map(([id, label]) => {
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label={isService ? 'Filters' : 'Filter by code level'}>
+        {!isService && [['all', 'All codes'], ...CODE_LEVELS.map(l => [l.id, l.label])].map(([id, label]) => {
           const on = levelFilter === id;
           const st = LEVEL_STYLE[id];
           return (
@@ -6035,8 +6059,8 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
           </div>
           {!list.length && (
             <div className="text-xs text-stone-500 mt-1 max-w-md mx-auto leading-relaxed">
-              Cases arrive on their own from Bobcat’s critical fault code emails (the Zap in SETUP.md → Telematics).
-              You can also add one by hand with <b>Add case</b>.
+              Cases arrive on their own from Bobcat’s {isService ? '“Hr Service Due”' : 'critical fault code'} emails, forwarded to the
+              LMT’s receiving address (Telematics Settings → LMT inbox). You can also add one by hand with <b>Add case</b>.
             </div>
           )}
         </div>
@@ -6046,20 +6070,20 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
             <table className="w-full text-sm">
               <thead className="bg-stone-50 text-[10px] uppercase tracking-widest text-stone-500">
                 <tr>
-                  <th className="text-left px-4 py-2.5 font-semibold">Fault started</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">{isService ? 'Came due' : 'Fault started'}</th>
                   <th className="text-left px-4 py-2.5 font-semibold">Customer</th>
                   <th className="text-left px-4 py-2.5 font-semibold">Machine</th>
-                  <th className="text-left px-4 py-2.5 font-semibold">Code</th>
+                  <th className="text-left px-4 py-2.5 font-semibold">{isService ? 'Service' : 'Code'}</th>
                   <th className="text-left px-4 py-2.5 font-semibold">Branch</th>
                   <th className="text-left px-4 py-2.5 font-semibold">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
                 {rows.map(c => {
-                  const st = LEVEL_STYLE[levelOf(c)] || LEVEL_STYLE.critical;
+                  const st = rowStyle(c);
                   return (
                   <tr key={c.id} onClick={() => onOpen(c)} className={`cursor-pointer ${st.row} hover:bg-stone-100`}>
-                    <td className={`px-4 py-2.5 text-xs text-stone-600 whitespace-nowrap border-l-4 ${st.bar}`}>{fmtWhen(c.fault && c.fault.startAt)}</td>
+                    <td className={`px-4 py-2.5 text-xs text-stone-600 whitespace-nowrap border-l-4 ${st.bar}`}>{fmtWhen(caseRaisedAt(c))}</td>
                     <td className="px-4 py-2.5">
                       <div className="font-medium text-stone-900">{(c.customer && c.customer.name) || '—'}</div>
                       {c.customer && c.customer.phone && <div className="text-xs text-stone-500 font-mono">{c.customer.phone}</div>}
@@ -6069,9 +6093,11 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
                       <div className="text-xs text-stone-500 font-mono">{c.serial}</div>
                     </td>
                     <td className="px-4 py-2.5">
-                      <CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/>
+                      {isService ? <ServiceChip c={c}/> : <CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/>}
                       {c.alertCount > 1 && <span className="ml-1.5 text-[10px] font-bold text-stone-500" title={`Bobcat has sent ${c.alertCount} alerts on this case`}>×{c.alertCount}</span>}
-                      {c.fault && c.fault.summary && <div className="text-xs text-stone-500 truncate max-w-[240px]">{c.fault.summary}</div>}
+                      {isService
+                        ? <div className="text-xs text-stone-500 whitespace-nowrap">{[c.hours != null ? `${c.hours} hrs now` : '', c.service && c.service.kitNumber ? `kit ${c.service.kitNumber}` : ''].filter(Boolean).join(' · ')}</div>
+                        : c.fault && c.fault.summary && <div className="text-xs text-stone-500 truncate max-w-[240px]">{c.fault.summary}</div>}
                     </td>
                     <td className="px-4 py-2.5 text-stone-700">{c.branch || '—'}</td>
                     <td className="px-4 py-2.5">
@@ -6088,14 +6114,16 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
           <div className="md:hidden space-y-2.5">
             {rows.map(c => (
               <button key={c.id} type="button" onClick={() => onOpen(c)}
-                className={`w-full text-left p-3 border border-stone-200 border-l-4 ${(LEVEL_STYLE[levelOf(c)] || LEVEL_STYLE.critical).bar} ${(LEVEL_STYLE[levelOf(c)] || LEVEL_STYLE.critical).row} rounded-lg space-y-1`}>
+                className={`w-full text-left p-3 border border-stone-200 border-l-4 ${rowStyle(c).bar} ${rowStyle(c).row} rounded-lg space-y-1`}>
                 <div className="flex items-start justify-between gap-2">
                   <div className="font-semibold text-stone-900 text-sm">{(c.customer && c.customer.name) || '—'}</div>
                   <CaseStatusBadge status={c.status}/>
                 </div>
                 <div className="text-xs text-stone-600">{[c.model, c.serial].filter(Boolean).join(' · ')}</div>
-                <div><CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/> <span className="text-xs text-stone-500">{c.fault && c.fault.summary}</span></div>
-                <div className="text-[11px] text-stone-500">{fmtWhen(c.fault && c.fault.startAt)}{c.branch ? ` · ${c.branch}` : ''}</div>
+                <div>{isService
+                  ? <><ServiceChip c={c}/> <span className="text-xs text-stone-500">{c.hours != null ? `${c.hours} hrs now` : ''}</span></>
+                  : <><CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/> <span className="text-xs text-stone-500">{c.fault && c.fault.summary}</span></>}</div>
+                <div className="text-[11px] text-stone-500">{fmtWhen(caseRaisedAt(c))}{c.branch ? ` · ${c.branch}` : ''}</div>
                 {caseOutcomeLine(c) && <div className="text-[11px] text-stone-500">{caseOutcomeLine(c)}</div>}
                 <FollowUpChip c={c} settings={settings} wipReceivedAt={wipReceivedAt}/>
               </button>
@@ -6105,7 +6133,7 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
       )}
 
       {adding && (
-        <AddCaseModal codes={codes} codesById={codesById} branches={branches} currentUser={currentUser}
+        <AddCaseModal kind={kind} codes={codes} codesById={codesById} branches={branches} currentUser={currentUser}
           onCancel={() => setAdding(false)}
           onSave={async (doc) => { if (await onAdd(doc)) setAdding(false); }}/>
       )}
@@ -6114,9 +6142,10 @@ function TelematicsBoardView({ cases, error, isAdmin, codesById, codes, branches
 }
 
 // A case entered by hand. Email intake (step 3) creates them automatically.
-function AddCaseModal({ codes = [], codesById = {}, branches = [], currentUser, onSave, onCancel }) {
-  const [f, setF] = useState({ customerName: '', phone: '', address: '', serial: '', model: '', hours: '',
-    code: '', summary: '', branch: '', city: '', lat: '', lng: '', note: '' });
+function AddCaseModal({ kind = 'fault', codes = [], codesById = {}, branches = [], currentUser, onSave, onCancel }) {
+  const isService = kind === 'service';
+  const [f, setF] = useState({ kind, customerName: '', phone: '', address: '', serial: '', model: '', hours: '',
+    code: '', summary: '', interval: '', kitNumber: '', branch: '', city: '', lat: '', lng: '', note: '' });
   const [errors, setErrors] = useState([]);
   const [busy, setBusy] = useState(false);
   const set = (k, v) => setF(prev => {
@@ -6146,7 +6175,7 @@ function AddCaseModal({ codes = [], codesById = {}, branches = [], currentUser, 
   );
   return (
     <ModalShell label="Add telematics case" icon={Activity} accent={TELEMATICS_ACCENT} onCancel={() => { if (!busy) onCancel(); }}
-      title="Add a case" subtitle="For a fault code that didn’t come in by email. It starts in New."
+      title="Add a case" subtitle={isService ? 'For a service coming due that didn’t come in by email. It starts in New.' : 'For a fault code that didn’t come in by email. It starts in New.'}
       footer={<>
         <button onClick={onCancel} disabled={busy} className="px-3 py-2 text-sm text-stone-600 hover:text-stone-900 font-medium">Cancel</button>
         <button onClick={save} disabled={busy}
@@ -6169,11 +6198,16 @@ function AddCaseModal({ codes = [], codesById = {}, branches = [], currentUser, 
             {branches.map(b => <option key={b} value={b}>{b}</option>)}
           </select>
         </label>
-        {input('code', 'Fault code', { list: 'telematics-code-options', className: 'font-mono uppercase', placeholder: 'e.g. M0217' })}
-        <datalist id="telematics-code-options">
-          {codes.map(c => <option key={c.code} value={c.code}>{c.summary}</option>)}
-        </datalist>
-        {input('summary', 'Fault summary')}
+        {isService ? <>
+          {input('interval', 'Service interval (hours) *', { inputMode: 'numeric', placeholder: 'e.g. 1500' })}
+          {input('kitNumber', 'Kit number', { className: 'font-mono', placeholder: 'e.g. 7402488' })}
+        </> : <>
+          {input('code', 'Fault code', { list: 'telematics-code-options', className: 'font-mono uppercase', placeholder: 'e.g. M0217' })}
+          <datalist id="telematics-code-options">
+            {codes.map(c => <option key={c.code} value={c.code}>{c.summary}</option>)}
+          </datalist>
+          {input('summary', 'Fault summary')}
+        </>}
         {input('city', 'Machine near (city)')}
         <div className="grid grid-cols-2 gap-2">
           {input('lat', 'Latitude', { inputMode: 'decimal' })}
@@ -6236,6 +6270,7 @@ function caseEventText(e) {
   if (e.type === 'escalated') return e.status === 'sent'
     ? `Escalated — no work order after the reminders (${(e.to || []).join(', ')})`
     : 'Escalation not sent — no one on the escalation list';
+  if (e.type === 'alert' && e.kind === 'service') return `Bobcat sent a service reminder again — ${e.interval ? `${e.interval} hr service` : ''}`;
   if (e.type === 'created') return e.source === 'manual' ? 'Case added by hand'
     : `Case created from Bobcat email${e.autoClosed ? ` — filed in the Archive (${e.autoClosed.toLowerCase()})` : ''}`;
   if (e.type === 'alert') return `Bobcat sent the code again — ${[e.code, e.summary].filter(Boolean).join(' ')}`;
@@ -6255,6 +6290,8 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
   const maps = mapsUrl(loc.lat, loc.lng);
   const asset = assetUrl(c.serial);
   const isOpenStatus = status === 'new' || status === 'working';
+  const isService = caseKind(c) === 'service';
+  const svc = c.service || {};
   const timeline = [
     ...(c.history || []).map(e => ({ ...e, kind: 'event' })),
     ...(c.notes || []).map(n => ({ ...n, kind: 'note' }))
@@ -6266,7 +6303,7 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
   return (
     <div className="space-y-4">
       <button onClick={onBack} className="text-sm text-stone-600 hover:text-stone-900 flex items-center gap-1">
-        <ChevronLeft size={14}/> Back to the board
+        <ChevronLeft size={14}/> Back to {isService ? 'Service Due' : 'Fault Codes'}
       </button>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -6275,13 +6312,26 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
             <CaseStatusBadge status={status}/>
           </div>
           <div className="text-sm text-stone-600 mt-0.5">
-            {[c.model, c.serial].filter(Boolean).join(' · ')} · <CaseCodeChip code={fault.code} codesById={codesById}/> {fault.summary}
+            {[c.model, c.serial].filter(Boolean).join(' · ')} · {isService
+              ? <><ServiceChip c={c}/> due{c.hours != null ? ` · ${c.hours} hrs now` : ''}</>
+              : <><CaseCodeChip code={fault.code} codesById={codesById}/> {fault.summary}</>}
           </div>
         </div>
       </div>
 
       <div className="grid md:grid-cols-3 gap-4 items-start">
         <div className="md:col-span-2 space-y-4">
+          {isService ? (
+          <CaseCard title="Service due">
+            <CaseField label="Interval">{svc.interval ? `${svc.interval} hour service` : null}</CaseField>
+            <CaseField label="Hours now">{c.hours != null ? String(c.hours) : null}</CaseField>
+            <CaseField label="Kit number">{svc.kitNumber ? <span className="font-mono">{svc.kitNumber}</span> : null}</CaseField>
+            <CaseField label="Came due">{svc.dueAt ? fmtWhen(svc.dueAt) : null}</CaseField>
+            <CaseField label="PM plan ends">{svc.pmEndDate || svc.pmEndHours ? [svc.pmEndDate, svc.pmEndHours && `${svc.pmEndHours} hrs`].filter(Boolean).join(' · ') : null}</CaseField>
+            {c.alertCount > 1 && <CaseField label="Sent again">{`${c.alertCount - 1} more time${c.alertCount === 2 ? '' : 's'}, last ${fmtWhen(c.lastAlertAt)}`}</CaseField>}
+            <div className="text-xs text-stone-500 py-1">Bobcat: contact the customer to set up a service appointment, or sell the parts to complete this service.</div>
+          </CaseCard>
+          ) : (
           <CaseCard title="Fault">
             <CaseField label="Code">{fault.code ? `${fault.severity ? `${fault.severity} - ` : ''}${fault.code}` : null}</CaseField>
             <CaseField label="Summary">{fault.summary}</CaseField>
@@ -6310,6 +6360,7 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
               </details>
             )}
           </CaseCard>
+          )}
           <div className="grid sm:grid-cols-2 gap-4">
             <CaseCard title="Customer">
               <CaseField label="Name">{cust.name}</CaseField>
@@ -6445,12 +6496,13 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
           onSend={async (args) => { if (await run(() => onWin(args))) setModal(null); }}/>
       )}
       {modal === 'lost' && (
-        <CaseReasonModal title="Lost" subtitle="The customer didn’t take the service. Moves the case to the Archive." reasons={LOST_REASONS}
+        <CaseReasonModal title="Lost" subtitle="The customer didn’t take the service. Moves the case to the Archive." reasons={lostReasonsFor(c)}
           onCancel={() => setModal(null)}
           onSave={async (args) => { if (await run(() => onLose(args))) setModal(null); }}/>
       )}
       {modal === 'close' && (
-        <CaseReasonModal title="Close the case" subtitle="Nothing to sell here. Moves the case to the Archive." reasons={CLOSE_REASONS}
+        <CaseReasonModal title="Close the case" subtitle="Nothing to sell here. Moves the case to the Archive."
+          reasons={isService ? CLOSE_REASONS.filter(r => r !== 'Code cleared on its own') : CLOSE_REASONS}
           onCancel={() => setModal(null)}
           onSave={async (args) => { if (await run(() => onCloseCase(args))) setModal(null); }}/>
       )}
@@ -6639,11 +6691,27 @@ function VizTable({ cols, rows, empty = 'Nothing yet.' }) {
   );
 }
 
+// Service Due by interval: how many came due, won, and the work orders.
+function ServiceIntervalsCard({ rows }) {
+  return (
+    <ChartCard title="Service due by interval" subtitle="Bobcat’s maintenance reminders, by the hour mark">
+      <VizTable rows={rows} empty="No service due cases in this period." cols={[
+        { key: 'label', label: 'Interval' },
+        { key: 'cases', label: 'Cases', right: true },
+        { key: 'won', label: 'Won', right: true },
+        { key: 'winRate', label: 'Win rate', right: true, render: r => formatPct(r.winRate) },
+        { key: 'workOrders', label: 'Work orders', right: true }
+      ]}/>
+    </ChartCard>
+  );
+}
+
 function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }) {
   const [period, setPeriod] = useState('90');
   const [branch, setBranch] = useState('All');
+  const [kind, setKind] = useState('all');   // Fault codes / Service due / both (Nov 19)
   const all = cases || [];
-  const scoped = useMemo(() => all.filter(c => branch === 'All' || (branch === 'No branch' ? !c.branch : c.branch === branch)), [all, branch]);
+  const scoped = useMemo(() => ofKind(all, kind).filter(c => branch === 'All' || (branch === 'No branch' ? !c.branch : c.branch === branch)), [all, branch, kind]);
   const list = useMemo(() => scoped.filter(c => inPeriod(c, period)), [scoped, period]);
   const s = useMemo(() => summary(list), [list]);
   const outcomes = useMemo(() => outcomeBreakdown(list), [list]);
@@ -6655,6 +6723,8 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
   const dests = useMemo(() => byDestination(list), [list]);
   const lost = useMemo(() => lostReasons(list), [list]);
   const weeks = useMemo(() => weekly(scoped, 12), [scoped]);
+  const intervals = useMemo(() => topIntervals(list), [list]);
+  const showCodes = kind !== 'service', showService = kind !== 'fault';
 
   if (error) return <div className="max-w-2xl px-4 py-3 bg-rose-50 border border-rose-200 rounded-lg text-sm text-rose-800">The report couldn’t load the cases ({error}).</div>;
   if (cases === null) return <div className="text-sm text-stone-500 py-8">Loading…</div>;
@@ -6670,6 +6740,10 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
           className="px-3 py-1.5 border border-stone-200 rounded-md text-sm bg-white font-semibold text-stone-700">
           {PERIODS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
         </select>
+        <select value={kind} onChange={e => setKind(e.target.value)} aria-label="Which cases"
+          className="px-3 py-1.5 border border-stone-200 rounded-md text-sm bg-white font-semibold text-stone-700">
+          {REPORT_KINDS.map(k => <option key={k.id} value={k.id}>{k.label}</option>)}
+        </select>
         <select value={branch} onChange={e => setBranch(e.target.value)} aria-label="Branch"
           className="px-3 py-1.5 border border-stone-200 rounded-md text-sm bg-white font-semibold text-stone-700">
           <option value="All">All branches</option>
@@ -6681,7 +6755,7 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
 
       {!all.length ? (
         <div className="text-center py-16 border border-dashed border-stone-200 rounded-lg bg-white text-sm text-stone-500">
-          No cases yet — the report fills in as Bobcat’s fault codes arrive and Carter works them.
+          No cases yet — the report fills in as Bobcat’s fault code and service due emails arrive and Carter works them.
         </div>
       ) : (
       <>
@@ -6689,7 +6763,7 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
         <KpiCard label="Cases" value={s.cases} subtitle={`${s.open} still New / Working`}/>
         <KpiCard label="Win rate" value={formatPct(s.winRate)} subtitle={s.won + s.lost ? `${s.won} won · ${s.lost} lost` : 'nothing decided yet'}/>
         <KpiCard label="Work orders opened" value={formatPct(s.workOrderRate)} subtitle={s.fieldShopWins ? `${s.workOrders} of ${s.fieldShopWins} field / shop wins` : 'no field / shop wins yet'}/>
-        <KpiCard label="First response" value={formatHours(s.medianFirstResponseHours)} subtitle={s.firstResponseCount ? 'median, code in → first action' : 'no responses yet'}/>
+        <KpiCard label="First response" value={formatHours(s.medianFirstResponseHours)} subtitle={s.firstResponseCount ? 'median, email in → first action' : 'no responses yet'}/>
         <KpiCard label="Win → work order" value={formatDays(s.medianDaysToWorkOrder)} subtitle={s.workOrderTimingCount ? `median of ${s.workOrderTimingCount}` : 'no work orders yet'}/>
         <KpiCard label="Waiting on service" value={s.waitingOnService} subtitle={`${s.reminders} reminder${s.reminders === 1 ? '' : 's'} · ${s.escalated} escalated`} accent={s.escalated ? 'bad' : null}/>
       </div>
@@ -6709,6 +6783,10 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
       </ChartCard>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {showService && !showCodes && (
+          <ServiceIntervalsCard rows={intervals}/>
+        )}
+        {showCodes && (
         <ChartCard title="Most common codes" subtitle={`Top ${codes.length} by cases · coloured by the Code List`}>
           <VizLegend items={[
             { label: `Critical (${levels.critical})`, color: VIZ_LEVEL.critical },
@@ -6729,6 +6807,7 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
             </ResponsiveContainer>
           ) : <div className="text-xs text-stone-400 py-3">No codes in this period.</div>}
         </ChartCard>
+        )}
 
         <ChartCard title="How cases end" subtitle={`Cases created in the ${periodLabel}`}>
           <ResponsiveContainer width="100%" height={barH(outcomes.length)}>
@@ -6748,6 +6827,8 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
           )}
         </ChartCard>
       </div>
+
+      {showService && showCodes && <ServiceIntervalsCard rows={intervals}/>}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <ChartCard title="Machines that come up most" subtitle="Cases by model">
@@ -6770,7 +6851,7 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
             { key: 'prefix', label: 'Serial', mono: true },
             { key: 'machines', label: 'Machines', right: true },
             { key: 'cases', label: 'Cases', right: true },
-            { key: 'topCode', label: 'Top code', mono: true }
+            ...(showCodes ? [{ key: 'topCode', label: 'Top code', mono: true }] : [])
           ]}/>
         </ChartCard>
       </div>
@@ -6798,6 +6879,7 @@ function TelematicsDashboardView({ cases, error, codesById = {}, branches = [] }
         Win rate = won ÷ (won + lost); closed cases (no action, duplicates, codes filed automatically) aren’t counted.
         Work orders opened = field and shop wins with a work order from the WIP report or confirmed by hand.
         First response = case created → the first note or status change by a person.
+        Service due cases are counted the same way as fault codes, so the totals cover both unless you pick one above.
       </div>
       </>
       )}
@@ -6952,31 +7034,46 @@ function WipReportCard({ settings, wipStatus, onSave }) {
   const cur = (settings && settings.wip) || {};
   const [inbox, setInbox] = useState(cur.inboxAddress || '');
   const [senders, setSenders] = useState((cur.allowedSenders || []).join(', '));
+  const [alertSenders, setAlertSenders] = useState((cur.alertSenders || []).join(', '));
   const [busy, setBusy] = useState(false);
-  useEffect(() => { setInbox(cur.inboxAddress || ''); setSenders((cur.allowedSenders || []).join(', ')); }, [settings]);   // eslint-disable-line react-hooks/exhaustive-deps
-  const list = senders.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
-  const bad = (inbox && !isEmail(inbox)) || list.some(x => !isEmail(x));
-  const dirty = inbox.trim() !== (cur.inboxAddress || '') || list.join(',') !== (cur.allowedSenders || []).join(',');
-  const save = async () => { setBusy(true); try { await onSave({ wip: { ...cur, inboxAddress: inbox.trim().toLowerCase(), allowedSenders: list.map(x => x.toLowerCase()) } }); } finally { setBusy(false); } };
+  useEffect(() => {
+    setInbox(cur.inboxAddress || ''); setSenders((cur.allowedSenders || []).join(', ')); setAlertSenders((cur.alertSenders || []).join(', '));
+  }, [settings]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const split = (v) => v.split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+  const list = split(senders), alertList = split(alertSenders);
+  const bad = (inbox && !isEmail(inbox)) || list.some(x => !isEmail(x)) || alertList.some(x => !isEmail(x));
+  const dirty = inbox.trim() !== (cur.inboxAddress || '') || list.join(',') !== (cur.allowedSenders || []).join(',')
+    || alertList.join(',') !== (cur.alertSenders || []).join(',');
+  const save = async () => {
+    setBusy(true);
+    try {
+      await onSave({ wip: { ...cur, inboxAddress: inbox.trim().toLowerCase(), allowedSenders: list.map(x => x.toLowerCase()), alertSenders: alertList.map(x => x.toLowerCase()) } });
+    } finally { setBusy(false); }
+  };
+  const lastAlert = wipStatus && wipStatus.lastAlert;
   const good = wipStatus && wipStatus.lastGood;
   const last = wipStatus && wipStatus.lastAttempt;
   const stale = good ? (Date.now() - new Date(good.receivedAt).getTime()) > followUpSettings(settings).wipStaleHours * 3600e3 : true;
   return (
     <section className="bg-white border border-stone-200 rounded-lg p-4 space-y-3">
       <div>
-        <h3 className="text-base font-bold text-stone-900">WIP report</h3>
+        <h3 className="text-base font-bold text-stone-900">LMT inbox — WIP report and Bobcat emails</h3>
         <div className="text-xs text-stone-600 mt-0.5 leading-relaxed">
-          The daily WIP export is emailed to this private address. A work order on a “Sent On” case’s serial number,
-          opened on or after the day it was sent, completes the case. Keep the address to yourselves — it’s what lets a report in.
+          Two things are emailed to this private address. The daily <b>WIP export</b> (a CSV): a work order on a “Sent On” case’s serial
+          number, opened on or after the day it was sent, completes the case. And Bobcat’s <b>Critical Fault Code</b> and <b>Hr Service Due</b>{' '}
+          emails, forwarded as they arrive — each becomes a case on Fault Codes or Service Due. Keep the address to yourselves.
         </div>
       </div>
       <div className="grid sm:grid-cols-2 gap-3">
         <label className="block"><span className="text-xs font-semibold text-stone-600">Receiving address</span>
           <input value={inbox} onChange={e => setInbox(e.target.value)} placeholder="wip-…@….resend.app"
             className={`mt-1 w-full px-3 py-2 border rounded-md text-sm font-mono ${inbox && !isEmail(inbox) ? 'border-rose-300 bg-rose-50' : 'border-stone-200'}`}/></label>
-        <label className="block"><span className="text-xs font-semibold text-stone-600">Only accept it from (optional)</span>
+        <label className="block"><span className="text-xs font-semibold text-stone-600">Only accept the WIP report from (optional)</span>
           <input value={senders} onChange={e => setSenders(e.target.value)} placeholder="reports@berrycompaniesinc.com"
             className={`mt-1 w-full px-3 py-2 border rounded-md text-sm font-mono ${list.some(x => !isEmail(x)) ? 'border-rose-300 bg-rose-50' : 'border-stone-200'}`}/></label>
+        <label className="block sm:col-start-2"><span className="text-xs font-semibold text-stone-600">Only accept Bobcat emails forwarded by (optional)</span>
+          <input value={alertSenders} onChange={e => setAlertSenders(e.target.value)} placeholder="you@berrycompaniesinc.com, no-reply@bobcat.com"
+            className={`mt-1 w-full px-3 py-2 border rounded-md text-sm font-mono ${alertList.some(x => !isEmail(x)) ? 'border-rose-300 bg-rose-50' : 'border-stone-200'}`}/></label>
       </div>
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="text-xs">
@@ -6984,6 +7081,16 @@ function WipReportCard({ settings, wipStatus, onSave }) {
             ? <span className={stale ? 'text-amber-800' : 'text-emerald-700'}>{stale ? 'Overdue — ' : ''}Last report {fmtWhen(good.receivedAt)}: {good.workOrderCount} work orders, {good.matched} case{good.matched === 1 ? '' : 's'} completed.</span>
             : <span className="text-stone-500">No WIP report received yet.</span>}
           {last && last.status !== 'ok' && <div className="text-rose-700 mt-0.5">Last attempt {fmtWhen(last.at)} {last.status === 'refused' ? 'refused' : 'failed'}: {last.reason}</div>}
+          {lastAlert
+            ? <div className={`mt-0.5 ${lastAlert.status === 'ok' && lastAlert.action !== 'skipped' ? 'text-emerald-700' : lastAlert.status === 'ok' ? 'text-stone-500' : 'text-rose-700'}`}>
+                Last Bobcat email {fmtWhen(lastAlert.at)}: {lastAlert.status === 'refused' ? `refused — ${lastAlert.reason}`
+                  : lastAlert.status === 'failed' ? `failed — ${lastAlert.reason || lastAlert.action}`
+                  : lastAlert.action === 'created' ? `new ${lastAlert.kind === 'service' ? 'Service Due' : 'Fault Codes'} case`
+                  : lastAlert.action === 'attached' ? `added to an open ${lastAlert.kind === 'service' ? 'Service Due' : 'Fault Codes'} case`
+                  : lastAlert.action === 'duplicate' ? 'already had it'
+                  : `skipped — ${lastAlert.reason || 'not a Bobcat email'}`}
+              </div>
+            : <div className="text-stone-500 mt-0.5">No Bobcat email received here yet.</div>}
         </div>
         <button onClick={save} disabled={busy || !dirty || bad}
           className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-md">{busy ? 'Saving…' : 'Save'}</button>

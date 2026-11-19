@@ -14,8 +14,11 @@ export const TELEMATICS_BOARD_VIEW = 'telematics-board';
 export const TELEMATICS_CODES_VIEW = 'telematics-codes';
 export const TELEMATICS_SETTINGS_VIEW = 'telematics-settings';
 export const TELEMATICS_DASHBOARD_VIEW = 'telematics-dashboard';
+// The board split in two (Nov 19, Erin): TELEMATICS_BOARD_VIEW is "Fault
+// Codes" (the original board, so old links still work); this is "Service Due".
+export const TELEMATICS_SERVICE_VIEW = 'telematics-service';
 // Every Telematics view.
-export const TELEMATICS_VIEWS = [TELEMATICS_BOARD_VIEW, TELEMATICS_DASHBOARD_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW];
+export const TELEMATICS_VIEWS = [TELEMATICS_BOARD_VIEW, TELEMATICS_SERVICE_VIEW, TELEMATICS_DASHBOARD_VIEW, TELEMATICS_CODES_VIEW, TELEMATICS_SETTINGS_VIEW];
 // Where a telematics-only user lands: Carter lives on the board (Tanner).
 export const TELEMATICS_DEFAULT_VIEW = TELEMATICS_BOARD_VIEW;
 // Shown to an account with neither switch on.
@@ -76,7 +79,7 @@ export const WORKSPACE_PICKER_VIEW = 'workspace-picker';
 export const WORKSPACES = [
   { id: 'leads',      label: 'Lead Management', hint: 'New leads through completed deals, To Do and reports' },
   { id: 'backoffice', label: 'Back Office',     hint: 'Sales submittals, sales requests, finance and trade-ins' },
-  { id: 'telematics', label: 'Telematics',      hint: 'Critical fault codes, the code list and follow-ups' }
+  { id: 'telematics', label: 'Telematics',      hint: 'Critical fault codes, service due, the code list and follow-ups' }
 ];
 export const BACK_OFFICE_VIEWS = ['submittals', 'requests', 'finance', 'trade-ins'];
 const SHARED_VIEWS = ['users', 'settings', NO_ACCESS_VIEW, WORKSPACE_PICKER_VIEW];

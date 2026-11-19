@@ -115,6 +115,20 @@ export function sortCodes(docs = []) {
 // A case = one machine's critical fault that Carter works. Its board tab is
 // derived from `status`, never stored (same rule as leads).
 
+// Two kinds of case (Nov 19, Erin), on two boards with the same process:
+// Bobcat's critical fault codes, and its "<n> Hr Service Due" reminders.
+// Cases from before the split have no `kind` and are faults.
+export const CASE_KINDS = [
+  { id: 'fault',   label: 'Fault Codes' },
+  { id: 'service', label: 'Service Due' }
+];
+export function caseKind(c) { return c && c.kind === 'service' ? 'service' : 'fault'; }
+// "1500 hr service". KEEP IN STEP with functions/telematicsIntakeRules.js.
+export function serviceLabel(c) {
+  const n = c && c.service && c.service.interval;
+  return n ? `${n} hr service` : 'Service';
+}
+
 export const CASE_STATUSES = [
   { id: 'new',       label: 'New' },
   { id: 'working',   label: 'Working' },
@@ -166,6 +180,17 @@ export const LOST_REASONS = [
   'Went to another dealer',
   'Other'
 ];
+// Service Due cases (Nov 19) — the customer passing on a scheduled service.
+export const SERVICE_LOST_REASONS = [
+  'Customer declined',
+  'Customer does their own maintenance',
+  'Couldn’t reach the customer',
+  'Already scheduled / being serviced',
+  'Machine sold / not our customer',
+  'Went to another dealer',
+  'Other'
+];
+export function lostReasonsFor(c) { return caseKind(c) === 'service' ? SERVICE_LOST_REASONS : LOST_REASONS; }
 export const CLOSE_REASONS = [
   'No action needed',
   'Code cleared on its own',
@@ -269,7 +294,7 @@ export function winChange({ tierId, destination, message = '' }, userId, now = n
 }
 
 export function loseChange({ reason, note = '' }, userId, now = new Date().toISOString()) {
-  if (!LOST_REASONS.includes(reason)) throw new Error('Pick a reason');
+  if (!LOST_REASONS.includes(reason) && !SERVICE_LOST_REASONS.includes(reason)) throw new Error('Pick a reason');
   if (reason === 'Other' && !String(note).trim()) throw new Error('Say why');
   return {
     patch: { status: 'lost', statusChangedAt: now, statusChangedBy: userId || '', updatedAt: now,
@@ -310,13 +335,17 @@ export function noteEntry(text, userId, now = new Date().toISOString()) {
 }
 
 // The hand-entered case (step 3 adds the email intake). Returns { errors, doc }.
+// f.kind 'service' → a Service Due case (interval, kit number) instead of a fault.
 export function buildManualCase(f, userId, now = new Date().toISOString()) {
   const errors = [];
+  const isService = f.kind === 'service';
   const serial = String(f.serial || '').trim().toUpperCase();
-  const code = normalizeCode(f.code);
+  const code = isService ? '' : normalizeCode(f.code);
+  const interval = String(f.interval || '').trim();
   if (!String(f.customerName || '').trim()) errors.push('Customer name is required.');
   if (!/^[A-Z0-9]{5,20}$/.test(serial)) errors.push('Serial number looks wrong — letters and numbers, e.g. AT6330022.');
   if (code && !isValidCode(code)) errors.push('Fault code looks wrong — e.g. M0217.');
+  if (isService && !/^\d{2,6}$/.test(interval)) errors.push('Service interval is required — hours, e.g. 1500.');
   if (f.lat !== '' && f.lat != null && !mapsUrl(f.lat, f.lng)) errors.push('Latitude / longitude don’t look right.');
   const num = (v) => (v === '' || v == null || !isFinite(Number(v)) ? null : Number(v));
   const doc = {
@@ -324,7 +353,9 @@ export function buildManualCase(f, userId, now = new Date().toISOString()) {
     serial, model: String(f.model || '').trim(), hours: num(f.hours),
     customer: { name: String(f.customerName || '').trim(), phone: String(f.phone || '').trim(), address: String(f.address || '').trim() },
     location: { city: String(f.city || '').trim(), lat: num(f.lat), lng: num(f.lng) },
-    fault: { code, summary: String(f.summary || '').trim(), severity: code ? 'CRITICAL' : '', startAt: f.startAt || now, otherCodes: [] },
+    ...(isService
+      ? { kind: 'service', service: { interval: Number(interval), dueAt: f.dueAt || now, kitNumber: String(f.kitNumber || '').trim().slice(0, 40) } }
+      : { kind: 'fault', fault: { code, summary: String(f.summary || '').trim(), severity: code ? 'CRITICAL' : '', startAt: f.startAt || now, otherCodes: [] } }),
     branch: String(f.branch || '').trim(),
     notes: [], history: [ev('created', userId, now, { source: 'manual' })],
     createdAt: now, createdBy: userId || '', updatedAt: now
@@ -338,7 +369,8 @@ export function caseMatchesQuery(c, q) {
   const digits = String((c.customer && c.customer.phone) || '').replace(/\D/g, '');
   const hay = [c.serial, c.model, c.customer && c.customer.name, c.customer && c.customer.address,
     c.fault && c.fault.code, c.fault && c.fault.summary, c.location && c.location.city, c.branch,
-    c.outcome && c.outcome.destinationName].join(' ').toLowerCase();
+    c.outcome && c.outcome.destinationName,
+    c.service && c.service.interval ? `${c.service.interval} hr` : '', c.service && c.service.kitNumber].join(' ').toLowerCase();
   return words.every(w => hay.includes(w) || (/^\d{3,}$/.test(w) && digits.includes(w)));
 }
 
@@ -348,9 +380,13 @@ export function caseCounts(cases = []) {
   return out;
 }
 
-// Newest fault first.
+// When Bobcat raised it: the fault's start, or the service-due date.
+export function caseRaisedAt(c) {
+  return (c && ((c.fault && c.fault.startAt) || (c.service && c.service.dueAt) || c.createdAt)) || '';
+}
+// Newest first.
 export function sortCases(cases = []) {
-  const t = (c) => (c.fault && c.fault.startAt) || c.createdAt || '';
+  const t = caseRaisedAt;
   return [...cases].sort((a, b) => String(t(b)).localeCompare(String(t(a))));
 }
 

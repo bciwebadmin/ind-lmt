@@ -58,7 +58,10 @@ function handoffError(c) {
 function handoffSubject(c) {
   const tier = WIN_TIERS.find(t => t.id === (c.outcome && c.outcome.tier));
   const machine = [c.model, c.serial].filter(Boolean).join(' ');
-  const fault = [c.fault && c.fault.code, c.fault && c.fault.summary].filter(Boolean).join(' ');
+  // Service Due cases (Nov 19) name the interval instead of a code.
+  const fault = c.kind === 'service'
+    ? (c.service && c.service.interval ? `${c.service.interval} hr service due` : 'Service due')
+    : [c.fault && c.fault.code, c.fault && c.fault.summary].filter(Boolean).join(' ');
   return ['Telematics: ' + (tier ? tier.label : 'Hand-off'), c.customer && c.customer.name, machine, fault]
     .filter(Boolean).join(' — ').slice(0, 180);
 }

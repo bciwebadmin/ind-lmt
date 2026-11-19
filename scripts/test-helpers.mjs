@@ -1087,6 +1087,75 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('pw: app gates on mustChangePassword and the modal offers both modes', /if \(mustChangePassword\) \{/.test(app) && /'Set it myself'/.test(app) && /'Email a temporary password'/.test(app));
 }
 
+/* ---------- Telematics: Service Due (Nov 19, 2026) ---------- */
+{
+  const { createRequire } = await import('node:module');
+  const I = createRequire(import.meta.url)('../functions/telematicsIntakeRules.js');
+  const TR = createRequire(import.meta.url)('../functions/telematicsRules.js');
+  const T = await import('../src/lib/telematics.js');
+  const X = await import('../src/lib/telematicsStats.js');
+  const A = await import('../src/lib/access.js');
+  const BR = ['Anderson', 'Columbus', 'Ellettsville', 'Indy', 'Indy North'];
+  const sx1 = readFileSync(join(root, 'scripts/fixtures/telematics-service-email-1.html'), 'utf8');
+  const sx2 = readFileSync(join(root, 'scripts/fixtures/telematics-service-email-2.html'), 'utf8');
+  const fx1 = readFileSync(join(root, 'scripts/fixtures/telematics-fault-email-1.html'), 'utf8');
+
+  const s1 = I.parseBobcatEmail({ subject: 'Fw: 1500 Hr Service Due - SAMPLE TURF &amp; GRADING LLC - b4sb00001 - T66 ', html: sx1 }, BR);
+  const b1 = s1.alert || {};
+  check('service: forwarded email is read as service due', s1.ok && s1.type === 'service' && b1.kind === 'service');
+  check('service: machine, hours, interval, kit', b1.serial === 'B4SB00001' && b1.model === 'T66' && b1.hours === 1460.2
+    && b1.service.interval === 1500 && b1.service.kitNumber === '7400001' && b1.service.pmEndDate === '' && b1.service.pmEndHours === '');
+  check('service: came-due time in CST', b1.service.dueAt === '2026-11-18T19:12:00.000Z', b1.service && b1.service.dueAt);
+  check('service: customer, owner, Columbus branch (forwarder signature ignored)', b1.customer.name === 'SAMPLE TURF & GRADING LLC' && b1.customer.phone === '+1 317 555 0142'
+    && b1.customer.ownerContact === 'Jordan Sample' && b1.customer.ownerEmail === 'jordan@example.com' && b1.branch === 'Columbus' && b1.location.lat === 39.4);
+  const s2 = I.parseBobcatEmail({ subject: 'Fw: 1000 Hr Service Due - b5w500002 - E40', html: sx2 }, BR);
+  const b2 = s2.alert || {};
+  check('service: no customer section, blank kit, Ellettsville (AR fallback list)', s2.ok && b2.serial === 'B5W500002' && b2.customer.name === '' && b2.service.kitNumber === ''
+    && b2.service.interval === 1000 && b2.branch === 'Ellettsville');
+  check('service: AR numbers for Ellettsville and Columbus', I.branchFromDealer({ name: 'odd', ar: '2000007727' }, BR) === 'Ellettsville' && I.branchFromDealer({ name: 'odd', ar: '2000007728' }, BR) === 'Columbus');
+  check('service: customer from the subject when the body has none', (I.parseServiceEmail({ subject: 'FW: 750 Hr Service Due - ACME - B4SB12345 - T66', text: 'Asset Information\nSerial Number: B4SB12345\nService Information\nNext Maintenance Interval: 750' }, BR).alert || {}).customer.name === 'ACME');
+  check('service: no interval anywhere = unreadable', I.parseBobcatEmail({ subject: 'Service Due', text: 'coming due for service\nAsset Information\nSerial Number: B4SB12345' }, BR).reason === 'unreadable');
+  const f1 = I.parseBobcatEmail({ subject: 'Fw: Critical Fault Code - ACME - x - T770 T4', html: '<p>Thanks,</p><p>Someone</p><hr><p>From: Bobcat Company</p>' + fx1 }, BR);
+  check('service: a forwarded fault email is still a fault', f1.ok && f1.type === 'fault' && f1.alert.kind === 'fault' && f1.alert.fault.code === 'M0217');
+  check('service: other mail is not-bobcat', I.parseBobcatEmail({ subject: 'Lunch?', text: 'noon' }, BR).reason === 'not-bobcat');
+
+  // Cases
+  const sc = I.newCaseFromAlert(b1, { now: 'N', messageId: 'm1' });
+  check('service: new case on Service Due, always New, no code level', sc.kind === 'service' && sc.status === 'new' && !sc.codeLevel && !sc.fault && sc.service.interval === 1500
+    && sc.alerts[0].interval === 1500 && sc.branch === 'Columbus' && sc.history[0].kind === 'service');
+  const fc = { id: 'f', serial: 'B4SB00001', status: 'working', createdAt: '2026-11-01' };
+  const sv = { id: 's', kind: 'service', serial: 'B4SB00001', status: 'new', createdAt: '2026-11-02' };
+  check('service: never joins a fault case, and a fault never joins a service case', I.caseForAlert([fc], b1) === null && I.caseForAlert([sv], { serial: 'B4SB00001', kind: 'fault', fault: { code: 'M1' } }) === null);
+  check('service: joins the machine\'s open service case', I.caseForAlert([fc, sv], b1).id === 's' && I.caseForAlert([{ ...sv, status: 'completed' }], b1) === null);
+  check('service: label', I.serviceLabel(sc) === '1500 hr service' && T.serviceLabel(sc) === '1500 hr service' && T.serviceLabel({}) === 'Service');
+
+  // Front end
+  check('service: kinds', T.caseKind(sc) === 'service' && T.caseKind({}) === 'fault' && T.caseKind({ kind: 'fault' }) === 'fault');
+  check('service: raised-at and sorting use the due date', T.caseRaisedAt(sc) === '2026-11-18T19:12:00.000Z' && T.caseRaisedAt({ createdAt: 'C' }) === 'C' && T.sortCases([{ id: 'a', service: { dueAt: '2026-11-01' } }, { id: 'b', fault: { startAt: '2026-11-03' } }])[0].id === 'b');
+  check('service: search finds interval and kit', T.caseMatchesQuery(sc, '1500 hr') && T.caseMatchesQuery(sc, '7400001') && !T.caseMatchesQuery(sc, '2000 hr'));
+  const m = T.buildManualCase({ kind: 'service', customerName: 'X', serial: 'b4sb12345', interval: '750', kitNumber: '7402486' }, 'u', 'N');
+  check('service: manual case', !m.errors.length && m.doc.kind === 'service' && m.doc.service.interval === 750 && m.doc.service.kitNumber === '7402486' && !m.doc.fault);
+  check('service: manual case needs an interval', T.buildManualCase({ kind: 'service', customerName: 'X', serial: 'B4SB12345' }, 'u', 'N').errors.some(e => /interval/.test(e)));
+  check('service: manual fault cases still get kind fault', T.buildManualCase({ customerName: 'X', serial: 'B4SB12345', code: 'M0217' }, 'u', 'N').doc.kind === 'fault');
+  check('service: own lost reasons, accepted by loseChange', T.lostReasonsFor(sc).includes('Customer does their own maintenance') && !T.lostReasonsFor({}).includes('Customer does their own maintenance')
+    && T.loseChange({ reason: 'Customer does their own maintenance' }, 'u', 'N').patch.status === 'lost');
+  check('service: hand-off subject names the interval', TR.handoffSubject({ ...sc, outcome: { tier: 'shop' } }) === 'Telematics: Shop (in-house) — SAMPLE TURF & GRADING LLC — T66 B4SB00001 — 1500 hr service due');
+  check('service: a Telematics view, telematics users only', A.TELEMATICS_VIEWS.includes(A.TELEMATICS_SERVICE_VIEW) && A.workspaceOfView(A.TELEMATICS_SERVICE_VIEW) === 'telematics'
+    && A.canOpenView(A.TELEMATICS_SERVICE_VIEW, { role: 'user', leadAccess: false, telematicsAccess: true }, []) && !A.canOpenView(A.TELEMATICS_SERVICE_VIEW, { role: 'user' }, []));
+
+  // Reports
+  const won = (o) => ({ status: 'completed', outcome: { result: 'won', tier: 'shop' }, workOrder: { number: 'M1' }, ...o });
+  const rc = [
+    { kind: 'service', service: { interval: 1500 }, ...won({}) },
+    { kind: 'service', service: { interval: 1500 }, status: 'lost' },
+    { kind: 'service', service: { interval: 500 }, status: 'new' },
+    { fault: { code: 'M0217' }, status: 'new' }
+  ];
+  check('reports: kind filter', X.ofKind(rc, 'service').length === 3 && X.ofKind(rc, 'fault').length === 1 && X.ofKind(rc, 'all').length === 4);
+  const ti = X.topIntervals(rc);
+  check('reports: service due by interval', ti.length === 2 && ti[0].interval === 1500 && ti[0].cases === 2 && ti[0].won === 1 && ti[0].winRate === 0.5 && ti[0].workOrders === 1 && ti[1].winRate === null);
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
