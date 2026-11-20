@@ -580,8 +580,9 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
   - **No Close on Critical:** `canCloseCase` — Critical (incl. repeats) is
     only Won or Lost; **Service Due has no Close at all** (and no "Closed"
     archive filter).
-  - **Call log:** "I called — Talked / Voicemail / No answer / Wrong number"
-    + optional note → a note with `call: { result }` (`callEntry`). Moves New
+  - **Call log** (its own card on the right, under Outcome): "I called —
+    Talked / Voicemail / No answer / Wrong number" + optional note; the last 5
+    calls are listed there, and every call also shows in Notes & activity → a note with `call: { result }` (`callEntry`). Moves New
     → Working, counts as first response, shows in the hand-off email.
   - Code summaries from Tanner's log were HTML-escaped (`&quot;`): fixed in
     the seed, and `cleanCodeDoc` cleans saved ones as they're read.

@@ -6359,8 +6359,10 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
   // Service Due: only Won or Lost. Critical faults (repeats too): no Close.
   const closable = canCloseCase(c, codesById);
   const [callResult, setCallResult] = useState('');
+  const [callNote, setCallNote] = useState('');
+  const callLog = useMemo(() => (c.notes || []).filter(n => n && n.call).sort((a, b) => String(b.at).localeCompare(String(a.at))), [c.notes]);
   const calls = callCount(c);
-  const logCall = async () => { if (await run(() => onLogCall({ result: callResult, text: note }))) { setNote(''); setCallResult(''); } };
+  const logCall = async () => { if (await run(() => onLogCall({ result: callResult, text: callNote }))) { setCallNote(''); setCallResult(''); } };
   const timeline = [
     // The repeat move is told by its note (shown in red); skip the bare event.
     ...(c.history || []).filter(e => e.type !== 'repeat_critical').map(e => ({ ...e, kind: 'event' })),
@@ -6460,24 +6462,13 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
             {!loc.address && !loc.city && !maps && <div className="text-sm text-stone-400 py-1">No location on this case.</div>}
           </CaseCard>
 
-          <CaseCard title="Calls & notes" action={calls ? <span className="text-[11px] text-stone-500">{calls} call{calls === 1 ? '' : 's'} logged</span> : null}>
+          <CaseCard title="Notes & activity">
             <div className="py-2 space-y-2">
-              <div className="flex flex-wrap items-center gap-1.5" role="radiogroup" aria-label="Call result">
-                <span className="text-xs font-semibold text-stone-600 mr-1 flex items-center gap-1"><Phone size={12}/> I called —</span>
-                {CALL_RESULTS.map(r => (
-                  <button key={r} type="button" role="radio" aria-checked={callResult === r} onClick={() => setCallResult(callResult === r ? '' : r)}
-                    className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${callResult === r ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'}`}>{r}</button>
-                ))}
-              </div>
               <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
-                placeholder={callResult ? 'Notes from the call (optional)' : status === 'new' ? 'A note — logging a call or a note moves the case to Working' : 'A note'}
+                placeholder={status === 'new' ? 'A note — adding one moves the case to Working' : 'A note'}
                 className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
-              <div className="flex gap-2">
-                <button onClick={logCall} disabled={busy || !callResult}
-                  className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 disabled:bg-stone-300 text-white text-sm font-medium rounded-md flex items-center gap-1.5"><Phone size={13}/> Log call</button>
-                <button onClick={addNote} disabled={busy || !note.trim() || !!callResult}
-                  className="px-3 py-1.5 bg-stone-900 hover:bg-stone-800 disabled:bg-stone-300 text-white text-sm font-medium rounded-md">Add note</button>
-              </div>
+              <button onClick={addNote} disabled={busy || !note.trim()}
+                className="px-3 py-1.5 bg-stone-900 hover:bg-stone-800 disabled:bg-stone-300 text-white text-sm font-medium rounded-md">Add note</button>
             </div>
             <div className="divide-y divide-stone-100">
               {timeline.map(e => (
@@ -6577,6 +6568,37 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
                 </button>
               )}
             </div>
+          </CaseCard>
+
+          {/* Call log (Nov 20, Erin): right under Outcome. */}
+          <CaseCard title="Call log" action={calls ? <span className="text-[11px] text-stone-500">{calls} call{calls === 1 ? '' : 's'}</span> : null}>
+            <div className="py-2 space-y-2">
+              <div className="text-xs font-semibold text-stone-600 flex items-center gap-1"><Phone size={12}/> I called —</div>
+              <div className="grid grid-cols-2 gap-1.5" role="radiogroup" aria-label="Call result">
+                {CALL_RESULTS.map(r => (
+                  <button key={r} type="button" role="radio" aria-checked={callResult === r} onClick={() => setCallResult(callResult === r ? '' : r)}
+                    className={`px-2 py-1.5 rounded-md text-xs font-semibold border text-center ${callResult === r ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'}`}>{r}</button>
+                ))}
+              </div>
+              <textarea value={callNote} onChange={e => setCallNote(e.target.value)} rows={2} aria-label="Call notes"
+                placeholder="Notes from the call (optional)"
+                className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
+              <button onClick={logCall} disabled={busy || !callResult}
+                className={`${btn} w-full bg-brand-600 hover:bg-brand-700 disabled:bg-stone-300 text-white`}><Phone size={13}/> Log call</button>
+              {status === 'new' && <div className="text-[11px] text-stone-500">Logging a call moves the case to Working.</div>}
+            </div>
+            {callLog.length > 0 && (
+              <div className="divide-y divide-stone-100 border-t border-stone-100">
+                {callLog.slice(0, 5).map(n => (
+                  <div key={n.id} className="py-2 text-sm">
+                    <div className="font-semibold text-stone-900">{n.call.result}</div>
+                    <div className="text-[11px] text-stone-500">{fmtWhen(n.at)} · {who(n.by)}</div>
+                    {n.text && <div className="text-xs text-stone-700 whitespace-pre-wrap mt-0.5">{n.text}</div>}
+                  </div>
+                ))}
+                {callLog.length > 5 && <div className="py-2 text-[11px] text-stone-500">{callLog.length - 5} earlier call{callLog.length - 5 === 1 ? '' : 's'} in Notes &amp; activity.</div>}
+              </div>
+            )}
           </CaseCard>
         </div>
       </div>
