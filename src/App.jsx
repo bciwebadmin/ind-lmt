@@ -57,6 +57,7 @@ import {
 } from './lib/telematicsStats';
 import { setErrorContext } from './lib/errorReporter';
 import { passwordProblem, newPasswordProblem, changePasswordError } from './lib/password';
+import { PAGE_SIZE_OPTIONS, DEFAULT_PAGE_SIZE, clampPageSize, pageCount, clampPage, pageOf, pageContaining } from './lib/paging';
 
 import {
   signInWithCredentials, signOutCurrent, watchAuthState,
@@ -3780,6 +3781,7 @@ function ArchivedLeadsView({ leads, config, onSelect }) {
       return new Date(b._closedAt) - new Date(a._closedAt);
     });
   }, [enriched]);
+  const paged = usePaged(sorted);
 
   // Pre-compute counts for each window so the dropdown can show them
   const windowCounts = useMemo(() => {
@@ -3908,7 +3910,7 @@ function ArchivedLeadsView({ leads, config, onSelect }) {
                 </tr>
               </thead>
               <tbody>
-                {sorted.map(lead => (
+                {paged.rows.map(lead => (
                   <tr key={lead.id}
                       onClick={() => onSelect(lead)}
                       className="border-t border-stone-100 hover:bg-stone-50 cursor-pointer">
@@ -3942,6 +3944,7 @@ function ArchivedLeadsView({ leads, config, onSelect }) {
           </div>
         </div>
       )}
+      {paged.controls}
 
       {showClearModal && (
         <ClearArchivedLeadsModal
@@ -4142,18 +4145,18 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
   );
   const [selected, setSelected] = useState(new Set());
 
-  // Pagination — page size defaults to 50 (reads well on desktop, fast on mobile).
-  // Persisted per-tab in localStorage so a user's preferred page size sticks
-  // across navigations within a session.
+  // Pagination — at most 50 rows a page (Erin, Nov 2026; src/lib/paging.js).
+  // Persisted in localStorage so a user's preferred page size sticks; an old
+  // saved 100 / 200 comes back as 50.
   const [pageSize, setPageSize] = useState(() => {
     try {
-      const stored = Number(localStorage.getItem('lmt.leadsPageSize'));
-      return [25, 50, 100, 200].includes(stored) ? stored : 50;
-    } catch { return 50; }
+      const stored = localStorage.getItem(PAGE_SIZE_KEY);
+      return stored ? clampPageSize(stored) : DEFAULT_PAGE_SIZE;
+    } catch { return DEFAULT_PAGE_SIZE; }
   });
   const [page, setPage] = useState(1);
   useEffect(() => {
-    try { localStorage.setItem('lmt.leadsPageSize', String(pageSize)); } catch {}
+    try { localStorage.setItem(PAGE_SIZE_KEY, String(pageSize)); } catch {}
   }, [pageSize]);
 
   // Consume the chip prefilter signal: when set, apply the matching local filters,
@@ -4770,7 +4773,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
               pageSize={pageSize}
               totalCount={filtered.length}
               onPageChange={(p) => { setPage(p); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
-              onPageSizeChange={(s) => { setPageSize(s); setPage(1); }}
+              onPageSizeChange={(s) => { setPageSize(clampPageSize(s)); setPage(1); }}
             />
           )}
         </>
@@ -4780,13 +4783,16 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
 }
 
 /* ===================== PAGINATION CONTROLS =====================
- * Compact pagination bar for the leads table.
+ * Compact pagination bar for every list (leads, Fault Codes, Service Due, the
+ * Code List, the Back Office lists, archived leads). At most 50 rows a page
+ * (Erin, Nov 2026) — sizes from src/lib/paging.js. Lists other than Leads use
+ * usePaged() below.
  *
  * Design goals:
  *   - Show the current window ("Showing 51–100 of 347") — the most useful info
  *   - Prev / Next as the primary controls (touch-friendly, keyboard-friendly)
  *   - First / Last jumps for long lists
- *   - Page-size picker so heavy users can crank it up to 100 or 200
+ *   - Page-size picker: 25 or 50 (50 is the most a page ever shows)
  *   - Numbered pages with ellipses when there are many pages
  */
 function PaginationControls({ page, totalPages, pageSize, totalCount, onPageChange, onPageSizeChange }) {
@@ -4828,10 +4834,7 @@ function PaginationControls({ page, totalPages, pageSize, totalCount, onPageChan
             value={pageSize}
             onChange={e => onPageSizeChange(Number(e.target.value))}
             className="text-xs px-2 py-1 border border-stone-200 rounded bg-white">
-            <option value={25}>25</option>
-            <option value={50}>50</option>
-            <option value={100}>100</option>
-            <option value={200}>200</option>
+            {PAGE_SIZE_OPTIONS.map(n => <option key={n} value={n}>{n}</option>)}
           </select>
         </div>
       </div>
@@ -4900,6 +4903,43 @@ function PaginationControls({ page, totalPages, pageSize, totalCount, onPageChan
       </div>
     </div>
   );
+}
+
+// The page-size choice is shared by every list.
+const PAGE_SIZE_KEY = 'lmt.leadsPageSize';
+
+// Paging for a list: { rows: this page's rows, controls: the pager (null when
+// it all fits on one page) }. Back to page 1 whenever `resetKey` changes (a
+// new tab, filter or search). `focusId` (a record opened from search) jumps to
+// the page holding that row, once.
+function usePaged(list, { resetKey = '', focusId = null, idOf = (r) => r.id } = {}) {
+  const [pageSize, setPageSizeState] = useState(() => {
+    try { const v = localStorage.getItem(PAGE_SIZE_KEY); return v ? clampPageSize(v) : DEFAULT_PAGE_SIZE; }
+    catch { return DEFAULT_PAGE_SIZE; }
+  });
+  const [page, setPage] = useState(1);
+  const jumped = useRef(null);
+  useEffect(() => { setPage(1); }, [resetKey]);
+  useEffect(() => {
+    if (!focusId) { jumped.current = null; return; }
+    if (jumped.current === focusId) return;
+    const i = list.findIndex(r => idOf(r) === focusId);
+    if (i >= 0) { jumped.current = focusId; setPage(pageContaining(i, pageSize)); }
+  }, [focusId, list, pageSize]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const total = list.length;
+  const cur = clampPage(page, total, pageSize);
+  const rows = useMemo(() => pageOf(list, cur, pageSize), [list, cur, pageSize]);
+  const setPageSize = (n) => {
+    const v = clampPageSize(n);
+    setPageSizeState(v); setPage(1);
+    try { localStorage.setItem(PAGE_SIZE_KEY, String(v)); } catch { /* storage blocked */ }
+  };
+  const controls = total > pageSize ? (
+    <PaginationControls page={cur} totalPages={pageCount(total, pageSize)} pageSize={pageSize} totalCount={total}
+      onPageChange={(p) => { setPage(p); try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch { /* old browser */ } }}
+      onPageSizeChange={setPageSize}/>
+  ) : null;
+  return { rows, controls, page: cur, pageSize };
 }
 
 /* ===================== MOBILE LEAD CARD ===================== */
@@ -5988,6 +6028,7 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
   }, [inTab, codesById]);   // eslint-disable-line react-hooks/exhaustive-deps
   const rows = useMemo(() => sortCases(inTab.filter(c => isService || levelFilter === 'all' || levelOf(c) === levelFilter)),
     [inTab, levelFilter, codesById]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const paged = usePaged(rows, { resetKey: `${tab}|${archiveFilter}|${levelFilter}|${branchFilter}|${q}` });
 
   if (error) {
     return (
@@ -6079,7 +6120,7 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
-                {rows.map(c => {
+                {paged.rows.map(c => {
                   const st = rowStyle(c);
                   return (
                   <tr key={c.id} onClick={() => onOpen(c)} className={`cursor-pointer ${st.row} hover:bg-stone-100`}>
@@ -6112,7 +6153,7 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
             </table>
           </div>
           <div className="md:hidden space-y-2.5">
-            {rows.map(c => (
+            {paged.rows.map(c => (
               <button key={c.id} type="button" onClick={() => onOpen(c)}
                 className={`w-full text-left p-3 border border-stone-200 border-l-4 ${rowStyle(c).bar} ${rowStyle(c).row} rounded-lg space-y-1`}>
                 <div className="flex items-start justify-between gap-2">
@@ -6129,6 +6170,7 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
               </button>
             ))}
           </div>
+          {paged.controls}
         </>
       )}
 
@@ -7268,6 +7310,7 @@ function TelematicsCodesView({ codes, error, users = [], isAdmin = false, onSetL
   const rows = useMemo(
     () => sortCodes(list.filter(d => codeMatchesFilter(d, filter) && codeMatchesQuery(d, q))),
     [list, filter, q]);
+  const paged = usePaged(rows, { resetKey: `${filter}|${q}`, idOf: (d) => d.code });
 
   if (error) {
     return (
@@ -7390,7 +7433,7 @@ function TelematicsCodesView({ codes, error, users = [], isAdmin = false, onSetL
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
-                {rows.map(d => (
+                {paged.rows.map(d => (
                   <tr key={d.code} className={d.reviewed === true ? '' : 'bg-amber-50/40'}>
                     <td className="px-4 py-2.5 font-mono text-xs font-semibold text-stone-900 whitespace-nowrap">{d.code}</td>
                     <td className="px-4 py-2.5">
@@ -7413,7 +7456,7 @@ function TelematicsCodesView({ codes, error, users = [], isAdmin = false, onSetL
 
           {/* Mobile cards */}
           <div className="md:hidden space-y-2.5">
-            {rows.map(d => (
+            {paged.rows.map(d => (
               <div key={d.code} className={`p-3 border rounded-lg space-y-2 ${d.reviewed === true ? 'bg-white border-stone-200' : 'bg-amber-50/40 border-amber-200'}`}>
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="font-mono text-xs font-semibold text-stone-900">{d.code}</span>
@@ -7426,6 +7469,7 @@ function TelematicsCodesView({ codes, error, users = [], isAdmin = false, onSetL
               </div>
             ))}
           </div>
+          {paged.controls}
         </>
       )}
     </div>
@@ -12253,6 +12297,7 @@ function SubmittalsView({ leads, config, currentUser, onOpen, onNew }) {
   const rows = useMemo(() => leads
     .filter(l => show === 'all' || submittalStatus(l) === show)
     .sort((a, b) => (b.salesRequest.submittedAt || '').localeCompare(a.salesRequest.submittedAt || '')), [leads, show]);
+  const paged = usePaged(rows, { resetKey: show });
   return (
     <div>
       <RecordListTabs value={show} onChange={setShow} onNew={onNew} newLabel="New Sales Submittal"
@@ -12276,7 +12321,7 @@ function SubmittalsView({ leads, config, currentUser, onOpen, onNew }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map(l => {
+              {paged.rows.map(l => {
                 const sr = l.salesRequest;
                 const rep = userMap[l.assignedTo] && !userMap[l.assignedTo].isSystem ? userMap[l.assignedTo] : userMap[sr.submittedBy];
                 return (
@@ -12299,6 +12344,7 @@ function SubmittalsView({ leads, config, currentUser, onOpen, onNew }) {
           </table>
         </div>
       )}
+      {paged.controls}
     </div>
   );
 }
@@ -13082,6 +13128,7 @@ function RequestsView({ requests, leads, config, currentUser, onUpdate, onOpenLe
       ? (a.dateNeeded || '9999').localeCompare(b.dateNeeded || '9999')
       : (b.dateNeeded || '').localeCompare(a.dateNeeded || ''));
   }, [requests, show]);
+  const paged = usePaged(rows, { resetKey: show, focusId });
 
   return (
     <div>
@@ -13107,7 +13154,7 @@ function RequestsView({ requests, leads, config, currentUser, onUpdate, onOpenLe
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => {
+              {paged.rows.map(r => {
                 const lead = r.leadId ? leadMap[r.leadId] : null;
                 const overdue = isOpen(r) && r.dateNeeded && r.dateNeeded < today;
                 const expanded = openId === r.id;
@@ -13154,6 +13201,7 @@ function RequestsView({ requests, leads, config, currentUser, onUpdate, onOpenLe
           </table>
         </div>
       )}
+      {paged.controls}
     </div>
   );
 }
@@ -13296,7 +13344,8 @@ function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLe
   const users = config.users || [];
   const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
   const leadMap = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
-  const rows = tradeIns.filter(t => show === 'all' || tradeInStatus(t) === show);
+  const rows = useMemo(() => tradeIns.filter(t => show === 'all' || tradeInStatus(t) === show), [tradeIns, show]);
+  const paged = usePaged(rows, { resetKey: show, focusId });
   const count = (s) => tradeIns.filter(t => tradeInStatus(t) === s).length;
   return (
     <div>
@@ -13320,7 +13369,7 @@ function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLe
               </tr>
             </thead>
             <tbody>
-              {rows.map(t => {
+              {paged.rows.map(t => {
                 const expanded = openId === t.id;
                 const status = tradeInStatus(t);
                 return (
@@ -13360,6 +13409,7 @@ function TradeInsView({ tradeIns, leads, config, currentUser, onUpdate, onOpenLe
           </table>
         </div>
       )}
+      {paged.controls}
     </div>
   );
 }
@@ -13541,7 +13591,8 @@ function FinanceView({ deals, leads, config, currentUser, onUpdate, onOpenLead, 
   const leadMap = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
   const today = todayYmd();
   const isOpen = (d) => !FINANCE_CLOSED_STATUSES.includes(d.admin?.dealStatus);
-  const rows = deals.filter(d => show === 'all' || (show === 'open' ? isOpen(d) : !isOpen(d)));
+  const rows = useMemo(() => deals.filter(d => show === 'all' || (show === 'open' ? isOpen(d) : !isOpen(d))), [deals, show]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const paged = usePaged(rows, { resetKey: show, focusId });
   const flagged = deals.filter(d => isOpen(d) && financeAudit(d, today).length).length;
   return (
     <div>
@@ -13571,7 +13622,7 @@ function FinanceView({ deals, leads, config, currentUser, onUpdate, onOpenLead, 
               </tr>
             </thead>
             <tbody>
-              {rows.map(d => {
+              {paged.rows.map(d => {
                 const expanded = openId === d.id;
                 const st = d.admin?.dealStatus || 'Submitted';
                 const audit = isOpen(d) ? financeAudit(d, today) : [];
@@ -13608,6 +13659,7 @@ function FinanceView({ deals, leads, config, currentUser, onUpdate, onOpenLead, 
           </table>
         </div>
       )}
+      {paged.controls}
     </div>
   );
 }

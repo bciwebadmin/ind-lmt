@@ -1171,6 +1171,21 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('inbox: no address set = nothing is ours', !W.isAddressedTo({ to: ['wip@eakooxena.resend.app'] }, '') && !W.isAddressedTo({}, IN));
 }
 
+/* ---------- Paging: at most 50 rows a page (Nov 20, 2026) ---------- */
+{
+  const P = await import('../src/lib/paging.js');
+  const list = Array.from({ length: 123 }, (_, i) => i);
+  check('paging: never more than 50', P.MAX_PAGE_SIZE === 50 && Math.max(...P.PAGE_SIZE_OPTIONS) === 50 && P.pageOf(list, 1, 200).length === 50 && P.pageOf(list, 1, 50).length === 50);
+  check('paging: page size clamps', P.clampPageSize(100) === 50 && P.clampPageSize('200') === 50 && P.clampPageSize(25) === 25 && P.clampPageSize(30) === 25
+    && P.clampPageSize(10) === 25 && P.clampPageSize('junk') === 50 && P.clampPageSize(0) === 50 && P.clampPageSize(null) === 50);
+  check('paging: pages and slices', P.pageCount(123, 50) === 3 && P.pageCount(0, 50) === 1 && P.pageOf(list, 3, 50).length === 23 && P.pageOf(list, 3, 50)[0] === 100
+    && P.pageOf(list, 2, 25)[0] === 25);
+  check('paging: out-of-range pages clamp', P.clampPage(9, 123, 50) === 3 && P.clampPage(0, 123, 50) === 1 && P.clampPage(-2, 0, 50) === 1 && P.pageOf(list, 9, 50)[0] === 100);
+  check('paging: the page holding a row', P.pageContaining(0, 50) === 1 && P.pageContaining(49, 50) === 1 && P.pageContaining(50, 50) === 2 && P.pageContaining(-1, 50) === 1);
+  check('paging: every list uses it, no 100/200 option left', (app.match(/\{paged\.controls\}/g) || []).length >= 7 && /PaginationControls/.test(app)
+    && !/<option value=\{100\}>|<option value=\{200\}>/.test(app));
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -299,6 +299,20 @@ not code. Browser stacks are minified — `scripts/map-stack.mjs` maps them to
 Keep `PROBES` in step with the `onCall`/`onRequest` exports — a test fails if
 one is added without a probe or with the wrong region.
 
+## Lists show at most 50 rows a page (Nov 2026, Erin)
+
+Every list is paged: Leads (all tabs, Junk), Archived leads, Fault Codes,
+Service Due, the Code List, Sales Submittals, Sales Requests, Trade-Ins and
+Finance — desktop tables and phone cards alike. Sizes in `src/lib/paging.js`
+(pure, tested): 25 or 50, **never more than 50**; an old saved 100 / 200 comes
+back as 50. LeadsView keeps its own page state; every other list uses
+`usePaged(rows, { resetKey, focusId })` + `{paged.controls}` (page 1 again when
+the tab / filter / search in `resetKey` changes; a record opened from search
+jumps to its page). The choice is shared (`localStorage['lmt.leadsPageSize']`).
+A new list must use `usePaged` — a test counts the pagers. Not paged on
+purpose: Reports / Telematics Report tables (top-N summaries), To Do, Users,
+the CSV import preview, a lead's own record tabs.
+
 ## Navigation
 
 **Dashboards (Nov 2026).** The left menu shows one dashboard at a time —
