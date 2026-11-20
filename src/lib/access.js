@@ -79,7 +79,8 @@ export const WORKSPACE_PICKER_VIEW = 'workspace-picker';
 export const WORKSPACES = [
   { id: 'leads',      label: 'Lead Management', hint: 'New leads through completed deals, To Do and reports' },
   { id: 'backoffice', label: 'Back Office',     hint: 'Sales submittals, sales requests, finance and trade-ins' },
-  { id: 'telematics', label: 'Telematics',      hint: 'Critical fault codes, service due, the code list and follow-ups' }
+  // Shown as "Customer Asset Management" (Erin, Nov 20); the id stays 'telematics'.
+  { id: 'telematics', label: 'Customer Asset Management', hint: 'Fault codes, service due, the code list and follow-ups' }
 ];
 export const BACK_OFFICE_VIEWS = ['submittals', 'requests', 'finance', 'trade-ins'];
 const SHARED_VIEWS = ['users', 'settings', NO_ACCESS_VIEW, WORKSPACE_PICKER_VIEW];

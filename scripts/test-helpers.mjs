@@ -997,7 +997,7 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('dashboards: each opens on a view its users can open', A.WORKSPACES.every(w => [admin].every(u => A.canOpenView(A.workspaceHomeView(w.id, 'stage-incoming'), u, ['reports', 'users', 'settings'])))
     && A.canOpenView(A.workspaceHomeView('backoffice', 'stage-incoming'), rep, []) && A.canOpenView(A.workspaceHomeView('telematics', 'stage-incoming'), tele, []));
   check('dashboards: the picker only with a choice to make', A.canOpenView(A.WORKSPACE_PICKER_VIEW, admin, []) && A.canOpenView(A.WORKSPACE_PICKER_VIEW, rep, []) && !A.canOpenView(A.WORKSPACE_PICKER_VIEW, tele, []));
-  check('app: the sidebar groups are tagged with a dashboard', /\{ ws: 'telematics', title: 'Telematics'/.test(app) && /\{ ws: 'backoffice', title: 'Back Office'/.test(app) && /\{ ws: '\*', title: 'Admin'/.test(app));
+  check('app: the sidebar groups are tagged with a dashboard', /\{ ws: 'telematics', title: 'Customer Asset Management'/.test(app) && /\{ ws: 'backoffice', title: 'Back Office'/.test(app) && /\{ ws: '\*', title: 'Admin'/.test(app));
 }
 
 /* ---------- Telematics dashboard: the numbers (Nov 2026) ---------- */
@@ -1184,6 +1184,51 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('paging: the page holding a row', P.pageContaining(0, 50) === 1 && P.pageContaining(49, 50) === 1 && P.pageContaining(50, 50) === 2 && P.pageContaining(-1, 50) === 1);
   check('paging: every list uses it, no 100/200 option left', (app.match(/\{paged\.controls\}/g) || []).length >= 7 && /PaginationControls/.test(app)
     && !/<option value=\{100\}>|<option value=\{200\}>/.test(app));
+}
+
+/* ---------- Customer Asset Management updates (Nov 20, 2026) ---------- */
+{
+  const { createRequire } = await import('node:module');
+  const I = createRequire(import.meta.url)('../functions/telematicsIntakeRules.js');
+  const T = await import('../src/lib/telematics.js');
+  const A = await import('../src/lib/access.js');
+  const S = await import('../src/lib/telematicsSeed.js');
+  const NOW = '2026-11-20T15:00:00.000Z';
+  const ago = (h) => new Date(Date.parse(NOW) - h * 3600e3).toISOString();
+  const alert = { kind: 'fault', serial: 'B4SB12345', fault: { code: 'M0117' } };
+  const mk = (alerts, extra = {}) => ({ serial: 'B4SB12345', status: 'new', alerts: alerts.map(([h, code]) => ({ at: ago(h), code })), ...extra });
+
+  check('repeat: settings copies agree', JSON.stringify(I.REPEAT_DEFAULTS) === JSON.stringify(T.REPEAT_DEFAULTS)
+    && [undefined, { repeat: { count: 5, days: 7 } }, { repeat: { count: 1, days: 0 } }, { repeat: { count: '4', days: 'x' } }].every(s => JSON.stringify(I.repeatSettings(s)) === JSON.stringify(T.repeatSettings(s))));
+  check('repeat: 3rd non-critical alert in 3 days → Critical', (I.repeatCritical({ cases: [mk([[10, 'M0117'], [50, 'M0117']])], alert, level: 'noncritical', now: NOW }) || {}).seen === 3);
+  check('repeat: only 2 → not yet', I.repeatCritical({ cases: [mk([[10, 'M0117']])], alert, level: 'noncritical', now: NOW }) === null);
+  check('repeat: older than the window does not count', I.repeatCritical({ cases: [mk([[10, 'M0117'], [80, 'M0117']])], alert, level: 'ignore', now: NOW }) === null);
+  check('repeat: a different code does not count', I.repeatCritical({ cases: [mk([[10, 'M0117'], [20, 'P1061-97']])], alert, level: 'noncritical', now: NOW }) === null);
+  check('repeat: another machine (same customer) does not count', I.repeatCritical({ cases: [mk([[10, 'M0117'], [20, 'M0117']], { serial: 'B4SB99999' })], alert, level: 'noncritical', now: NOW }) === null);
+  check('repeat: counts across the machine\'s cases', (I.repeatCritical({ cases: [mk([[10, 'M0117']]), mk([[30, 'M0117']], { status: 'closed' })], alert, level: 'ignore', now: NOW }) || {}).level === 'ignore');
+  check('repeat: critical codes and service never', I.repeatCritical({ cases: [mk([[1, 'M0117'], [2, 'M0117']])], alert, level: 'critical', now: NOW }) === null
+    && I.repeatCritical({ cases: [], alert: { kind: 'service', serial: 'X' }, level: 'noncritical', now: NOW }) === null);
+  check('repeat: settings change the rule', (I.repeatCritical({ cases: [mk([[100, 'M0117']])], alert, level: 'noncritical', now: NOW, settings: { repeat: { count: 2, days: 5 } } }) || {}).count === 2);
+  const rc = I.repeatCritical({ cases: [mk([[10, 'M0117'], [50, 'M0117']])], alert, level: 'noncritical', now: NOW });
+  check('repeat: the note says it is non-critical and why', /Moved to Critical/.test(I.repeatNoteText(rc)) && /3 times in 3 days/.test(I.repeatNoteText(rc)) && /Non-critical/.test(I.repeatNoteText(rc)));
+
+  const codes = { M0117: { code: 'M0117', level: 'noncritical', reviewed: true }, X1: { code: 'X1', level: 'ignore' } };
+  const fc = (code, h, extra = {}) => ({ fault: { code, startAt: ago(h) }, ...extra });
+  check('level: repeat overrides the Code List', T.caseLevel(fc('M0117', 1, { repeatCritical: rc }), codes) === 'critical' && T.caseLevel(fc('M0117', 1), codes) === 'noncritical' && T.caseLevel({ kind: 'service' }, codes) === null);
+  const order = T.sortFaultCases([fc('X1', 1, { id: 'ign' }), fc('M0117', 2, { id: 'nc' }), fc('ZZ9', 30, { id: 'crit-old' }), fc('ZZ9', 3, { id: 'crit-new' }), fc('M0117', 40, { id: 'rep', repeatCritical: rc })], codes).map(c => c.id);
+  check('sort: critical (repeats too) first, newest first within', JSON.stringify(order) === JSON.stringify(['crit-new', 'crit-old', 'rep', 'nc', 'ign']), JSON.stringify(order));
+  check('close: critical and repeat-critical can\'t close; service never', !T.canCloseCase(fc('ZZ9', 1), codes) && !T.canCloseCase(fc('M0117', 1, { repeatCritical: rc }), codes)
+    && T.canCloseCase(fc('M0117', 1), codes) && T.canCloseCase(fc('X1', 1), codes) && !T.canCloseCase({ kind: 'service' }, codes));
+
+  const call = T.callEntry({ result: 'Left a voicemail', text: ' back Tues ' }, 'u', NOW);
+  check('call log: entry with result and optional note', call.call.result === 'Left a voicemail' && call.text === 'back Tues' && call.by === 'u' && T.callEntry({ result: 'nope' }, 'u') === null
+    && T.callEntry({ result: 'No answer' }, 'u', NOW).text === '');
+  check('call log: count and email line', T.callCount({ notes: [call, { text: 'x' }, T.callEntry({ result: 'No answer' }, 'u', NOW)] }) === 2
+    && T.noteLine(call) === 'Call — Left a voicemail: back Tues' && T.noteLine({ text: 'hi' }) === 'hi');
+
+  check('codes: escaped text is cleaned', T.decodeEntities('Sensor &quot;B&quot; &amp; &#39;x&#39;') === 'Sensor "B" & \'x\'' && T.cleanCodeDoc({ summary: 'A &quot;B&quot;' }).summary === 'A "B"'
+    && !S.TELEMATICS_SEED_CODES.some(c => /&(quot|amp|#\d+);/.test(c.summary)));
+  check('rename: the dashboard is Customer Asset Management', A.WORKSPACES.find(w => w.id === 'telematics').label === 'Customer Asset Management');
 }
 
 console.log('');

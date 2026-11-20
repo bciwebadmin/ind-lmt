@@ -301,6 +301,45 @@ function caseForAlert(cases = [], alert) {
     || null;
 }
 
+/* ---------- Repeat codes (Nov 20, Erin) ----------
+   A Non-critical / Ignore code sent for the same serial `count` times within
+   `days` days moves the case to Critical. Counted across all of the machine's
+   fault cases (by when each alert arrived), this email included. Different
+   machines are never combined, even for the same customer.
+   REPEAT_DEFAULTS / repeatSettings are copies of src/lib/telematics.js. */
+const REPEAT_DEFAULTS = { count: 3, days: 3 };
+function repeatSettings(settings) {
+  const r = (settings && settings.repeat) || {};
+  const num = (v, d, min, max) => { const n = Number(v); return Number.isInteger(n) && n >= min && n <= max ? n : d; };
+  return { count: num(r.count, REPEAT_DEFAULTS.count, 2, 20), days: num(r.days, REPEAT_DEFAULTS.days, 1, 60) };
+}
+
+// → null, or { count, days, code, level, seen, at } to store as case.repeatCritical.
+function repeatCritical({ cases = [], alert, level, now, settings } = {}) {
+  if (!alert || alert.kind === 'service' || !alert.fault) return null;
+  if (level !== 'noncritical' && level !== 'ignore') return null;
+  const cfg = repeatSettings(settings);
+  const nowMs = new Date(now).getTime();
+  const since = nowMs - cfg.days * 864e5;
+  const code = String(alert.fault.code || '').toUpperCase();
+  const serial = String(alert.serial || '').toUpperCase();
+  let seen = 1;   // this email
+  for (const c of cases) {
+    if (!c || caseKindOf(c) !== 'fault' || String(c.serial || '').toUpperCase() !== serial) continue;
+    for (const a of (Array.isArray(c.alerts) ? c.alerts : [])) {
+      const t = new Date(a && a.at).getTime();
+      if (String((a && a.code) || '').toUpperCase() === code && Number.isFinite(t) && t >= since && t <= nowMs) seen++;
+    }
+  }
+  return seen >= cfg.count ? { count: cfg.count, days: cfg.days, code, level, seen, at: now } : null;
+}
+
+const LEVEL_WORD = { noncritical: 'Non-critical', ignore: 'Ignore' };
+function repeatNoteText(rc) {
+  return `Moved to Critical: Bobcat sent ${rc.code} for this machine ${rc.seen} times in ${rc.days} day${rc.days === 1 ? '' : 's'}. `
+    + `On the Code List it's ${LEVEL_WORD[rc.level] || rc.level} — it's critical here because it keeps repeating.`;
+}
+
 // Already seen this exact email (Zapier retries)?
 function isDuplicateMessage(cases = [], messageId) {
   if (!messageId) return false;
@@ -365,5 +404,6 @@ function newCaseFromAlert(alert, { level = 'critical', now, messageId = '', rece
 module.exports = {
   htmlToText, sectionsOf, parseBobcatDate, parseCodeLine, branchFromDealer, looksLikeFaultEmail,
   looksLikeServiceEmail, parseFaultEmail, parseServiceEmail, parseBobcatEmail, caseKindOf, serviceLabel,
-  caseForAlert, isDuplicateMessage, newCaseFromAlert, newServiceCaseFromAlert, KNOWN_AR
+  caseForAlert, isDuplicateMessage, newCaseFromAlert, newServiceCaseFromAlert, KNOWN_AR,
+  REPEAT_DEFAULTS, repeatSettings, repeatCritical, repeatNoteText
 };

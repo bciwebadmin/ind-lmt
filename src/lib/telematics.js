@@ -54,6 +54,60 @@ export function classifyCode(code, codesById = {}) {
   return { code: c, level, known: true, reviewed: doc.reviewed === true };
 }
 
+// Text from Tanner's log came HTML-escaped ("Sensor &quot;B&quot;"). Codes
+// already saved that way are cleaned when they're read (Erin, Nov 20).
+const ENT = { quot: '"', amp: '&', apos: "'", lt: '<', gt: '>', nbsp: ' ' };
+export function decodeEntities(s) {
+  return String(s == null ? '' : s).replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+    if (e[0] === '#') {
+      const n = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : m;
+    }
+    return ENT[e.toLowerCase()] ?? m;
+  });
+}
+export function cleanCodeDoc(d) {
+  return d && typeof d.summary === 'string' && d.summary.includes('&') ? { ...d, summary: decodeEntities(d.summary) } : d;
+}
+
+/* ---------- Repeat codes (Nov 20, Erin) ----------
+   A Non-critical / Ignore code that Bobcat sends for the same serial
+   `count` times within `days` days moves that case to Critical
+   (case.repeatCritical), with a note saying it's really non-critical.
+   Telematics Settings → Repeat codes; defaults 3 in 3 days.
+   KEEP IN STEP with functions/telematicsIntakeRules.js (a test compares). */
+export const REPEAT_DEFAULTS = { count: 3, days: 3 };
+export function repeatSettings(settings) {
+  const r = (settings && settings.repeat) || {};
+  const num = (v, d, min, max) => { const n = Number(v); return Number.isInteger(n) && n >= min && n <= max ? n : d; };
+  return { count: num(r.count, REPEAT_DEFAULTS.count, 2, 20), days: num(r.days, REPEAT_DEFAULTS.days, 1, 60) };
+}
+
+// A fault case's level as the board shows it: Critical when repeats moved it
+// there, otherwise the Code List's current level. Service cases have none.
+export function caseLevel(c, codesById = {}) {
+  if (!c || c.kind === 'service') return null;
+  if (c.repeatCritical) return 'critical';
+  return classifyCode(c.fault && c.fault.code, codesById).level;
+}
+
+// Critical cases (repeats included) can't be closed — only Won or Lost
+// (Erin, Nov 20). Service Due cases are only ever Won or Lost.
+export function canCloseCase(c, codesById = {}) {
+  if (!c || c.kind === 'service') return false;
+  return caseLevel(c, codesById) !== 'critical';
+}
+
+// Fault Codes order: Critical first (worked first — Erin), then Non-critical,
+// then Ignore; newest first within each.
+const LEVEL_RANK = { critical: 0, noncritical: 1, ignore: 2 };
+export function sortFaultCases(cases = [], codesById = {}) {
+  const t = (c) => String((c.fault && c.fault.startAt) || c.createdAt || '');
+  return [...cases].sort((a, b) =>
+    (LEVEL_RANK[caseLevel(a, codesById)] ?? 0) - (LEVEL_RANK[caseLevel(b, codesById)] ?? 0)
+    || t(b).localeCompare(t(a)));
+}
+
 // The fields a review writes: changing the level (or confirming it) marks the
 // code reviewed, by whom and when.
 export function reviewPatch(level, userId, now = new Date().toISOString()) {
@@ -332,6 +386,23 @@ export function noteEntry(text, userId, now = new Date().toISOString()) {
   const t = String(text || '').trim();
   if (!t) return null;
   return { id: `n_${now}_${Math.random().toString(36).slice(2, 7)}`, text: t.slice(0, 4000), at: now, by: userId || '' };
+}
+
+// Call log (Nov 20, Erin): Carter marks that he called, how it went, and an
+// optional note. Stored with the notes (`call: { result }`), so it shows in
+// the timeline, moves a New case to Working, and counts as a first response.
+export const CALL_RESULTS = ['Talked to the customer', 'Left a voicemail', 'No answer', 'Wrong number'];
+export function callEntry({ result, text = '' } = {}, userId, now = new Date().toISOString()) {
+  if (!CALL_RESULTS.includes(result)) return null;
+  return { id: `n_${now}_${Math.random().toString(36).slice(2, 7)}`, text: String(text || '').trim().slice(0, 4000), at: now, by: userId || '', call: { result } };
+}
+export function callCount(c) {
+  return ((c && c.notes) || []).filter(n => n && n.call).length;
+}
+// One line for a note, as the hand-off email shows it.
+export function noteLine(n) {
+  if (!n) return '';
+  return n.call ? `Call — ${n.call.result}${n.text ? `: ${n.text}` : ''}` : String(n.text || '');
 }
 
 // The hand-entered case (step 3 adds the email intake). Returns { errors, doc }.

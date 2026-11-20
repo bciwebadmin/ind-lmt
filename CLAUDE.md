@@ -561,6 +561,30 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
   many thousands). Chart colours: code levels keep red/blue/grey; others use
   the dataviz palette's validated blue (`#2a78d6`) and orange (`#eb6834`).
   Repair-complete time isn't measurable yet — the WIP lists open orders only.
+- **Nov 20 updates (Erin)** — the dashboard is shown as **Customer Asset
+  Management** (`WORKSPACES` label + sidebar group; the id, views, rules and
+  the Users-page "Telematics" access pill are unchanged).
+  - **Critical first:** Fault Codes sorts Critical (repeats included) before
+    Non-critical before Ignore, newest first within each (`sortFaultCases`).
+  - **Repeat codes:** a Non-critical / Ignore code sent for the same serial
+    `count` times in `days` days (Settings → Repeat codes, `settings.repeat`,
+    default 3 in 3; `repeatSettings` duplicated client/server, a test checks)
+    sets `case.repeatCritical { count, days, code, level, seen, at }` at
+    intake, adds a red system note (`notes[]`, `system: true`, kept out of the
+    hand-off email) saying it's really non-critical and why, and a
+    `repeat_critical` history entry (hidden in the timeline — the note tells
+    it). Counted across all of that machine's fault cases by alert arrival
+    time; machines are never combined, even for one customer. An old
+    auto-archived case it lands on goes back to New. `caseLevel(c)` = the
+    board's level (repeat → critical).
+  - **No Close on Critical:** `canCloseCase` — Critical (incl. repeats) is
+    only Won or Lost; **Service Due has no Close at all** (and no "Closed"
+    archive filter).
+  - **Call log:** "I called — Talked / Voicemail / No answer / Wrong number"
+    + optional note → a note with `call: { result }` (`callEntry`). Moves New
+    → Working, counts as first response, shows in the hand-off email.
+  - Code summaries from Tanner's log were HTML-escaped (`&quot;`): fixed in
+    the seed, and `cleanCodeDoc` cleans saved ones as they're read.
 - **Colour coding** — red = Critical, blue = Non-critical, grey = Ignore
   (Erin): `LEVEL_STYLE` (board rows: left bar + tint; chips) and
   `CODE_LEVEL_TONE` (Code List buttons, board filter chips). A case's level is

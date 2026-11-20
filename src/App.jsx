@@ -43,6 +43,8 @@ import {
   codeMatchesFilter, codeMatchesQuery, codeCounts, sortCodes, classifyCode,
   CASE_TABS, caseTab, caseStatusLabel, caseCounts, sortCases, caseMatchesQuery,
   CASE_KINDS, caseKind, serviceLabel, lostReasonsFor, caseRaisedAt,
+  caseLevel, canCloseCase, sortFaultCases, CALL_RESULTS, callEntry, callCount, cleanCodeDoc,
+  REPEAT_DEFAULTS, repeatSettings,
   WIN_TIERS, winTier, CLOSE_REASONS, DESTINATION_KINDS, MAX_DESTINATION_RECIPIENTS,
   resolveRecipients, destinationsForTier, suggestedDestination, destinationProblems, isEmail,
   assetUrl, mapsUrl, startWorkingChange, winChange, loseChange, closeChange,
@@ -1276,7 +1278,7 @@ export default function BobcatIndyCRM() {
   useEffect(() => {
     if (!telematicsAccess) { setTelematicsCodes(null); setTelematicsCodesError(null); return; }
     return subscribeToTelematicsCodes(
-      (data) => { setTelematicsCodes(data); setTelematicsCodesError(null); },
+      (data) => { setTelematicsCodes((data || []).map(cleanCodeDoc)); setTelematicsCodesError(null); },
       (err) => setTelematicsCodesError(err && err.code ? err.code : 'error'));
   }, [telematicsAccess]);
 
@@ -1827,6 +1829,15 @@ export default function BobcatIndyCRM() {
     }
   };
   // A note on a New case means Carter has picked it up: it moves to Working.
+  // Call log (Nov 20): "I called" + how it went + an optional note.
+  const addCaseCall = async (c, { result, text }) => {
+    const note = callEntry({ result, text }, currentUser.id);
+    if (!note) return false;
+    const change = (c.status || 'new') === 'new'
+      ? startWorkingChange(currentUser.id, note.at)
+      : { patch: { updatedAt: note.at }, event: null };
+    return changeCase(c.id, change, note);
+  };
   const addCaseNote = async (c, text) => {
     const note = noteEntry(text, currentUser.id);
     if (!note) return false;
@@ -2876,6 +2887,7 @@ export default function BobcatIndyCRM() {
                     settings={telematicsSettings} wipReceivedAt={telematicsWipReceivedAt}
                     onBack={() => goTo(caseKind(openCase) === 'service' ? TELEMATICS_SERVICE_VIEW : TELEMATICS_BOARD_VIEW)}
                     onAddNote={(text) => addCaseNote(openCase, text)}
+                    onLogCall={(args) => addCaseCall(openCase, args)}
                     onStartWorking={() => changeCase(openCase.id, startWorkingChange(currentUser.id))}
                     onWin={(args) => winCase(openCase, args)}
                     onLose={(args) => changeCase(openCase.id, loseChange(args, currentUser.id))}
@@ -3355,7 +3367,7 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
     ] },
     // A separate module (CLAUDE.md → "Telematics"); only shown to people with
     // telematics access.
-    { ws: 'telematics', title: 'Telematics', items: [
+    { ws: 'telematics', title: 'Customer Asset Management', items: [
       { id: TELEMATICS_BOARD_VIEW, label: 'Fault Codes', icon: Activity, badge: telematicsNewByKind.fault, badgeAccent: telematicsNewByKind.fault > 0 },
       { id: TELEMATICS_SERVICE_VIEW, label: 'Service Due', icon: Wrench, badge: telematicsNewByKind.service, badgeAccent: telematicsNewByKind.service > 0 },
       { id: TELEMATICS_DASHBOARD_VIEW, label: 'Reports', icon: BarChart3 },
@@ -5953,15 +5965,22 @@ function CaseStatusBadge({ status }) {
 
 // The code as the Code List classifies it — Critical / Non-critical / Ignore,
 // and whether anyone has reviewed it yet.
-function CaseCodeChip({ code, codesById }) {
+// `repeat` = case.repeatCritical: a non-critical code that kept repeating
+// shows as Critical with a "Repeat" tag (Nov 20).
+function CaseCodeChip({ code, codesById, repeat = null }) {
   if (!code) return <span className="text-stone-400">—</span>;
   const k = classifyCode(code, codesById);
-  const tone = (LEVEL_STYLE[k.level] || LEVEL_STYLE.critical).text;
+  const level = repeat ? 'critical' : k.level;
+  const tone = (LEVEL_STYLE[level] || LEVEL_STYLE.critical).text;
   return (
     <span className="whitespace-nowrap">
       <span className="font-mono text-xs font-semibold text-stone-900">{k.code}</span>
-      <span className={`ml-1.5 text-[10px] uppercase tracking-widest font-bold ${tone}`}>{codeLevelLabel(k.level)}</span>
-      {!k.reviewed && <span className="ml-1 text-[10px] text-amber-700" title="Not reviewed on the Code List yet">•</span>}
+      <span className={`ml-1.5 text-[10px] uppercase tracking-widest font-bold ${tone}`}>{codeLevelLabel(level)}</span>
+      {repeat && (
+        <span className="ml-1.5 text-[10px] uppercase tracking-wider font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-1"
+          title={`Sent ${repeat.seen} times in ${repeat.days} days — ${codeLevelLabel(repeat.level)} on the Code List`}>Repeat ×{repeat.seen}</span>
+      )}
+      {!repeat && !k.reviewed && <span className="ml-1 text-[10px] text-amber-700" title="Not reviewed on the Code List yet">•</span>}
     </span>
   );
 }
@@ -6014,7 +6033,8 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
   const counts = useMemo(() => caseCounts(list), [list]);
   // The level comes from the Code List as it is now, so re-classifying a code
   // recolours its cases straight away. Unknown / unreviewed = critical.
-  const levelOf = (c) => classifyCode(c.fault && c.fault.code, codesById).level;
+  // Repeats moved to Critical count as Critical (caseLevel).
+  const levelOf = (c) => caseLevel(c, codesById) || 'critical';
   const rowStyle = (c) => (isService ? SERVICE_ROW_STYLE : (LEVEL_STYLE[levelOf(c)] || LEVEL_STYLE.critical));
   const inTab = useMemo(() => list.filter(c =>
     caseTab(c) === tab
@@ -6026,7 +6046,8 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
     inTab.forEach(c => { n[levelOf(c)]++; });
     return n;
   }, [inTab, codesById]);   // eslint-disable-line react-hooks/exhaustive-deps
-  const rows = useMemo(() => sortCases(inTab.filter(c => isService || levelFilter === 'all' || levelOf(c) === levelFilter)),
+  // Fault Codes: Critical first — they're worked first (Erin, Nov 20).
+  const rows = useMemo(() => (isService ? sortCases : (l) => sortFaultCases(l, codesById))(inTab.filter(c => isService || levelFilter === 'all' || levelOf(c) === levelFilter)),
     [inTab, levelFilter, codesById]);   // eslint-disable-line react-hooks/exhaustive-deps
   const paged = usePaged(rows, { resetKey: `${tab}|${archiveFilter}|${levelFilter}|${branchFilter}|${q}` });
 
@@ -6082,7 +6103,7 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
       </div>
       {tab === 'archive' && (
         <div className="flex gap-2">
-          {[['all', 'All'], ['lost', 'Lost'], ['closed', 'Closed']].map(([id, label]) => (
+          {(isService ? [['all', 'All'], ['lost', 'Lost']] : [['all', 'All'], ['lost', 'Lost'], ['closed', 'Closed']]).map(([id, label]) => (
             <button key={id} type="button" onClick={() => setArchiveFilter(id)} aria-pressed={archiveFilter === id}
               className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${
                 archiveFilter === id ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'}`}>
@@ -6134,7 +6155,7 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
                       <div className="text-xs text-stone-500 font-mono">{c.serial}</div>
                     </td>
                     <td className="px-4 py-2.5">
-                      {isService ? <ServiceChip c={c}/> : <CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/>}
+                      {isService ? <ServiceChip c={c}/> : <CaseCodeChip code={c.fault && c.fault.code} codesById={codesById} repeat={c.repeatCritical}/>}
                       {c.alertCount > 1 && <span className="ml-1.5 text-[10px] font-bold text-stone-500" title={`Bobcat has sent ${c.alertCount} alerts on this case`}>×{c.alertCount}</span>}
                       {isService
                         ? <div className="text-xs text-stone-500 whitespace-nowrap">{[c.hours != null ? `${c.hours} hrs now` : '', c.service && c.service.kitNumber ? `kit ${c.service.kitNumber}` : ''].filter(Boolean).join(' · ')}</div>
@@ -6163,7 +6184,7 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
                 <div className="text-xs text-stone-600">{[c.model, c.serial].filter(Boolean).join(' · ')}</div>
                 <div>{isService
                   ? <><ServiceChip c={c}/> <span className="text-xs text-stone-500">{c.hours != null ? `${c.hours} hrs now` : ''}</span></>
-                  : <><CaseCodeChip code={c.fault && c.fault.code} codesById={codesById}/> <span className="text-xs text-stone-500">{c.fault && c.fault.summary}</span></>}</div>
+                  : <><CaseCodeChip code={c.fault && c.fault.code} codesById={codesById} repeat={c.repeatCritical}/> <span className="text-xs text-stone-500">{c.fault && c.fault.summary}</span></>}</div>
                 <div className="text-[11px] text-stone-500">{fmtWhen(caseRaisedAt(c))}{c.branch ? ` · ${c.branch}` : ''}</div>
                 {caseOutcomeLine(c) && <div className="text-[11px] text-stone-500">{caseOutcomeLine(c)}</div>}
                 <FollowUpChip c={c} settings={settings} wipReceivedAt={wipReceivedAt}/>
@@ -6312,6 +6333,7 @@ function caseEventText(e) {
   if (e.type === 'escalated') return e.status === 'sent'
     ? `Escalated — no work order after the reminders (${(e.to || []).join(', ')})`
     : 'Escalation not sent — no one on the escalation list';
+  if (e.type === 'repeat_critical') return `Moved to Critical — ${e.code} sent ${e.seen} times in ${e.days} days (${codeLevelLabel(e.level)} on the Code List)`;
   if (e.type === 'alert' && e.kind === 'service') return `Bobcat sent a service reminder again — ${e.interval ? `${e.interval} hr service` : ''}`;
   if (e.type === 'created') return e.source === 'manual' ? 'Case added by hand'
     : `Case created from Bobcat email${e.autoClosed ? ` — filed in the Archive (${e.autoClosed.toLowerCase()})` : ''}`;
@@ -6319,7 +6341,7 @@ function caseEventText(e) {
   return CASE_EVENT_LABEL[e.type] || e.type;
 }
 
-function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBack, onAddNote, onStartWorking, onWin, onLose,
+function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBack, onAddNote, onLogCall, onStartWorking, onWin, onLose,
   onCloseCase, onConfirmWorkOrder, onReopen, onResend, onOpenSettings, settings = null, wipReceivedAt = '' }) {
   const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
   const who = (id) => (userMap[id] && userMap[id].name) || (id ? 'Someone' : 'The LMT');
@@ -6334,8 +6356,14 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
   const isOpenStatus = status === 'new' || status === 'working';
   const isService = caseKind(c) === 'service';
   const svc = c.service || {};
+  // Service Due: only Won or Lost. Critical faults (repeats too): no Close.
+  const closable = canCloseCase(c, codesById);
+  const [callResult, setCallResult] = useState('');
+  const calls = callCount(c);
+  const logCall = async () => { if (await run(() => onLogCall({ result: callResult, text: note }))) { setNote(''); setCallResult(''); } };
   const timeline = [
-    ...(c.history || []).map(e => ({ ...e, kind: 'event' })),
+    // The repeat move is told by its note (shown in red); skip the bare event.
+    ...(c.history || []).filter(e => e.type !== 'repeat_critical').map(e => ({ ...e, kind: 'event' })),
     ...(c.notes || []).map(n => ({ ...n, kind: 'note' }))
   ].sort((a, b) => String(b.at).localeCompare(String(a.at)));
 
@@ -6356,7 +6384,7 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
           <div className="text-sm text-stone-600 mt-0.5">
             {[c.model, c.serial].filter(Boolean).join(' · ')} · {isService
               ? <><ServiceChip c={c}/> due{c.hours != null ? ` · ${c.hours} hrs now` : ''}</>
-              : <><CaseCodeChip code={fault.code} codesById={codesById}/> {fault.summary}</>}
+              : <><CaseCodeChip code={fault.code} codesById={codesById} repeat={c.repeatCritical}/> {fault.summary}</>}
           </div>
         </div>
       </div>
@@ -6432,20 +6460,34 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
             {!loc.address && !loc.city && !maps && <div className="text-sm text-stone-400 py-1">No location on this case.</div>}
           </CaseCard>
 
-          <CaseCard title="Notes & activity">
+          <CaseCard title="Calls & notes" action={calls ? <span className="text-[11px] text-stone-500">{calls} call{calls === 1 ? '' : 's'} logged</span> : null}>
             <div className="py-2 space-y-2">
+              <div className="flex flex-wrap items-center gap-1.5" role="radiogroup" aria-label="Call result">
+                <span className="text-xs font-semibold text-stone-600 mr-1 flex items-center gap-1"><Phone size={12}/> I called —</span>
+                {CALL_RESULTS.map(r => (
+                  <button key={r} type="button" role="radio" aria-checked={callResult === r} onClick={() => setCallResult(callResult === r ? '' : r)}
+                    className={`px-2.5 py-1 rounded-full text-xs font-semibold border ${callResult === r ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'}`}>{r}</button>
+                ))}
+              </div>
               <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
-                placeholder={status === 'new' ? 'Log the call — adding a note moves the case to Working' : 'Log a call or a note'}
+                placeholder={callResult ? 'Notes from the call (optional)' : status === 'new' ? 'A note — logging a call or a note moves the case to Working' : 'A note'}
                 className="w-full px-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
-              <button onClick={addNote} disabled={busy || !note.trim()}
-                className="px-3 py-1.5 bg-stone-900 hover:bg-stone-800 disabled:bg-stone-300 text-white text-sm font-medium rounded-md">Add note</button>
+              <div className="flex gap-2">
+                <button onClick={logCall} disabled={busy || !callResult}
+                  className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 disabled:bg-stone-300 text-white text-sm font-medium rounded-md flex items-center gap-1.5"><Phone size={13}/> Log call</button>
+                <button onClick={addNote} disabled={busy || !note.trim() || !!callResult}
+                  className="px-3 py-1.5 bg-stone-900 hover:bg-stone-800 disabled:bg-stone-300 text-white text-sm font-medium rounded-md">Add note</button>
+              </div>
             </div>
             <div className="divide-y divide-stone-100">
               {timeline.map(e => (
                 <div key={e.id} className="py-2 text-sm">
                   <div className="text-[11px] text-stone-500">{fmtWhen(e.at)} · {who(e.by)}</div>
+                  {e.kind === 'note' && e.call && (
+                    <div className="text-stone-900 font-semibold flex items-center gap-1.5"><Phone size={12} className="text-brand-600"/> Called — {e.call.result}</div>
+                  )}
                   {e.kind === 'note'
-                    ? <div className="text-stone-900 whitespace-pre-wrap">{e.text}</div>
+                    ? e.text && <div className={`whitespace-pre-wrap ${e.system ? 'text-rose-800 bg-rose-50 border border-rose-100 rounded px-2 py-1' : 'text-stone-900'}`}>{e.text}</div>
                     : <div className="text-stone-600 italic">{caseEventText(e)}</div>}
                 </div>
               ))}
@@ -6462,10 +6504,17 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
                   <button onClick={() => setModal('win')} disabled={busy} className={`${btn} w-full bg-brand-600 hover:bg-brand-700 text-white`}>
                     <CheckCircle2 size={14}/> Won — send it on
                   </button>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className={`grid gap-2 ${isService ? 'grid-cols-1' : 'grid-cols-2'}`}>
                     <button onClick={() => setModal('lost')} disabled={busy} className={`${btn} border border-stone-200 hover:bg-stone-50 text-stone-700`}>Lost</button>
-                    <button onClick={() => setModal('close')} disabled={busy} className={`${btn} border border-stone-200 hover:bg-stone-50 text-stone-700`}>Close</button>
+                    {!isService && (
+                      <button onClick={() => setModal('close')} disabled={busy || !closable}
+                        title={closable ? 'Nothing to sell — move it to the Archive' : 'Critical cases can’t be closed — mark them Won or Lost'}
+                        className={`${btn} border border-stone-200 hover:bg-stone-50 text-stone-700 disabled:hover:bg-white disabled:cursor-not-allowed`}>Close</button>
+                    )}
                   </div>
+                  {!isService && !closable && (
+                    <div className="text-[11px] text-stone-500">Critical{c.repeatCritical ? ' (repeat)' : ''} — work it to Won or Lost; it can’t be closed.</div>
+                  )}
                   {status === 'new' && (
                     <button onClick={() => run(onStartWorking)} disabled={busy} className={`${btn} w-full border border-stone-200 hover:bg-stone-50 text-stone-700`}>Start working</button>
                   )}
@@ -6499,7 +6548,7 @@ function TelematicsCasePage({ c, codesById, users = [], destinations = [], onBac
                   {c.followUp && (c.followUp.bumps || c.followUp.escalatedAt) && (
                     <div className="text-[11px] text-stone-500">
                       {c.followUp.bumps ? `${c.followUp.bumps} reminder${c.followUp.bumps === 1 ? '' : 's'} sent, last ${fmtWhen(c.followUp.lastBumpAt)}. ` : ''}
-                      {c.followUp.escalatedAt ? `Escalated ${fmtWhen(c.followUp.escalatedAt)} — close it with a reason once you know what happened.` : ''}
+                      {c.followUp.escalatedAt ? `Escalated ${fmtWhen(c.followUp.escalatedAt)} — reopen it and record what happened once you know.` : ''}
                     </div>
                   )}
                   <button onClick={() => setModal('wo')} disabled={busy} className={`${btn} w-full border border-stone-200 hover:bg-stone-50 text-stone-700`}>Work order opened</button>
@@ -6979,6 +7028,7 @@ function TelematicsSettingsView({ settings, error, isAdmin, branches = [], onSav
   const extras = (
     <>
       <WipReportCard settings={settings} wipStatus={wipStatus} onSave={onSave}/>
+      <RepeatCodesCard settings={settings} onSave={onSave}/>
       <FollowUpSettingsCard settings={settings} onSave={onSave}/>
     </>
   );
@@ -7135,6 +7185,45 @@ function WipReportCard({ settings, wipStatus, onSave }) {
             : <div className="text-stone-500 mt-0.5">No Bobcat email received here yet.</div>}
         </div>
         <button onClick={save} disabled={busy || !dirty || bad}
+          className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-md">{busy ? 'Saving…' : 'Save'}</button>
+      </div>
+    </section>
+  );
+}
+
+// Settings → Repeat codes (Nov 20, Erin): a Non-critical / Ignore code sent
+// for the same machine this many times in this many days moves to Critical.
+function RepeatCodesCard({ settings, onSave }) {
+  const cfg = repeatSettings(settings);
+  const [f, setF] = useState({ count: String(cfg.count), days: String(cfg.days) });
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { const c = repeatSettings(settings); setF({ count: String(c.count), days: String(c.days) }); }, [settings]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const next = { count: Number(f.count), days: Number(f.days) };
+  const checked = repeatSettings({ repeat: next });
+  const bad = checked.count !== next.count || checked.days !== next.days;
+  const dirty = next.count !== cfg.count || next.days !== cfg.days;
+  const save = async () => { setBusy(true); try { await onSave({ repeat: next }); } finally { setBusy(false); } };
+  return (
+    <section className="bg-white border border-stone-200 rounded-lg p-4 space-y-3">
+      <div>
+        <h3 className="text-base font-bold text-stone-900">Repeat codes</h3>
+        <div className="text-xs text-stone-600 mt-0.5 leading-relaxed">
+          When Bobcat sends the same <b>Non-critical</b> or <b>Ignore</b> code for the same machine (serial number) this many times within
+          this many days, the case moves to <b>Critical</b>, with a note saying why. Different machines are never combined, even for the same customer.
+        </div>
+      </div>
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="block"><span className="text-xs font-semibold text-stone-600">Times</span>
+          <input value={f.count} onChange={e => setF({ ...f, count: e.target.value })} inputMode="numeric" aria-label="Times"
+            className="mt-1 w-24 px-3 py-2 border border-stone-200 rounded-md text-sm"/>
+          <span className="block text-[11px] text-stone-500">default {REPEAT_DEFAULTS.count}</span></label>
+        <label className="block"><span className="text-xs font-semibold text-stone-600">Within (days)</span>
+          <input value={f.days} onChange={e => setF({ ...f, days: e.target.value })} inputMode="numeric" aria-label="Within days"
+            className="mt-1 w-24 px-3 py-2 border border-stone-200 rounded-md text-sm"/>
+          <span className="block text-[11px] text-stone-500">default {REPEAT_DEFAULTS.days}</span></label>
+        <div className="flex-1"/>
+        {bad && <span className="text-xs text-rose-700">Times: 2–20 · Days: 1–60, whole numbers.</span>}
+        <button onClick={save} disabled={busy || bad || !dirty}
           className="px-3 py-1.5 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white text-sm font-semibold rounded-md">{busy ? 'Saving…' : 'Save'}</button>
       </div>
     </section>

@@ -2125,6 +2125,12 @@ async function saveBobcatAlert({ subject = '', html = '', text = '', messageId =
     }
 
     const existing = telematicsIntakeRules.caseForAlert(cases, a);
+    // A non-critical / ignore code repeating on this machine → Critical (Erin, Nov 20).
+    const settings = isService ? {} : await telematicsSettingsDoc();
+    const rc = telematicsIntakeRules.repeatCritical({ cases, alert: a, level, now, settings });
+    const promote = rc && !(existing && existing.repeatCritical) ? rc : null;
+    const repeatNote = promote ? { id: uid('n'), text: telematicsIntakeRules.repeatNoteText(promote), at: now, by: '', system: true } : null;
+    const repeatEvent = promote ? { id: uid('h'), type: 'repeat_critical', at: now, by: '', code: promote.code, seen: promote.seen, days: promote.days, level: promote.level } : null;
     if (existing) {
       const patch = { alertCount: FV.increment(1), lastAlertAt: now, updatedAt: now };
       if (isService) {
@@ -2134,11 +2140,18 @@ async function saveBobcatAlert({ subject = '', html = '', text = '', messageId =
         if (!existing.service || !(Number(existing.service.interval) > a.service.interval)) patch.service = a.service;
       } else {
         patch.alerts = FV.arrayUnion({ at: now, code: a.fault.code, summary: a.fault.summary, startAt: a.fault.startAt, messageId });
-        patch.history = FV.arrayUnion({ id: uid('h'), type: 'alert', at: now, by: '', code: a.fault.code, summary: a.fault.summary });
+        const alertEvent = { id: uid('h'), type: 'alert', at: now, by: '', code: a.fault.code, summary: a.fault.summary };
+        patch.history = repeatEvent ? FV.arrayUnion(alertEvent, repeatEvent) : FV.arrayUnion(alertEvent);
+        if (promote) {
+          patch.repeatCritical = promote;
+          patch.notes = FV.arrayUnion(repeatNote);
+          // An old auto-archived case comes back to New to be worked.
+          if (existing.status === 'closed') { patch.status = 'new'; patch.statusChangedAt = now; patch.statusChangedBy = ''; patch.closure = null; }
+        }
       }
       if (a.hours != null) patch.hours = a.hours;
       await casesRef.doc(existing.id).update(patch);
-      console.log(`[telematics-intake] ${a.serial} ${what} attached to case ${existing.id} (${via})`);
+      console.log(`[telematics-intake] ${a.serial} ${what} attached to case ${existing.id} (${via})${promote ? ` — moved to Critical (${promote.seen} in ${promote.days} days)` : ''}`);
       return { code: 200, json: { ok: true, action: 'attached', kind: a.kind, caseId: existing.id } };
     }
 
@@ -2146,6 +2159,11 @@ async function saveBobcatAlert({ subject = '', html = '', text = '', messageId =
     const doc = telematicsIntakeRules.newCaseFromAlert(a, { level, now, messageId, receivedAt });
     doc.location = { ...doc.location, address: geo.address || '', geocodeStatus: geo.status };
     doc.intake = { ...doc.intake, via };
+    if (promote) {
+      doc.repeatCritical = promote;
+      doc.notes = [...(doc.notes || []), repeatNote];
+      doc.history = [...(doc.history || []), repeatEvent];
+    }
     const ref = await casesRef.add(doc);
     console.log(`[telematics-intake] Case ${ref.id} created: ${a.serial} ${what} (${doc.status}${doc.branch ? `, ${doc.branch}` : ''}, ${via})`);
     return { code: 200, json: { ok: true, action: 'created', kind: a.kind, caseId: ref.id, status: doc.status } };
@@ -2286,8 +2304,8 @@ function buildTelematicsHandoffHtml({ c, dest, sender, notice = null }) {
   const asset = telematics.assetUrl(c.serial);
   const others = (Array.isArray(fault.otherCodes) ? fault.otherCodes : [])
     .map(o => [o.severity, o.code, o.summary].filter(Boolean).join(' - ')).join('\n');
-  const notes = (Array.isArray(c.notes) ? c.notes : []).slice(-5)
-    .map(n => `${fmtDateTime(n.at)}: ${n.text}`).join('\n\n');
+  const notes = (Array.isArray(c.notes) ? c.notes : []).filter(n => n && !n.system).slice(-5)
+    .map(n => `${fmtDateTime(n.at)}: ${n.call ? `Call — ${n.call.result}${n.text ? `: ${n.text}` : ''}` : n.text}`).join('\n\n');
   const senderName = (sender && sender.name) || 'Our telematics specialist';
 
   const customerRows = row('Customer', cust.name) + row('Phone', cust.phone) + row('Address', cust.address)
