@@ -2571,12 +2571,15 @@ export default function BobcatIndyCRM() {
       .font-display { font-family: 'Saira Condensed', sans-serif; letter-spacing: 0.02em; }
       .font-mono { font-family: 'JetBrains Mono', monospace; }
       .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
-      /* A little larger text everywhere inside the lead page (Nov 24, Erin —
-         readers). Headings and the name keep their own sizes. */
-      .lmt-readable .text-sm { font-size: 15px; line-height: 1.5; }
-      .lmt-readable .text-xs { font-size: 13.5px; line-height: 1.45; }
-      .lmt-readable .text-\[11px\] { font-size: 12.5px; }
-      .lmt-readable .text-\[10px\], .lmt-readable .text-\[9px\] { font-size: 11.5px; }
+      /* One text scale for the whole app (Nov 24, Erin — "font size should be
+         consistent across the app"; several of us use readers). Tailwind's
+         small sizes are raised everywhere, so every screen matches; headings
+         (text-base and up) keep their sizes. Selectors with [ ] need a double
+         backslash here — this is a JS template string. */
+      .text-sm { font-size: 15.5px; line-height: 1.5; }
+      .text-xs { font-size: 13.5px; line-height: 1.45; }
+      .text-\\[11px\\] { font-size: 12.5px; }
+      .text-\\[10px\\], .text-\\[9px\\] { font-size: 12px; }
       /* Easy-read forms on phones (Nov 24 — "all white and small font; some of
          us use readers"). Add a lead uses it: bigger, darker labels and text,
          filled fields with real borders, 17px inputs (also stops iOS zooming
@@ -2593,7 +2596,7 @@ export default function BobcatIndyCRM() {
           border-color: #d62b00; box-shadow: 0 0 0 3px rgba(214, 43, 0, 0.18); outline: none;
         }
         .lmt-easyread ::placeholder { color: #78716c; opacity: 1; }
-        .lmt-easyread .text-xs, .lmt-easyread .text-\[11px\], .lmt-easyread .text-\[10px\] { font-size: 14px; line-height: 1.45; }
+        .lmt-easyread .text-xs, .lmt-easyread .text-\\[11px\\], .lmt-easyread .text-\\[10px\\] { font-size: 14px; line-height: 1.45; }
         .lmt-easyread .text-sm { font-size: 16px; }
         .lmt-easyread .text-stone-400, .lmt-easyread .text-stone-500 { color: #57534e; }
         .lmt-easyread button { font-size: 16px; }
@@ -10628,9 +10631,9 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
 
   const card = 'bg-white border border-stone-200 rounded-lg overflow-hidden';
 
-  // Full width, slightly larger text (Erin, Nov 24) — see .lmt-readable.
+  // Full width (Erin, Nov 24). Text sizes: the app-wide scale in FontStyles.
   return (
-    <div className="lmt-readable">
+    <div>
       <button type="button" onClick={onClose}
         className="mb-3 text-sm font-medium text-stone-600 hover:text-stone-900 inline-flex items-center gap-1">
         <ChevronLeft size={16}/> Back to {backLabel}

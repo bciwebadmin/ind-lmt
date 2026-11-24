@@ -328,9 +328,14 @@ zooming in), a tinted card, bigger help text and a full-width Save
 (`lmt-easyread-save`). Desktop is unchanged. Put the class on any other form
 that needs the same treatment.
 
-The lead page (LeadDetailPanel) is full width (no `max-w-6xl`, Nov 24) and
-uses `lmt-readable`: text-sm 15px, text-xs 13.5px, the tiny 9–11px labels
-~12px, on every screen size. Same idea — add the class where text is too small.
+**One text scale for the whole app (Nov 24, Erin — "consistent across the
+app").** `FontStyles` raises Tailwind's small sizes everywhere: `text-sm`
+15.5px, `text-xs` 13.5px, `text-[11px]` 12.5px, `text-[10px]`/`text-[9px]`
+12px; headings (`text-base` and up) unchanged. Use those classes and every
+screen matches — don't add per-page size overrides. CSS selectors with `[ ]`
+inside that template string need **double** backslashes (`.text-\\[11px\\]`);
+a single one is eaten by JS and the rule silently does nothing (it did, once).
+The lead page is full width (no `max-w-6xl`).
 
 ## Navigation
 

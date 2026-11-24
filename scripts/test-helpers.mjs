@@ -1300,6 +1300,12 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('secrets: every function lists the secrets it (or its helpers) read', exportsList.length >= 20 && secrets.includes('RESEND_API_KEY') && missing.length === 0, missing.join('; '));
 }
 
+/* ---------- One text scale (Nov 24, 2026) ---------- */
+// In App.jsx's <style> template string, "\\[" is needed so the CSS gets "\[".
+check('fonts: app-wide scale, bracket selectors escaped for the template string',
+  /\n\s*\.text-sm \{ font-size: 15\.5px/.test(app) && app.includes('.text-\\\\[11px\\\\] { font-size: 12.5px; }')
+  && !/[^\\]\\\[1[01]px\\\]/.test(app.split('@media print')[0].split('const FontStyles')[1] || '') && !app.includes('lmt-readable'));
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
