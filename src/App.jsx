@@ -3593,7 +3593,8 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
             {switchOpen && (
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setSwitchOpen(false)} aria-hidden="true"/>
-                <div role="menu" aria-label="Switch dashboard" className="absolute left-3 right-3 bottom-full mb-1 z-20 bg-white text-stone-900 rounded-md shadow-xl border border-stone-200 py-1">
+                <div role="menu" aria-label="Switch to" className="absolute left-3 right-3 bottom-full mb-1 z-20 bg-white text-stone-900 rounded-md shadow-xl border border-stone-200 py-1">
+                  <div className="px-3 pt-1.5 pb-1 text-[10px] uppercase tracking-[0.15em] font-semibold text-stone-500">Switch to</div>
                   {workspaces.map(id => {
                     const w = WORKSPACES.find(x => x.id === id);
                     const Icon = WS_ICON[id];
@@ -3617,8 +3618,9 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
               className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-md bg-stone-800 hover:bg-stone-700 text-left">
               {(() => { const Icon = WS_ICON[current.id]; return <Icon size={16} className="text-brand-500 shrink-0"/>; })()}
               <span className="flex-1 min-w-0">
-                <span className="block text-[10px] uppercase tracking-[0.15em] text-stone-400 font-semibold">Dashboard</span>
-                <span className="block text-sm font-semibold text-white truncate">{picking ? 'Choose one…' : current.label}</span>
+                {/* "Switch to…" — not "Dashboard", which is now the menu's main section (Derek, Nov 2026). */}
+                <span className="block text-[10px] uppercase tracking-[0.15em] text-stone-400 font-semibold">Switch to…</span>
+                <span className="block text-sm font-semibold text-white truncate">{picking ? 'Choose one' : current.label}</span>
               </span>
               <ChevronUp size={14} className={`text-stone-400 transition-transform ${switchOpen ? '' : 'rotate-180'}`}/>
             </button>
@@ -3701,7 +3703,7 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
     [TELEMATICS_SERVICE_VIEW]: 'Service Due',
     [TELEMATICS_SETTINGS_VIEW]: 'Telematics Settings',
     [TELEMATICS_DASHBOARD_VIEW]: 'Telematics Report',
-    [WORKSPACE_PICKER_VIEW]: 'Choose a dashboard',
+    [WORKSPACE_PICKER_VIEW]: 'Where to?',
     [NO_ACCESS_VIEW]: 'No access yet'
   };
 

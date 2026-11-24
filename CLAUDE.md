@@ -155,7 +155,9 @@ CRM: enter leads, follow up to the end, then mine completed customers.
   in `localStorage['lmt.navLeadsOpen']`, always open while one of those tabs
   shows), Trade-Ins, Sales Requests, Sales Submittals, Completed Deals · *line*
   · **Admin**: Reports, Users, Settings. The old Dashboard overview item is
-  gone (the view still answers `?view=home`). Sidebar items may carry
+  gone (the view still answers `?view=home`). The bottom switcher (admins with
+  Customer Asset Management) reads **"Switch to…"** over the current area, not
+  "Dashboard", and the admin landing screen is titled "Where to?". Sidebar items may carry
   `children` (the expander); groups are separated by a rule. `WORKSPACES` has no
   `backoffice`; a rep has no dashboard switcher (one dashboard).
 - **+ New = three big options:** New Lead, New Sales Submittal, New Sales
