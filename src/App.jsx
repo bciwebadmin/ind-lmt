@@ -2571,6 +2571,12 @@ export default function BobcatIndyCRM() {
       .font-display { font-family: 'Saira Condensed', sans-serif; letter-spacing: 0.02em; }
       .font-mono { font-family: 'JetBrains Mono', monospace; }
       .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+      /* A little larger text everywhere inside the lead page (Nov 24, Erin —
+         readers). Headings and the name keep their own sizes. */
+      .lmt-readable .text-sm { font-size: 15px; line-height: 1.5; }
+      .lmt-readable .text-xs { font-size: 13.5px; line-height: 1.45; }
+      .lmt-readable .text-\[11px\] { font-size: 12.5px; }
+      .lmt-readable .text-\[10px\], .lmt-readable .text-\[9px\] { font-size: 11.5px; }
       /* Easy-read forms on phones (Nov 24 — "all white and small font; some of
          us use readers"). Add a lead uses it: bigger, darker labels and text,
          filled fields with real borders, 17px inputs (also stops iOS zooming
@@ -10622,8 +10628,9 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
 
   const card = 'bg-white border border-stone-200 rounded-lg overflow-hidden';
 
+  // Full width, slightly larger text (Erin, Nov 24) — see .lmt-readable.
   return (
-    <div className="max-w-6xl">
+    <div className="lmt-readable">
       <button type="button" onClick={onClose}
         className="mb-3 text-sm font-medium text-stone-600 hover:text-stone-900 inline-flex items-center gap-1">
         <ChevronLeft size={16}/> Back to {backLabel}

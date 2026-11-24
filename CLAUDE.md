@@ -328,6 +328,10 @@ zooming in), a tinted card, bigger help text and a full-width Save
 (`lmt-easyread-save`). Desktop is unchanged. Put the class on any other form
 that needs the same treatment.
 
+The lead page (LeadDetailPanel) is full width (no `max-w-6xl`, Nov 24) and
+uses `lmt-readable`: text-sm 15px, text-xs 13.5px, the tiny 9–11px labels
+~12px, on every screen size. Same idea — add the class where text is too small.
+
 ## Navigation
 
 **Dashboards (Nov 2026).** The left menu shows one dashboard at a time —
