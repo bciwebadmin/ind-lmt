@@ -17,7 +17,7 @@ import {
   RotateCcw, CalendarOff, Archive, ArchiveX, Key, Route,
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
   Inbox, Briefcase, ClipboardList, LayoutDashboard, ArrowRight, Activity,
-  Truck, Wrench, Package, ExternalLink, ChevronUp
+  Truck, Wrench, Package, ExternalLink, ChevronUp, Hourglass
 } from 'lucide-react';
 
 import {
@@ -76,7 +76,7 @@ import {
 import { nearestBranchForZip } from './lib/branchRouting';
 import {
   PIPELINE_STAGES, PIPELINE_STATUSES, PIPELINE_CLOSED_STATUSES,
-  STAGE_INCOMING, STAGE_WORKING, STAGE_SALES_REQUEST, STAGE_COMPLETED, STAGE_PROSPECT, STAGE_WANTED,
+  STAGE_INCOMING, STAGE_WORKING, STAGE_PENDING, OWNED_STAGES, STAGE_SALES_REQUEST, STAGE_COMPLETED, STAGE_PROSPECT, STAGE_WANTED,
   SALES_REQUEST_STATUS, WON_STATUS, LOST_STATUS, renamedStatus,
   NEW_STATUS, PENDING_STATUS, PROSPECT_STATUS, WANTED_STATUS, PROSPECT_TYPES, PROSPECT_GROUP_STATUSES, entersProspectGroup,
   TEMPERATURES, leadTemperature, SUBMITTAL_OPEN, SUBMITTAL_COMPLETE, submittalStatus, prospectKeywordList,
@@ -93,7 +93,12 @@ import {
   ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_FILES, ATTACHMENT_ACCEPT, checkAttachment, formatBytes
 } from './lib/pipeline';
 import { searchAll } from './lib/search';
-import { buildTodos, TODO_SECTIONS, submittalDocStatus, SUBMITTAL_DOCS, ymd as todayLocalYmd, dueLabel } from './lib/todo';
+import { buildTodos, TODO_SECTIONS, TEMP_GROUPS, CADENCE, cadenceSettings, submittalDocStatus, SUBMITTAL_DOCS, ymd as todayLocalYmd, dueLabel } from './lib/todo';
+
+// Finance is hidden everywhere (Derek, Nov 2026 — "not sure what this is for").
+// Its records stay in Firestore; flip this to bring the screens, the lead tab
+// and the automatic finance deal from financed submittals back.
+const FINANCE_ENABLED = false;
 import { uploadAttachments, attachmentUrl, deleteAttachmentFile } from './lib/attachments';
 
 const DEFAULT_CONFIG = {
@@ -172,7 +177,9 @@ const MOVED_VIEWS = {
   scoring:        ['settings', 'general'],
   'lead-routing': ['settings', 'routing'],
   // The old third step: submittals are their own Back Office queue now.
-  'stage-sales-request': ['submittals', null]
+  'stage-sales-request': ['submittals', null],
+  // Finance is hidden (Nov 2026); an old link lands on Sales Submittals.
+  finance:        ['submittals', null]
 };
 
 const SETTINGS_TABS = [
@@ -192,8 +199,13 @@ const STAGE_EMPTY = {
   },
   [STAGE_WORKING]: {
     title: 'No leads being worked',
-    admin: 'Assign a new lead and set it to Working or Pending to move it here.',
-    rep:   'Set one of your new leads to Working or Pending to move it here.'
+    admin: 'New leads processed as Hot, Warm or Cold land here.',
+    rep:   'Process one of your new leads as Hot, Warm or Cold to move it here.'
+  },
+  [STAGE_PENDING]: {
+    title: 'No pending deals',
+    admin: 'Hot deals in the process of closing. Set a Working lead to Pending to move it here.',
+    rep:   'Your hot deals that are closing. Set a Working lead to Pending to move it here.'
   },
   [STAGE_PROSPECT]: {
     title: 'Nothing here',
@@ -206,7 +218,7 @@ const STAGE_EMPTY = {
     rep:   'Your customers waiting on a unit. Add one with + New \u2192 Want.'
   },
   [STAGE_COMPLETED]: {
-    title: 'No done deals yet',
+    title: 'No completed deals yet',
     admin: 'Done deals land here when their Sales Submittal is sent. After 30 days they move to Archived.',
     rep:   'Your done deals, for 30 days. Then they move to Archived.'
   }
@@ -215,6 +227,7 @@ const STAGE_EMPTY = {
 const STAGE_ICONS = {
   [STAGE_INCOMING]:      Inbox,
   [STAGE_WORKING]:       Briefcase,
+  [STAGE_PENDING]:       Hourglass,
   [STAGE_PROSPECT]:      Tag,
   [STAGE_WANTED]:        Clock,
   [STAGE_SALES_REQUEST]: ClipboardList,
@@ -225,6 +238,7 @@ const STAGE_ICONS = {
 const STAGE_ACCENTS = {
   [STAGE_INCOMING]:      { bar: 'bg-blue-500',    soft: 'bg-blue-50',    text: 'text-blue-700'    },
   [STAGE_WORKING]:       { bar: 'bg-violet-500',  soft: 'bg-violet-50',  text: 'text-violet-700'  },
+  [STAGE_PENDING]:       { bar: 'bg-amber-500',   soft: 'bg-amber-50',   text: 'text-amber-800'   },
   [STAGE_PROSPECT]:      { bar: 'bg-sky-500',     soft: 'bg-sky-50',     text: 'text-sky-700'     },
   [STAGE_WANTED]:        { bar: 'bg-cyan-500',    soft: 'bg-cyan-50',    text: 'text-cyan-700'    },
   [STAGE_SALES_REQUEST]: { bar: 'bg-orange-500',  soft: 'bg-orange-50',  text: 'text-orange-700'  },
@@ -452,9 +466,11 @@ function workingDeadlineFrom(weeks, from = new Date()) {
 
 // Only meaningful while the lead is actually in Working — a deadline left over
 // from a previous stint must not keep suppressing staleness in Quoted.
-function getWorkingDeadline(lead) {
-  if (!lead || lead.status !== WORKING_STATUS) return null;
-  return lead.workingUntil || null;
+// Retired Nov 2026 (Derek): Working leads follow up on a Hot / Warm / Cold
+// schedule (Follow Ups) instead of a 1–4 week deadline, so Working uses the
+// ordinary staleness clock. Old workingUntil values are ignored.
+function getWorkingDeadline() {
+  return null;
 }
 
 // Presents a legacy 'Qualified' lead as 'Working' everywhere in the app, and
@@ -1564,8 +1580,8 @@ export default function BobcatIndyCRM() {
   const todoCount = useMemo(() => {
     if (!currentUser) return 0;
     return buildTodos({ leads: searchScope.leads, records: visibleRecords, repId: currentUser.id,
-      backOffice: currentUser.role === 'admin', today: todayLocalYmd(), now: Date.now() }).length;
-  }, [searchScope, visibleRecords, currentUser]);
+      backOffice: currentUser.role === 'admin', today: todayLocalYmd(), now: Date.now(), config }).length;
+  }, [searchScope, visibleRecords, currentUser, config]);
 
   // Open what a To Do item is about: a lead (on the right tab) or a record.
   const openTodo = (item) => {
@@ -1586,7 +1602,7 @@ export default function BobcatIndyCRM() {
   const backLabel = (() => {
     const st = PIPELINE_STAGES.find(x => x.view === view);
     if (st) return st.label;
-    return ({ [HOME_VIEW]: 'Dashboard', todo: 'To Do', requests: 'Sales Requests', finance: 'Finance', 'trade-ins': 'Trade-Ins',
+    return ({ [HOME_VIEW]: 'Dashboard', todo: 'Follow Ups', requests: 'Sales Requests', finance: 'Finance', 'trade-ins': 'Trade-Ins',
       reports: 'Reports', users: 'Users', settings: 'Settings', add: 'Add Lead' })[view] || 'list';
   })();
 
@@ -1968,8 +1984,8 @@ export default function BobcatIndyCRM() {
       const toStage   = stageOfStatus(patch.status, closed);
       // A lead only enters Working once a rep owns it.
       const owner = patch.assignedTo !== undefined ? patch.assignedTo : lead.assignedTo;
-      if (toStage === STAGE_WORKING && fromStage !== STAGE_WORKING && isUnassigned({ assignedTo: owner })) {
-        showToast('Assign a rep before moving this lead to Working', 'error');
+      if (OWNED_STAGES.includes(toStage) && !OWNED_STAGES.includes(fromStage) && isUnassigned({ assignedTo: owner })) {
+        showToast('Assign a rep before moving this lead to Working or Pending Deals', 'error');
         return false;
       }
       // A done deal goes through the Sales Submittal, which is what supplies
@@ -2044,6 +2060,9 @@ export default function BobcatIndyCRM() {
     }
 
     const finalPatch = { ...patch };
+    // Follow Ups' schedule restarts from these (src/lib/todo.js → lastTouchAt).
+    if (patch.temperature !== undefined && patch.temperature !== leadTemperature(lead)) finalPatch.temperatureSetAt = now;
+    if (patch.status !== undefined && patch.status !== NEW_STATUS && lead.status === NEW_STATUS && !lead.processedAt) finalPatch.processedAt = now;
 
     // Leaving Working drops the deadline. Without this, a lead that went
     // Working -> Quoted -> Working would silently inherit the old date.
@@ -2077,10 +2096,10 @@ export default function BobcatIndyCRM() {
     // Check ownership before opening any dialog, so nobody fills one in only to
     // have the change refused at the end.
     const closed = getClosedStatuses(config);
-    if (stageOfStatus(status, closed) === STAGE_WORKING
-        && stageOfStatus(lead.status, closed) !== STAGE_WORKING
+    if (OWNED_STAGES.includes(stageOfStatus(status, closed))
+        && !OWNED_STAGES.includes(stageOfStatus(lead.status, closed))
         && isUnassigned(lead)) {
-      showToast('Assign a rep before moving this lead to Working', 'error');
+      showToast('Assign a rep before moving this lead to Working or Pending Deals', 'error');
       return;
     }
     // Completed = a done deal. That opens the Sales Submittal; on submit the
@@ -2094,10 +2113,6 @@ export default function BobcatIndyCRM() {
     // keywords so the prospect list stays searchable — and, for Lost, why.
     if (PROSPECT_GROUP_STATUSES.includes(status) && status !== lead.status) {
       setLostPrompt({ leadId: id, status });
-      return;
-    }
-    if (status === WORKING_STATUS && lead.status !== WORKING_STATUS) {
-      setWorkingPrompt({ leadId: id, leadName: lead.customerName || lead.companyName || '', current: null });
       return;
     }
     updateLead(id, { status });
@@ -2167,7 +2182,7 @@ export default function BobcatIndyCRM() {
     const res = await sendSalesRequestEmailViaFunction({ leadId });
     // A financed deal goes to the finance team's tracker too — pre-filled, so
     // the rep doesn't type it twice. Only once per lead.
-    if (submittalNeedsFinance(salesRequest) && !records.finance.some(f => f.leadId === leadId)) {
+    if (FINANCE_ENABLED && submittalNeedsFinance(salesRequest) && !records.finance.some(f => f.leadId === leadId)) {
       const salesPerson = !isUnassigned(lead) ? lead.assignedTo : currentUser.id;
       await createRecord('finance', { ...financeFromSubmittal(salesRequest, lead), salesPerson }, leadId, { quiet: true });
     }
@@ -2396,7 +2411,7 @@ export default function BobcatIndyCRM() {
     if (!lead) { setSalesRequestBusy(false); return; }
     if (files.length) await attachFiles('leads', lead.id, files, 'submittal');
     const res = await sendSalesRequestEmailViaFunction({ leadId: lead.id });
-    if (submittalNeedsFinance(form)) {
+    if (FINANCE_ENABLED && submittalNeedsFinance(form)) {
       await createRecord('finance', { ...financeFromSubmittal(form, lead), salesPerson: newLead.assignedTo }, lead.id, { quiet: true });
     }
     setSalesRequestBusy(false);
@@ -3352,15 +3367,20 @@ function AuthField({ label, children }) {
 
 /* ===================== SIDEBAR ===================== */
 // The + New menu: every form in one place, the way each Smartsheet had its own.
+// + New: only for starting something new — three big options (Derek, Nov
+// 2026; easy on a phone). Trade-ins start from a Working lead; prospects and
+// wants are added from their own tabs (STAGE_ADD_KIND); Finance is hidden.
 const NEW_MENU = [
-  { kind: 'lead',        label: 'Lead',            hint: 'A new sales opportunity',            icon: UserPlus },
-  { kind: 'prospect',    label: 'Prospect',        hint: 'Someone to come back to, with keywords', icon: Tag },
-  { kind: 'want',        label: 'Want',            hint: 'A customer waiting on a unit',       icon: Clock },
-  { kind: 'submittal',   label: 'Sales Submittal', hint: 'A sale that didn’t start as a lead', icon: ClipboardList },
-  { kind: 'requests',    label: 'Sales Request',   hint: 'Delivery, get ready, demo, parts…',  icon: Send },
-  { kind: 'tradeIns',    label: 'Trade-In',        hint: 'Evaluate a customer’s machine',      icon: RefreshCw },
-  { kind: 'finance',     label: 'Finance Deal',    hint: 'For the finance team’s tracker',     icon: Briefcase }
+  { kind: 'lead',        label: 'New Lead',            hint: 'A walk-in, call-in, referral or anyone new', icon: UserPlus },
+  { kind: 'submittal',   label: 'New Sales Submittal', hint: 'Submit the paperwork for a sale',            icon: ClipboardList },
+  { kind: 'requests',    label: 'New Sales Request',   hint: 'Parts, service, rental, trucking, ordering…', icon: Send }
 ];
+// The "Add …" buttons on the New, Prospect and Wanted tabs.
+const STAGE_ADD_ITEMS = {
+  lead:     { kind: 'lead',     label: 'Lead',     icon: UserPlus },
+  prospect: { kind: 'prospect', label: 'Prospect', icon: Tag },
+  want:     { kind: 'want',     label: 'Want',     icon: Clock }
+};
 
 // The tabs that get their own "Add …" button in the top bar, so a rep on New,
 // Prospect or Wanted doesn't have to go back to + New (Erin, Nov 2026). Each
@@ -3385,17 +3405,18 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
   // Each group belongs to one dashboard (`ws`); Admin shows on all of them.
   const groups = [
     { ws: 'leads', title: null, items: [
-      { id: 'todo', label: 'To Do', icon: CheckCircle2, badge: todoCount, badgeAccent: todoCount > 0 }
+      { id: 'todo', label: 'Follow Ups', icon: CheckCircle2, badge: todoCount, badgeAccent: todoCount > 0 }
     ] },
+    // One menu (Derek, Nov 2026): the lead tabs, then Trade-Ins, Sales Requests,
+    // Sales Submittals, and Completed Deals last.
     { ws: 'leads', title: 'Lead Management', items: [
       { id: HOME_VIEW, label: 'Dashboard', icon: LayoutDashboard },
-      ...PIPELINE_STAGES.map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id], indent: true }))
-    ] },
-    { ws: 'backoffice', title: 'Back Office', items: [
-      { id: 'submittals', label: 'Sales Submittals',  icon: ClipboardList, badge: backOfficeCounts.submittals },
-      { id: 'requests',  label: 'Sales Requests',     icon: Send,          badge: backOfficeCounts.requests },
-      { id: 'finance',   label: 'Finance',            icon: Briefcase,     badge: backOfficeCounts.finance },
-      { id: 'trade-ins', label: userRole === 'admin' ? 'Trade-In Approvals' : 'Trade-Ins', icon: RefreshCw,     badge: backOfficeCounts.tradeIns }
+      ...PIPELINE_STAGES.filter(s => s.id !== STAGE_COMPLETED).map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id], indent: true })),
+      { id: 'trade-ins', label: userRole === 'admin' ? 'Trade-In Approvals' : 'Trade-Ins', icon: RefreshCw, badge: backOfficeCounts.tradeIns, indent: true },
+      { id: 'requests',  label: 'Sales Requests',     icon: Send,          badge: backOfficeCounts.requests, indent: true },
+      { id: 'submittals', label: 'Sales Submittals',  icon: ClipboardList, badge: backOfficeCounts.submittals, indent: true },
+      ...PIPELINE_STAGES.filter(s => s.id === STAGE_COMPLETED).map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id], indent: true })),
+      ...(FINANCE_ENABLED ? [{ id: 'finance', label: 'Finance', icon: Briefcase, badge: backOfficeCounts.finance, indent: true }] : [])
     ] },
     // A separate module (CLAUDE.md → "Telematics"); only shown to people with
     // telematics access.
@@ -3473,17 +3494,17 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
           {newOpen && (
             <>
               <div className="fixed inset-0 z-10" onClick={() => setNewOpen(false)} aria-hidden="true"/>
-              <div role="menu" className="absolute left-3 right-3 mt-1 z-20 bg-white text-stone-900 rounded-md shadow-xl border border-stone-200 py-1">
+              <div role="menu" className="absolute left-3 right-3 mt-1 z-20 bg-white text-stone-900 rounded-lg shadow-xl border border-stone-200 p-1.5 space-y-1">
                 {NEW_MENU.map(m => {
                   const Icon = m.icon;
                   return (
                     <button key={m.kind} role="menuitem"
                       onClick={() => { setNewOpen(false); onNew(m.kind); if (onMobileClose) onMobileClose(); }}
-                      className="w-full text-left px-3 py-2 hover:bg-stone-50 flex items-start gap-2.5">
-                      <Icon size={15} className="text-brand-700 mt-0.5 shrink-0"/>
+                      className="w-full text-left px-3 py-3.5 md:py-2.5 rounded-md hover:bg-brand-50 border border-stone-100 flex items-center gap-3">
+                      <span className="w-9 h-9 md:w-8 md:h-8 rounded-md bg-brand-50 flex items-center justify-center shrink-0"><Icon size={18} className="text-brand-700"/></span>
                       <span>
-                        <span className="block text-sm font-semibold">{m.label}</span>
-                        <span className="block text-[11px] text-stone-500">{m.hint}</span>
+                        <span className="block text-base md:text-sm font-semibold">{m.label}</span>
+                        <span className="block text-xs text-stone-500">{m.hint}</span>
                       </span>
                     </button>
                   );
@@ -3617,11 +3638,11 @@ function TopBar({ view, leads, stageLeads = {}, config, currentUser, onSignOut, 
   const stage = stageForView(view);
   // "Add Lead / Prospect / Want" on those three tabs; hidden while a lead page is open.
   const addItem = stage && onAdd && !leadOpen
-    ? NEW_MENU.find(m => m.kind === STAGE_ADD_KIND[stage.id]) || null
+    ? STAGE_ADD_ITEMS[STAGE_ADD_KIND[stage.id]] || null
     : null;
   const titles = {
     [HOME_VIEW]: 'Dashboard',
-    todo: 'To Do',
+    todo: 'Follow Ups',
     ...Object.fromEntries(PIPELINE_STAGES.map(s => [s.view, s.label])),
     submittals: 'Sales Submittals',
     requests: 'Sales Requests',
@@ -4165,7 +4186,7 @@ function LeadsView({ leads, config, onSelect, onUpdate, onDelete, onStatusChange
   const rowReadOnly = (l) => readOnly || (watchOnly ? watchOnly(l) : false);
   // Temperature only matters while a lead is being worked: New and Working.
   // Prospect, Wanted and Completed have no temperature column, filter or chips.
-  const showTemp = stage === STAGE_INCOMING || stage === STAGE_WORKING;
+  const showTemp = stage === STAGE_INCOMING || stage === STAGE_WORKING || stage === STAGE_PENDING;
   // Falls back to a plain write if a caller didn't pass the gate, so a missing
   // prop degrades to the old behaviour rather than throwing on first click.
   const changeStatus = onStatusChange || ((id, status) => onUpdate(id, { status }));
@@ -5511,13 +5532,9 @@ function AddLeadView({ config, onAdd, currentUser, preset = null }) {
       errs.contactEmail = 'Email or phone required';
       errs.phone = 'Email or phone required';
     }
-    // Matches the dialog: a lead can't enter Working without a deadline.
-    if (form.status === WORKING_STATUS && !form.workingWeeks) {
-      errs.workingWeeks = 'Pick how long this stays active';
-    }
-    // A lead only reaches the Working step once a rep owns it.
-    if (stageOfStatus(form.status) === STAGE_WORKING && isUnassigned(form)) {
-      errs.status = 'Assign a rep to add this straight to Working';
+    // A lead only reaches Working / Pending Deals once a rep owns it.
+    if (OWNED_STAGES.includes(stageOfStatus(form.status)) && isUnassigned(form)) {
+      errs.status = 'Assign a rep to add this straight to Working or Pending Deals';
     }
     if (Object.keys(errs).length) { setErrors(errs); return; }
     const payload = {
@@ -5664,21 +5681,6 @@ function AddLeadView({ config, onAdd, currentUser, preset = null }) {
           <div className="mt-4">
             <Field label="Interested in (tags)">
               <TagInput value={form.prospectKeywords} onChange={v => update('prospectKeywords', v)}/>
-            </Field>
-          </div>
-        )}
-
-        {form.status === WORKING_STATUS && (
-          <div className="mt-4">
-            <Field label="Working Until" required error={errors.workingWeeks}>
-              <div className="text-xs text-stone-500 mb-2 -mt-0.5">
-                How long this lead stays active. Working it doesn&rsquo;t push the date back.
-              </div>
-              <WorkingWeeksChoices
-                value={form.workingWeeks}
-                onChange={(w) => update('workingWeeks', w)}
-                columns="grid-cols-2 md:grid-cols-4"
-              />
             </Field>
           </div>
         )}
@@ -10258,11 +10260,41 @@ function NotificationsConfigCard({ config, onSave }) {
         </div>
       </div>
 
+      {/* ---- Follow Ups schedule (src/lib/todo.js → CADENCE) ---- */}
+      <div className="px-5 py-4 border-t border-stone-100">
+        <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">Follow Ups schedule</div>
+        <div className="text-xs text-stone-500 mb-3">
+          Check-ins appear in each rep&rsquo;s Follow Ups (no email). The clock restarts whenever someone follows up, adds a note
+          or changes the status or temperature. Wanted leads never get one. Turn any of these off:
+        </div>
+        {CADENCE.map(k => {
+          const cur = cadenceSettings(config);
+          return (
+            <label key={k.id} className="flex items-start gap-3 py-1.5 cursor-pointer select-none">
+              <input type="checkbox" checked={cur[k.id]} className="accent-brand-500 mt-0.5"
+                onChange={(e) => persistNotifications({ followUpCadence: { ...cur, [k.id]: e.target.checked } })}/>
+              <span>
+                <span className="text-sm font-medium text-stone-800">{k.label}</span>
+                <span className="block text-xs text-stone-500">{k.hint}</span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+
       {/* ---- Daily reminders (dailyLeadReminders function) ---- */}
       <div className="px-5 py-4 border-t border-stone-100">
-        <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">Daily Reminders</div>
-        <div className="text-xs text-stone-500 mb-3">
-          Weekday mornings at 8:00, each rep gets one email covering both of these. Nothing is sent to someone with nothing to do.
+        <div className="text-xs uppercase tracking-widest font-semibold text-stone-500 mb-2">Daily Reminder Emails</div>
+        <label className="flex items-start gap-3 py-1.5 cursor-pointer select-none">
+          <input type="checkbox" checked={config.notifications?.dailyReminderEmails === true}
+            onChange={(e) => persistNotifications({ dailyReminderEmails: e.target.checked })} className="accent-brand-500 mt-0.5"/>
+          <span>
+            <span className="text-sm font-medium text-stone-800">Send the 8:00 AM reminder email</span>
+            <span className="block text-xs text-stone-500">Off by default (Nov 2026): reminders live in Follow Ups instead. New-lead alert emails are separate and still go out.</span>
+          </span>
+        </label>
+        <div className={`text-xs text-stone-500 mb-3 mt-2 ${config.notifications?.dailyReminderEmails === true ? '' : 'opacity-50'}`}>
+          When on, weekday mornings at 8:00 each rep gets one email covering these. Nothing is sent to someone with nothing to do.
         </div>
         {[['followUpDateRemindersEnabled', 'Follow-up dates', 'Follow-up dates reps set on their leads, on the day and until marked done.'],
           ['contactRemindersEnabled', 'Make contact', 'Leads assigned to the rep and still in New, every weekday until they move out of New.'],
@@ -10617,7 +10649,7 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
     { id: 'requests',  label: 'Sales Requests', count: leadRecords.requests.length, show: leadStage !== 'junk' || leadRecords.requests.length > 0 },
     { id: 'tradeIns',  label: 'Trade-Ins', count: leadRecords.tradeIns.length, show: leadStage !== 'junk' || leadRecords.tradeIns.length > 0 },
     { id: 'finance',   label: 'Finance', count: leadRecords.finance.length,
-      show: leadRecords.finance.length > 0 || !!lead.salesRequest || leadStage === STAGE_COMPLETED },
+      show: FINANCE_ENABLED && (leadRecords.finance.length > 0 || !!lead.salesRequest || leadStage === STAGE_COMPLETED) },
     { id: 'files',     label: 'Quotes', count: nFiles },
     { id: 'activity',  label: 'Notes & Activity', count: nNotes },
   ].filter(t => t.show !== false);
@@ -10634,6 +10666,11 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
   // Full width (Erin, Nov 24). Text sizes: the app-wide scale in FontStyles.
   return (
     <div>
+      {lead.status === NEW_STATUS && (
+        <ProcessLeadModal lead={lead} config={config} currentUser={currentUser} onUpdate={onUpdate}
+          onJunk={() => { if (window.confirm('Mark this lead as junk? It moves to the Junk tab. You can restore it later.')) onMarkJunk(lead.id); }}
+          onClose={onClose}/>
+      )}
       <button type="button" onClick={onClose}
         className="mb-3 text-sm font-medium text-stone-600 hover:text-stone-900 inline-flex items-center gap-1">
         <ChevronLeft size={16}/> Back to {backLabel}
@@ -10897,7 +10934,7 @@ function LeadDetailPanel({ lead, config, currentUser, onClose, onUpdate, onDelet
             )}
             <div className={card}>
               <Section title="Status">
-                <StatusDetailRows lead={lead} config={config} onExtendWorking={onExtendWorking}/>
+                <StatusDetailRows lead={lead} config={config}/>
                 <StatusAuditLog lead={lead} config={config} currentUser={currentUser}/>
               </Section>
               <Section title="Assignment">
@@ -11079,6 +11116,97 @@ function Section({ title, children }) {
 // Current status + when it was last changed, laid out to match the Assignment
 // block above it. The elapsed time is the useful half — "Quoted, 9 days" tells a
 // rep more at a glance than the raw timestamp does.
+/* ===================== PROCESS A NEW LEAD (Derek, Nov 2026) =====================
+ * Opening a New lead asks what it is before anything else: Prospect, Hot, Warm,
+ * Cold or Wanted. Hot / Warm / Cold → Working with that temperature (on its
+ * Follow Ups schedule); Prospect → Prospect (with tags); Wanted → Wanted (no
+ * follow-ups). It stays until the lead is processed; "Back to the list" leaves
+ * it in New, and it keeps showing in Follow Ups every day. Junk is a small link.
+ */
+const PROCESS_CHOICES = [
+  { id: 'Hot',      label: 'Hot',      hint: 'Ready to buy — follow up tomorrow, then weekly', status: WORKING_STATUS, temperature: 'Hot',  tone: 'border-rose-300 bg-rose-50 text-rose-800' },
+  { id: 'Warm',     label: 'Warm',     hint: 'Interested — follow up monthly',                 status: WORKING_STATUS, temperature: 'Warm', tone: 'border-amber-300 bg-amber-50 text-amber-800' },
+  { id: 'Cold',     label: 'Cold',     hint: 'Not soon — follow up every 3 months',            status: WORKING_STATUS, temperature: 'Cold', tone: 'border-sky-300 bg-sky-50 text-sky-800' },
+  { id: 'Prospect', label: 'Prospect', hint: 'No contact yet — keep mining, every 6 months',    status: PROSPECT_STATUS, tone: 'border-stone-300 bg-stone-50 text-stone-800' },
+  { id: 'Wanted',   label: 'Wanted',   hint: 'Wants a unit we don’t have — no follow-ups',      status: WANTED_STATUS,  tone: 'border-cyan-300 bg-cyan-50 text-cyan-800' }
+];
+function ProcessLeadModal({ lead, config, currentUser, onUpdate, onJunk, onClose }) {
+  const [choice, setChoice] = useState(null);
+  const [assignee, setAssignee] = useState(() => (currentUser.role !== 'admin' ? currentUser.id : ''));
+  const [tags, setTags] = useState(lead.prospectKeywords || '');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const unassigned = isUnassigned(lead);
+  const reps = sortUsersByName((config.users || []).filter(u => !u.isSystem && !u.onLeaveOfAbsence));
+  const c = PROCESS_CHOICES.find(x => x.id === choice);
+  const needsOwner = c && c.status === WORKING_STATUS && unassigned;
+  const apply = async (ch) => {
+    const pick = PROCESS_CHOICES.find(x => x.id === ch);
+    const patch = { status: pick.status };
+    if (pick.temperature) patch.temperature = pick.temperature;
+    if (pick.status === PROSPECT_STATUS) patch.prospectKeywords = tags;
+    if (pick.status === WORKING_STATUS && unassigned) {
+      if (!assignee) { setErr('Pick who’s working it.'); return; }
+      patch.assignedTo = assignee; patch.dateAssigned = new Date().toISOString();
+    }
+    setBusy(true); setErr('');
+    try { const ok = await onUpdate(lead.id, patch); if (ok === false) setErr('That didn’t save — try again.'); }
+    finally { setBusy(false); }
+  };
+  const pickChoice = (id) => {
+    const pick = PROCESS_CHOICES.find(x => x.id === id);
+    setChoice(id); setErr('');
+    // One tap when nothing else is needed.
+    if (!(pick.status === WORKING_STATUS && unassigned) && pick.status !== PROSPECT_STATUS) apply(id);
+  };
+  const name = lead.customerName || lead.companyName || 'This lead';
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-end sm:items-center justify-center sm:p-4" role="dialog" aria-modal="true" aria-label="Process this lead">
+      <div className="bg-white w-full sm:max-w-lg rounded-t-2xl sm:rounded-xl shadow-2xl max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-stone-100">
+          <div className="text-[11px] uppercase tracking-widest font-bold text-brand-700">New lead — process it</div>
+          <div className="font-display text-2xl font-bold text-stone-900 mt-0.5">{name}</div>
+          <div className="text-sm text-stone-600">{[lead.companyName && lead.customerName ? lead.companyName : '', lead.phone, lead.contactEmail].filter(Boolean).join(' · ')}</div>
+          {lead.comment && <div className="mt-2 text-sm text-stone-700 bg-stone-50 border border-stone-100 rounded-md px-3 py-2 whitespace-pre-wrap max-h-28 overflow-y-auto">{lead.comment}</div>}
+        </div>
+        <div className="p-4 space-y-2" role="radiogroup" aria-label="What is this lead?">
+          {PROCESS_CHOICES.map(x => (
+            <button key={x.id} type="button" role="radio" aria-checked={choice === x.id} disabled={busy} onClick={() => pickChoice(x.id)}
+              className={`w-full text-left px-4 py-3.5 rounded-lg border-2 flex items-center gap-3 transition ${choice === x.id ? x.tone + ' ring-2 ring-offset-1 ring-stone-900' : 'border-stone-200 bg-white hover:bg-stone-50'}`}>
+              <span className="text-lg font-bold w-24 shrink-0">{x.label}</span>
+              <span className="text-sm text-stone-600">{x.hint}</span>
+            </button>
+          ))}
+          {needsOwner && (
+            <label className="block pt-1"><span className="text-sm font-semibold text-stone-800">Who’s working it?</span>
+              <select value={assignee} onChange={e => setAssignee(e.target.value)} aria-label="Assign to"
+                className="mt-1 w-full px-3 py-3 border border-stone-300 rounded-md text-base bg-white">
+                <option value="">— Choose a rep —</option>
+                {reps.map(u => <option key={u.id} value={u.id}>{u.name}{u.id === currentUser.id ? ' (me)' : ''}</option>)}
+              </select>
+            </label>
+          )}
+          {c && c.status === PROSPECT_STATUS && (
+            <div className="pt-1"><div className="text-sm font-semibold text-stone-800 mb-1">Interested in (optional)</div>
+              <TagInput value={tags} onChange={setTags}/></div>
+          )}
+          {err && <div className="text-sm text-rose-700" role="alert">{err}</div>}
+          {(needsOwner || (c && c.status === PROSPECT_STATUS)) && (
+            <button type="button" onClick={() => apply(choice)} disabled={busy}
+              className="w-full mt-1 px-4 py-3.5 bg-brand-600 hover:bg-brand-700 disabled:opacity-60 text-white text-base font-semibold rounded-lg">
+              {busy ? 'Saving…' : `Save as ${c.label}`}
+            </button>
+          )}
+        </div>
+        <div className="px-5 pb-5 flex items-center justify-between gap-3 text-sm">
+          <button type="button" onClick={onClose} className="text-stone-600 hover:text-stone-900 font-medium flex items-center gap-1"><ChevronLeft size={15}/> Back to the list</button>
+          <button type="button" onClick={onJunk} className="text-stone-500 hover:text-rose-700">Junk / not a lead</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StatusDetailRows({ lead, config, onExtendWorking }) {
   const changedAt = getStatusChangedAt(lead);
   const elapsed = formatDuration(changedAt);
@@ -11678,7 +11806,7 @@ function StageHomeView({ stageLeads, config, currentUser, onOpen, openRequestCou
   const backOffice = [
     { label: 'Sales Submittals', count: openSubmittalCount, note: 'open', icon: ClipboardList, accent: STAGE_ACCENTS[STAGE_SALES_REQUEST], onClick: onOpenSubmittals },
     { label: 'Sales Requests',   count: openRequestCount,   note: 'open', icon: Send,          accent: { soft: 'bg-orange-50', text: 'text-orange-700' }, onClick: onOpenRequests },
-    { label: 'Finance',          count: openFinanceCount,   note: 'in progress', icon: Briefcase, accent: { soft: 'bg-violet-50', text: 'text-violet-700' }, onClick: onOpenFinance }
+    ...(FINANCE_ENABLED ? [{ label: 'Finance', count: openFinanceCount, note: 'in progress', icon: Briefcase, accent: { soft: 'bg-violet-50', text: 'text-violet-700' }, onClick: onOpenFinance }] : [])
   ];
   return (
     <div className="max-w-7xl">
@@ -11713,7 +11841,7 @@ function StageHomeView({ stageLeads, config, currentUser, onOpen, openRequestCou
                   <ArrowRight size={18} className="text-stone-300 group-hover:text-brand-600 transition-colors mb-1"/>
                 </div>
                 <div className="flex flex-wrap gap-1.5 mt-3 min-h-[1.5rem]">
-                  {hot > 0 && (stage.id === STAGE_INCOMING || stage.id === STAGE_WORKING) && <HomeChip className="bg-rose-50 text-rose-700">{hot} hot</HomeChip>}
+                  {hot > 0 && (stage.id === STAGE_INCOMING || stage.id === STAGE_WORKING || stage.id === STAGE_PENDING) && <HomeChip className="bg-rose-50 text-rose-700">{hot} hot</HomeChip>}
                   {stale > 0 && <HomeChip className="bg-amber-50 text-amber-700">{stale} stale</HomeChip>}
                   {stage.id === STAGE_INCOMING && unassigned > 0 && (
                     <HomeChip className="bg-stone-100 text-stone-700">{unassigned} unassigned</HomeChip>
@@ -12273,9 +12401,10 @@ function SubmittalStatusChip({ status }) {
 // Everything that needs someone's attention, worked out by src/lib/todo.js.
 // Reps see their own leads; admins can switch rep and see the back office.
 const TODO_ICONS = {
-  followup: Calendar, contact: Phone, paperwork: FileText, deadline: Clock, postsale: Mail,
-  submittal: ClipboardList, tradein: RefreshCw, request: Send, finance: Briefcase
+  process: Inbox, followup: Calendar, cadence: Phone, paperwork: FileText, postsale: Mail,
+  submittal: ClipboardList, tradein: RefreshCw, request: Send
 };
+const TEMP_GROUP_TONE = { Hot: 'text-rose-700', Warm: 'text-amber-700', Cold: 'text-sky-700', Prospect: 'text-sky-800', Other: 'text-stone-600' };
 function addDaysYmd(base, n) {
   const d = new Date(base + 'T12:00:00'); d.setDate(d.getDate() + n);
   return todayLocalYmd(d);
@@ -12284,24 +12413,40 @@ function TodoView({ leads, records, config, currentUser, onOpen, onUpdateLead })
   const isAdmin = currentUser.role === 'admin';
   const [who, setWho] = useState(currentUser.id);
   const [showBackOffice, setShowBackOffice] = useState(isAdmin);
+  // "Sort by Hot → Warm → Cold → Prospect" (Derek). Remembered per browser.
+  const [groupBy, setGroupBy] = useState(() => { try { return localStorage.getItem('lmt.followUpsGroup') || 'type'; } catch { return 'type'; } });
+  const pickGroup = (g) => { setGroupBy(g); try { localStorage.setItem('lmt.followUpsGroup', g); } catch { /* storage blocked */ } };
   const today = todayLocalYmd();
   const users = config.users || [];
   const userMap = useMemo(() => Object.fromEntries(users.map(u => [u.id, u])), [users]);
   const reps = useMemo(() => sortUsersByName(users.filter(u => !u.isSystem)), [users]);
   const items = useMemo(() => buildTodos({
-    leads, records, repId: isAdmin ? who : currentUser.id, backOffice: isAdmin && showBackOffice, today, now: Date.now()
-  }), [leads, records, who, showBackOffice, isAdmin, currentUser.id, today]);
+    leads, records, repId: isAdmin ? who : currentUser.id, backOffice: isAdmin && showBackOffice, today, now: Date.now(), config
+  }), [leads, records, who, showBackOffice, isAdmin, currentUser.id, today, config]);
   const leadById = useMemo(() => Object.fromEntries(leads.map(l => [l.id, l])), [leads]);
   const showOwner = isAdmin && who !== currentUser.id;
 
   const setFollowUp = (lead, date) => onUpdateLead(lead.id, { followUp: { ...(lead.followUp || {}), date, setBy: currentUser.id, setAt: new Date().toISOString() } });
   const clearFollowUp = (lead) => onUpdateLead(lead.id, { followUp: null, followUpDoneAt: new Date().toISOString() });
 
-  const sections = TODO_SECTIONS.map(s => ({ ...s, items: items.filter(i => i.section === s.id) })).filter(s => s.items.length);
+  const markDone = (lead) => onUpdateLead(lead.id, { followUpDoneAt: new Date().toISOString() });
+  const sections = groupBy === 'temp'
+    ? TEMP_GROUPS.map(g => ({ id: `temp-${g.id}`, label: g.label, tone: TEMP_GROUP_TONE[g.id],
+        items: items.filter(i => (i.temp || 'Other') === g.id)
+          .sort((a, b) => TODO_SECTIONS.findIndex(x => x.id === a.section) - TODO_SECTIONS.findIndex(x => x.id === b.section) || String(a.sortKey).localeCompare(String(b.sortKey))) }))
+        .filter(g => g.items.length)
+    : TODO_SECTIONS.map(s => ({ ...s, items: items.filter(i => i.section === s.id) })).filter(s => s.items.length);
   const btn = 'text-xs px-2.5 py-1.5 rounded border border-stone-200 bg-white hover:border-stone-400 text-stone-700 font-medium whitespace-nowrap';
 
   return (
     <div className="max-w-5xl">
+      <div className="flex items-center gap-2 flex-wrap mb-3" role="group" aria-label="Group follow ups">
+        <span className="text-xs text-stone-600">Sort by</span>
+        {[['type', 'Type'], ['temp', 'Hot → Warm → Cold → Prospect']].map(([id, label]) => (
+          <button key={id} type="button" onClick={() => pickGroup(id)} aria-pressed={groupBy === id}
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold border ${groupBy === id ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'}`}>{label}</button>
+        ))}
+      </div>
       {isAdmin && (
         <div className="flex items-center gap-3 flex-wrap mb-4">
           <label className="text-xs text-stone-600 flex items-center gap-2">
@@ -12321,16 +12466,16 @@ function TodoView({ leads, records, config, currentUser, onOpen, onUpdateLead })
       )}
 
       {sections.length === 0 ? (
-        <EmptyState icon={CheckCircle2} title="All caught up" subtitle="Nothing needs doing right now. Follow-up dates you set on a lead show up here on the day."/>
+        <EmptyState icon={CheckCircle2} title="All caught up" subtitle="Nothing needs doing right now. New leads to process, scheduled check-ins (Hot weekly, Warm monthly, Cold every 3 months, Prospect every 6 months) and dates you set show up here."/>
       ) : (
         <div className="space-y-5">
           {sections.map(sec => {
-            const Icon = TODO_ICONS[sec.id] || CheckCircle2;
+            const Icon = TODO_ICONS[sec.id] || (groupBy === 'temp' ? Flame : CheckCircle2);
             return (
               <div key={sec.id}>
                 <div className="flex items-center gap-2 mb-2">
-                  <Icon size={14} className="text-stone-500"/>
-                  <div className="text-[11px] uppercase tracking-widest font-semibold text-stone-600">{sec.label}</div>
+                  <Icon size={14} className={sec.tone || 'text-stone-500'}/>
+                  <div className={`text-[11px] uppercase tracking-widest font-semibold ${sec.tone || 'text-stone-600'}`}>{sec.label}</div>
                   <span className="text-[11px] font-mono text-stone-500">{sec.items.length}</span>
                   {sec.backOffice && <span className="text-[10px] uppercase tracking-wider font-semibold px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">Back office</span>}
                 </div>
@@ -12355,13 +12500,18 @@ function TodoView({ leads, records, config, currentUser, onOpen, onUpdateLead })
                             <button type="button" className={btn} onClick={() => setFollowUp(lead, addDaysYmd(today, 1))}>Tomorrow</button>
                             <button type="button" className={btn} onClick={() => setFollowUp(lead, addDaysYmd(today, 7))}>Next week</button>
                           </>)}
+                          {item.section === 'cadence' && lead && (<>
+                            <button type="button" className={btn} onClick={() => markDone(lead)} title="Followed up — the next one is scheduled from today"><Check size={12} className="inline -mt-0.5"/> Done</button>
+                            <button type="button" className={btn} onClick={() => setFollowUp(lead, addDaysYmd(today, 1))}>Tomorrow</button>
+                            <button type="button" className={btn} onClick={() => setFollowUp(lead, addDaysYmd(today, 7))}>Next week</button>
+                          </>)}
                           {item.section === 'postsale' && lead && (
                             <button type="button" className={btn} onClick={() => onUpdateLead(lead.id, { postSaleFollowUpDoneAt: new Date().toISOString() })}>
                               <Check size={12} className="inline -mt-0.5"/> Checked in
                             </button>
                           )}
                           <button type="button" className={btn} onClick={() => onOpen(item)}>
-                            {item.section === 'paperwork' ? 'Add paperwork' : item.section === 'submittal' ? 'Open submittal' : 'Open'}
+                            {item.section === 'paperwork' ? 'Add paperwork' : item.section === 'submittal' ? 'Open submittal' : item.section === 'process' ? 'Process' : 'Open'}
                           </button>
                         </div>
                       </div>
@@ -12436,7 +12586,7 @@ function FollowUpSection({ lead, currentUser, onUpdate }) {
           </button>
         </div>
       ) : (
-        <div className="text-xs text-stone-500">No follow-up set. It shows in To Do on the day you pick.</div>
+        <div className="text-xs text-stone-500">No follow-up date set. It shows in Follow Ups on the day you pick (the Hot / Warm / Cold schedule pauses until then).</div>
       )}
     </Section>
   );

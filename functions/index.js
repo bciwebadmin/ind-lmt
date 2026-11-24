@@ -3767,6 +3767,9 @@ exports.dailyLeadReminders = onSchedule(
     const now = Date.now();
     const config = await getAppConfig();
     const notif = config.notifications || {};
+    // Off unless switched on (Derek, Nov 2026: "no more emails" — reminders
+    // live in Follow Ups). Settings → Notifications → Daily Reminder Emails.
+    if (notif.dailyReminderEmails !== true) { console.log('[reminders] Daily reminder emails are off (Follow Ups has them)'); return; }
     const contactOn = notif.contactRemindersEnabled !== false;
     const followOn = notif.followUpRemindersEnabled !== false;
     const datesOn = notif.followUpDateRemindersEnabled !== false;

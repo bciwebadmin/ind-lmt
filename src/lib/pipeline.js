@@ -23,6 +23,7 @@
 
 export const STAGE_INCOMING      = 'incoming';    // labelled "New"; id kept for diffing with Atlanta
 export const STAGE_WORKING       = 'working';
+export const STAGE_PENDING       = 'pending';   // "Pending Deals" — its own tab since Nov 2026 (Derek)
 export const STAGE_PROSPECT      = 'prospect';
 export const STAGE_WANTED        = 'wanted';
 export const STAGE_COMPLETED     = 'completed';
@@ -59,8 +60,17 @@ export const PIPELINE_STAGES = [
     id: STAGE_WORKING,
     label: 'Working',
     view: 'stage-working',
-    blurb: 'Being worked by a rep, including deals pending.',
-    statuses: [WORKING_STATUS, PENDING_STATUS]
+    blurb: 'Being worked by a rep — Hot, Warm or Cold, each on its own follow-up schedule.',
+    statuses: [WORKING_STATUS]
+  },
+  {
+    // Derek (Nov 2026): hot leads in the process of closing — a day to three
+    // months (sometimes waiting on the factory).
+    id: STAGE_PENDING,
+    label: 'Pending Deals',
+    view: 'stage-pending',
+    blurb: 'Hot deals in the process of closing — from a day to a few months.',
+    statuses: [PENDING_STATUS]
   },
   {
     id: STAGE_PROSPECT,
@@ -78,7 +88,7 @@ export const PIPELINE_STAGES = [
   },
   {
     id: STAGE_COMPLETED,
-    label: 'Completed',
+    label: 'Completed Deals',
     view: 'stage-completed',
     blurb: 'Done deals.',
     statuses: [WON_STATUS]
@@ -255,6 +265,9 @@ export function ensurePipelineStatuses(config, defaultThresholds = {}) {
  * to them (primary or secondary) — plus, in New only, leads nobody owns yet,
  * so they can pick them up.
  */
+// The tabs a rep works (and that need an owner): Working and Pending Deals.
+export const OWNED_STAGES = [STAGE_WORKING, STAGE_PENDING];
+
 export function isLeadVisibleInStage(lead, stageId, viewer) {
   if (!lead || !viewer) return false;
   if (viewer.role === 'admin') return true;

@@ -167,8 +167,8 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('a missing status -> new', st(undefined) === 'incoming');
 
   // Oct 2026 layout: New, Working (+Pending), Prospect (+Dead, Unqualified, Lost), Wanted, Completed.
-  check('tabs are New, Working, Prospect, Wanted, Completed', JSON.stringify(P.PIPELINE_STAGES.map(s => s.label)) === JSON.stringify(['New', 'Working', 'Prospect', 'Wanted', 'Completed']));
-  check('Working holds Pending', st('Pending') === 'working');
+  check('tabs are New, Working, Pending Deals, Prospect, Wanted, Completed Deals (Derek, Nov 2026)', JSON.stringify(P.PIPELINE_STAGES.map(s => s.label)) === JSON.stringify(['New', 'Working', 'Pending Deals', 'Prospect', 'Wanted', 'Completed Deals']));
+  check('Pending is its own tab, and both need an owner', st('Pending') === 'pending' && st('Working') === 'working' && P.OWNED_STAGES.includes('pending') && P.OWNED_STAGES.includes('working'));
   check('Prospect holds Dead, Unqualified and Lost', ['Prospect', 'Dead', 'Unqualified', 'Lost'].every(x => st(x) === 'prospect'));
   check('Completed is only done deals', JSON.stringify(P.getStage('completed').statuses) === JSON.stringify(['Completed']));
   check('Prospect type buttons: Prospect first (default), then Dead, Unqualified, Lost', JSON.stringify(P.PROSPECT_TYPES.map(t => t.label)) === JSON.stringify(['Prospect', 'Dead', 'Unqualified', 'Lost']));
@@ -554,8 +554,8 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   const ids = (sec) => mine.filter(i => i.section === sec).map(i => i.leadId || i.recordId).join(',');
   check('todo: follow-ups due today and overdue, not future or junk', ids('followup') === 'f2,f1', ids('followup'));
   check('todo: overdue follow-up is flagged', mine.find(i => i.id === 'followup:f2').overdue && !mine.find(i => i.id === 'followup:f1').overdue);
-  check('todo: make contact skips the day of assignment', ids('contact') === 'c1', ids('contact'));
-  check('todo: working deadline passed', ids('deadline') === 'w1');
+  check('todo: every New lead is there to process from day one, until processed', ids('process').split(',').sort().join(',') === 'c1,c2', ids('process'));
+  check('todo: the working deadline is retired', !mine.some(i => i.section === 'deadline' || i.section === 'contact'));
   check('todo: missing paperwork on open submittals only', ids('paperwork') === 'p1,p2' || ids('paperwork') === 'p2,p1', ids('paperwork'));
   const p1 = mine.find(i => i.id === 'paperwork:p1'), p2 = mine.find(i => i.id === 'paperwork:p2');
   check('todo: cash deal needs no credit app; uploaded doc counts', JSON.stringify(p1.missing) === JSON.stringify(['customerId', 'delivery']), JSON.stringify(p1.missing));
@@ -567,10 +567,10 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('todo: back office open submittals', aids('submittal') === 'p1,p2', aids('submittal'));
   check('todo: trade-ins awaiting approval', aids('tradein') === 't1');
   check('todo: requests due or overdue, open only', aids('request') === 'q1');
-  check('todo: finance audit flags', aids('finance') === 'fn1');
+  check('todo: finance is hidden', !admin.some(i => i.section === 'finance'));
   const every = T.buildTodos({ leads, records, repId: '*', today, now });
   check('todo: every rep includes others', every.some(i => i.leadId === 'o1'));
-  check('todo: sections in order', JSON.stringify([...new Set(mine.map(i => i.section))]) === JSON.stringify(['followup', 'contact', 'paperwork', 'deadline', 'postsale']));
+  check('todo: sections in order', JSON.stringify([...new Set(mine.map(i => i.section))]) === JSON.stringify(['process', 'followup', 'paperwork', 'postsale']), JSON.stringify([...new Set(mine.map(i => i.section))]));
   check('todo: due labels', T.dueLabel(today, today) === 'Today' && T.dueLabel('2026-10-28', today) === 'Yesterday' && T.dueLabel('2026-10-26', today) === '3 days overdue' && T.dueLabel('2026-10-30', today) === 'Tomorrow');
   const { createRequire } = await import('node:module');
   const M = createRequire(import.meta.url)('../functions/reminderRules.js');
@@ -984,20 +984,20 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
 {
   const A = await import('../src/lib/access.js');
   const admin = { role: 'admin' }, rep = { role: 'user' }, both = { role: 'user', telematicsAccess: true }, tele = { role: 'user', leadAccess: false, telematicsAccess: true };
-  check('dashboards: who gets which', JSON.stringify(A.workspacesFor(admin)) === '["leads","backoffice","telematics"]' && JSON.stringify(A.workspacesFor(rep)) === '["leads","backoffice"]'
-    && JSON.stringify(A.workspacesFor(both)) === '["leads","backoffice","telematics"]' && JSON.stringify(A.workspacesFor(tele)) === '["telematics"]' && A.workspacesFor(null).length === 0);
+  check('dashboards: who gets which (Back Office folded into Lead Management, Nov 2026)', JSON.stringify(A.workspacesFor(admin)) === '["leads","telematics"]' && JSON.stringify(A.workspacesFor(rep)) === '["leads"]'
+    && JSON.stringify(A.workspacesFor(both)) === '["leads","telematics"]' && JSON.stringify(A.workspacesFor(tele)) === '["telematics"]' && A.workspacesFor(null).length === 0);
   check('dashboards: admins land on the picker', A.landingView(admin, 'stage-incoming') === A.WORKSPACE_PICKER_VIEW);
   check('dashboards: reps land on New, telematics-only on the board', A.landingView(rep, 'stage-incoming') === 'stage-incoming' && A.landingView(both, 'stage-incoming') === 'stage-incoming'
     && A.landingView(tele, 'stage-incoming') === A.TELEMATICS_BOARD_VIEW);
   check('dashboards: a refresh returns to the remembered dashboard', A.landingView(admin, 'stage-incoming', 'telematics') === A.TELEMATICS_BOARD_VIEW
-    && A.landingView(admin, 'stage-incoming', 'backoffice') === 'submittals' && A.landingView(rep, 'stage-incoming', 'telematics') === 'stage-incoming');
+    && A.landingView(admin, 'stage-incoming', 'backoffice') === A.WORKSPACE_PICKER_VIEW && A.landingView(rep, 'stage-incoming', 'telematics') === 'stage-incoming');
   check('dashboards: every view belongs to the right one', A.workspaceOfView('stage-working') === 'leads' && A.workspaceOfView('todo') === 'leads' && A.workspaceOfView('reports') === 'leads'
-    && A.BACK_OFFICE_VIEWS.every(v => A.workspaceOfView(v) === 'backoffice') && A.TELEMATICS_VIEWS.every(v => A.workspaceOfView(v) === 'telematics')
+    && A.BACK_OFFICE_VIEWS.every(v => A.workspaceOfView(v) === 'leads') && !A.canOpenView('finance', admin, []) && A.TELEMATICS_VIEWS.every(v => A.workspaceOfView(v) === 'telematics')
     && ['users', 'settings', A.WORKSPACE_PICKER_VIEW].every(v => A.workspaceOfView(v) === null));
   check('dashboards: each opens on a view its users can open', A.WORKSPACES.every(w => [admin].every(u => A.canOpenView(A.workspaceHomeView(w.id, 'stage-incoming'), u, ['reports', 'users', 'settings'])))
-    && A.canOpenView(A.workspaceHomeView('backoffice', 'stage-incoming'), rep, []) && A.canOpenView(A.workspaceHomeView('telematics', 'stage-incoming'), tele, []));
-  check('dashboards: the picker only with a choice to make', A.canOpenView(A.WORKSPACE_PICKER_VIEW, admin, []) && A.canOpenView(A.WORKSPACE_PICKER_VIEW, rep, []) && !A.canOpenView(A.WORKSPACE_PICKER_VIEW, tele, []));
-  check('app: the sidebar groups are tagged with a dashboard', /\{ ws: 'telematics', title: 'Customer Asset Management'/.test(app) && /\{ ws: 'backoffice', title: 'Back Office'/.test(app) && /\{ ws: '\*', title: 'Admin'/.test(app));
+    && A.canOpenView(A.workspaceHomeView('telematics', 'stage-incoming'), tele, []));
+  check('dashboards: the picker only with a choice to make', A.canOpenView(A.WORKSPACE_PICKER_VIEW, admin, []) && !A.canOpenView(A.WORKSPACE_PICKER_VIEW, rep, []) && !A.canOpenView(A.WORKSPACE_PICKER_VIEW, tele, []));
+  check('app: the sidebar groups are tagged with a dashboard', /\{ ws: 'telematics', title: 'Customer Asset Management'/.test(app) && !/ws: 'backoffice'/.test(app) && /\{ ws: '\*', title: 'Admin'/.test(app));
 }
 
 /* ---------- Telematics dashboard: the numbers (Nov 2026) ---------- */
@@ -1305,6 +1305,47 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
 check('fonts: app-wide scale, bracket selectors escaped for the template string',
   /\n\s*\.text-sm \{ font-size: 15\.5px/.test(app) && app.includes('.text-\\\\[11px\\\\] { font-size: 12.5px; }')
   && !/[^\\]\\\[1[01]px\\\]/.test(app.split('@media print')[0].split('const FontStyles')[1] || '') && !app.includes('lmt-readable'));
+
+/* ---------- Derek's first-phase changes (Nov 25, 2026) ---------- */
+{
+  const T = await import('../src/lib/todo.js');
+  const now = Date.parse('2026-11-25T15:00:00'); const D = 86400e3;
+  const at = (d) => new Date(now - d * D).toISOString();
+  const today = T.ymd(now);
+  const base = { assignedTo: 'r1', customerName: 'X' };
+  const due = (l, cfg = null) => { const c = T.cadenceDue(l, cfg); return c ? Math.round((c.dueAt - Date.parse(l._from)) / D) : null; };
+  check('cadence: kinds', T.cadenceKind({ status: 'Working', temperature: 'Hot' }) === 'hot' && T.cadenceKind({ status: 'Pending', temperature: 'Cold' }) === 'cold'
+    && T.cadenceKind({ status: 'Working' }) === 'warm' && T.cadenceKind({ status: 'Prospect' }) === 'prospect' && T.cadenceKind({ status: 'Wanted' }) === null && T.cadenceKind({ status: 'New' }) === null);
+  check('cadence: Hot = the next day, then weekly', due({ ...base, status: 'Working', temperature: 'Hot', temperatureSetAt: at(3), _from: at(3) }) === 1
+    && due({ ...base, status: 'Working', temperature: 'Hot', temperatureSetAt: at(3), followUpDoneAt: at(1), _from: at(1) }) === 7);
+  check('cadence: Warm monthly, Cold 3 months, Prospect 6 months', due({ ...base, status: 'Working', temperature: 'Warm', statusChangedAt: at(5), _from: at(5) }) === 30
+    && due({ ...base, status: 'Working', temperature: 'Cold', statusChangedAt: at(5), _from: at(5) }) === 91 && due({ ...base, status: 'Prospect', statusChangedAt: at(5), _from: at(5) }) === 182);
+  check('cadence: a note restarts the clock', due({ ...base, status: 'Working', temperature: 'Warm', statusChangedAt: at(40), internalComments: [{ timestamp: at(2), text: 'called' }], _from: at(2) }) === 30
+    && due({ ...base, status: 'Working', temperature: 'Warm', statusChangedAt: at(40), internalComments: [{ timestamp: at(2), isSystem: true }], _from: at(40) }) === 30);
+  check('cadence: a date set by hand wins; a switch turns a kind off', T.cadenceDue({ ...base, status: 'Working', temperature: 'Hot', statusChangedAt: at(3), followUp: { date: '2026-12-01' } }) === null
+    && T.cadenceDue({ ...base, status: 'Working', temperature: 'Hot', statusChangedAt: at(3) }, { notifications: { followUpCadence: { hot: false } } }) === null
+    && T.cadenceSettings({}).cold === true);
+  const leads = [
+    { ...base, id: 'h', status: 'Working', temperature: 'Hot', temperatureSetAt: at(2) },
+    { ...base, id: 'w', status: 'Working', temperature: 'Warm', statusChangedAt: at(10) },
+    { ...base, id: 'c', status: 'Pending', temperature: 'Cold', statusChangedAt: at(100) },
+    { ...base, id: 'p', status: 'Prospect', statusChangedAt: at(200) },
+    { ...base, id: 'wa', status: 'Wanted', statusChangedAt: at(400) },
+    { ...base, id: 'n', status: 'New', createdDate: at(0.1) },
+    { id: 'u', status: 'New', customerName: 'Nobody', createdDate: at(2) }
+  ];
+  const mine = T.buildTodos({ leads, repId: 'r1', today, now });
+  const cad = mine.filter(i => i.section === 'cadence').map(i => i.leadId).sort().join(',');
+  check('follow ups: check-ins due — hot, cold, prospect; not warm (10 days) or wanted', cad === 'c,h,p', cad);
+  check('follow ups: a new lead shows the day it comes in', mine.some(i => i.id === 'process:n') && !mine.some(i => i.id === 'process:u'));
+  const adm = T.buildTodos({ leads, repId: 'admin', backOffice: true, today, now });
+  check('follow ups: admins see unassigned new leads to process', adm.some(i => i.id === 'process:u'));
+  check('follow ups: temperature groups', mine.find(i => i.id === 'cadence:h').temp === 'Hot' && mine.find(i => i.id === 'cadence:p').temp === 'Prospect' && T.TEMP_GROUPS.map(g => g.id).join() === 'Hot,Warm,Cold,Prospect,Other');
+  check('app: + New is only New Lead / Sales Submittal / Sales Request', /const NEW_MENU = \[\s*\{ kind: 'lead',[^\]]*kind: 'submittal',[^\]]*kind: 'requests',[^\]]*\];/.test(app) && !/const NEW_MENU = \[[^\]]*kind: 'finance'/.test(app) && !/const NEW_MENU = \[[^\]]*kind: 'tradeIns'/.test(app));
+  check('app: finance off, To Do is Follow Ups, process modal on New leads', /const FINANCE_ENABLED = false;/.test(app) && /label: 'Follow Ups'/.test(app) && /lead\.status === NEW_STATUS && \(\s*<ProcessLeadModal/.test(app));
+  const fn = readFileSync(join(root, 'functions/index.js'), 'utf8');
+  check('emails: daily reminder emails off unless switched on', /if \(notif\.dailyReminderEmails !== true\)/.test(fn));
+}
 
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);

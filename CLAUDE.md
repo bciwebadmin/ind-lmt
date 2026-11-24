@@ -140,10 +140,35 @@ on white. A blind swap in either direction breaks the UI and still builds.
 ## Lead management (Indy only — reworked Oct 2026)
 
 After Indy's process meeting, **Leads, Sales Submittals and Sales Requests are
-three separate processes that can be tied together.** Leads live in five tabs:
+three separate processes that can be tied together.** Leads live in six tabs
+(Derek's first-phase review, Nov 25 2026):
 
-  **New** (New) · **Working** (Working, Pending) · **Prospect** (Prospect, Dead,
-  Unqualified, Lost) · **Wanted** (Wanted) · **Completed** (Completed only)
+  **New** (New) · **Working** (Working) · **Pending Deals** (Pending) ·
+  **Prospect** (Prospect, Dead, Unqualified, Lost) · **Wanted** (Wanted) ·
+  **Completed Deals** (Completed only)
+
+**Derek's first phase (Nov 25 2026)** — he sees the LMT as a quasi-traditional
+CRM: enter leads, follow up to the end, then mine completed customers.
+- **One menu.** Back Office was folded into Lead Management: Follow Ups, then
+  Dashboard, New, Working, Pending Deals, Prospect, Wanted, Trade-Ins, Sales
+  Requests, Sales Submittals, Completed Deals. `WORKSPACES` has no
+  `backoffice`; a rep has no dashboard switcher (one dashboard).
+- **+ New = three big options:** New Lead, New Sales Submittal, New Sales
+  Request (`NEW_MENU`; tall on phones). Trade-ins start from a lead; prospects
+  and wants from their tabs' Add buttons (`STAGE_ADD_ITEMS`).
+- **Finance is hidden** (`FINANCE_ENABLED = false` in App.jsx; `HIDDEN_VIEWS`
+  in access.js): no menu, + New, lead tab, Follow Ups item, Dashboard tile, and
+  no automatic finance deal from financed submittals. Records are kept; flip
+  the flag to bring it back.
+- **Process every New lead.** Opening one shows `ProcessLeadModal`: Hot / Warm /
+  Cold (→ Working with that temperature; asks for a rep if unassigned),
+  Prospect (→ Prospect, with tags), Wanted (→ Wanted, no follow-ups), plus a
+  small Junk link. "Back to the list" leaves it in New. `updateLead` stamps
+  `processedAt` (first move out of New) and `temperatureSetAt`.
+- **Working and Pending Deals need an owner** (`OWNED_STAGES`).
+- **The Working deadline is retired** (no 1–4 week prompt; `getWorkingDeadline`
+  returns null, so Working uses the normal staleness clock). The Hot / Warm /
+  Cold Follow Ups schedule replaced it.
 
 - `src/lib/pipeline.js` is the single source of truth (`PIPELINE_STAGES`). It
   is pure, so `scripts/test-helpers.mjs` imports it directly. A lead's tab is
@@ -175,9 +200,7 @@ three separate processes that can be tied together.** Leads live in five tabs:
   Quick-link chips above every tab, a column with inline select, a filter, a
   picker on the lead page, and the Reports chart. The computed heat score and
   Settings → Scoring were removed (`scoreLead` is still defined, unused).
-- + New offers Lead, **Prospect** and **Want** (Add Lead preset to that
-  status, owned by whoever adds it), Sales Submittal, Sales Request, Trade-In,
-  Finance Deal.
+- + New: see Derek's first phase above (three options).
 - Renamed statuses (`LEGACY_STATUS_RENAMES`): Want→Wanted, Sales Request /
   Sales Submittal→Completed (submittal stays Open), Cancelled→Lost,
   Qualified→Working. Leads still storing an old name are shown under the new
@@ -195,17 +218,29 @@ three separate processes that can be tied together.** Leads live in five tabs:
   Trade-Ins, Finance, **Quotes** (the lead's files — renamed from Files),
   Notes & Activity.
 
-## To Do hub (Oct 2026)
+## Follow Ups (was "To Do"; renamed Nov 25 2026 for Derek)
 
-`src/lib/todo.js` (pure, tested) builds the list; `TodoView` shows it, first
-item in the sidebar with a count. A rep sees items on leads they own (primary):
-**follow-ups due** (`lead.followUp = { date, note }`, set on the lead page —
-Done clears it, Tomorrow / Next week snooze it), **make contact** (in New,
-assigned 12h+), **missing paperwork** (open submittals), **working deadline
-passed**, **30-day check-in** (Completed 30–90 days, until
-`postSaleFollowUpDoneAt`). Admins add a **Back Office** section (open
-submittals, trade-ins awaiting approval, requests due/overdue, finance audit
-flags) and a rep filter (me / every rep / one rep).
+`src/lib/todo.js` (pure, tested) builds the list; `TodoView` shows it (view id
+still `todo`), first item in the sidebar with a count. **No emails** — this is
+where reminders live. A rep sees items on leads they own (primary):
+- **New leads to process** — every New lead, from the day it arrives, every
+  day until it's processed. Admins (Back office on) also see unassigned ones.
+- **Follow-up dates you set** (`lead.followUp = { date, note }` — Done clears
+  it and stamps `followUpDoneAt`; Tomorrow / Next week snooze it).
+- **Check-ins due** — the schedule (`CADENCE`): Hot the next day then weekly,
+  Warm monthly (30 d), Cold every 3 months (91 d), Prospect (status Prospect
+  only) every 6 months (182 d); Wanted, New, done and dead leads none. Working /
+  Pending Deals with no temperature run Warm. Due = last touch + interval
+  (`lastTouchAt`: followUpDoneAt, statusChangedAt, temperatureSetAt,
+  processedAt, createdDate, a person's note); Hot's first is the day after it
+  became hot. A follow-up date set by hand pauses it. Done stamps
+  `followUpDoneAt`. Each kind can be turned off: Settings → Notifications →
+  Follow Ups schedule (`notifications.followUpCadence`; absent = on).
+- **Missing paperwork**, **30-day check-in** (Completed 30–90 days).
+- Admins: Sales Submittals to complete, trade-ins to approve, requests due,
+  and a rep filter. (Finance flags are gone with Finance.)
+- **Sort by** Type or **Hot → Warm → Cold → Prospect** (`TEMP_GROUPS`,
+  remembered per browser).
 
 Sales deal paperwork: `SUBMITTAL_DOCS` — signed purchase agreement, credit
 application (financed deals only), customer ID / tax exemption, delivery /
@@ -213,8 +248,10 @@ warranty forms. Received = a lead attachment with that `docType` (uploaded from
 the checklist on the Sales Submittal tab) or a paper-copy tick
 (`salesRequest.docs[key].receivedAt`).
 
-The morning email (`dailyLeadReminders`) also lists follow-up dates due
-(toggle `notifications.followUpDateRemindersEnabled`).
+The morning email (`dailyLeadReminders`) is **off unless
+`notifications.dailyReminderEmails === true`** (Derek: "no more emails");
+Settings → Notifications → Daily Reminder Emails. New-lead alert emails are
+separate and unchanged.
 
 ## Routing and reminders (Oct 2026)
 
@@ -340,9 +377,10 @@ The lead page is full width (no `max-w-6xl`).
 ## Navigation
 
 **Dashboards (Nov 2026).** The left menu shows one dashboard at a time —
-**Lead Management** (To Do, Dashboard, the five lead tabs, Reports),
-**Back Office** (Sales Submittals, Sales Requests, Finance, Trade-Ins) or
-**Telematics** (Board, Code List, Telematics Settings) — switched from the
+**Lead Management** (Follow Ups, Dashboard, the six lead tabs, Trade-Ins,
+Sales Requests, Sales Submittals, Reports — Back Office was folded in on
+Nov 25 for Derek, so ignore "Back Office" below) or **Customer Asset
+Management** (the telematics boards) — switched from the
 **Dashboard** button at the bottom of the menu. **Admin** (Users, Settings)
 shows under every dashboard. **+ New** (`NEW_MENU` → `handleNew`) shows on
 Lead Management and Back Office; top-bar search is hidden on Telematics.

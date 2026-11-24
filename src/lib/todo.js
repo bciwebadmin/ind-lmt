@@ -1,6 +1,7 @@
 // src/lib/todo.js
 //
-// The To Do hub (Oct 2026): everything that needs someone's attention, worked
+// Follow Ups (was "To Do"; renamed Nov 2026 for Derek): everything that needs
+// someone's attention, worked
 // out from the leads and records the LMT already holds. Pure — no React, no
 // Firebase — so scripts/test-helpers.mjs can import it under plain node.
 //
@@ -9,8 +10,8 @@
 // and finance audit flags.
 
 import {
-  WON_STATUS, NEW_STATUS, WORKING_STATUS, OPEN_REQUEST_STATUSES, tradeInStatus, financeAudit,
-  submittalStatus, SUBMITTAL_OPEN, submittalNeedsFinance
+  WON_STATUS, NEW_STATUS, WORKING_STATUS, PENDING_STATUS, PROSPECT_STATUS, OPEN_REQUEST_STATUSES, tradeInStatus,
+  submittalStatus, SUBMITTAL_OPEN, submittalNeedsFinance, leadTemperature
 } from './pipeline.js';
 
 /* ===================== SALES DEAL PAPERWORK ===================== */
@@ -70,21 +71,96 @@ export function followUpDue(lead, today) {
   return !!(f && f.date && f.date <= today);
 }
 
+/* ===================== FOLLOW-UP SCHEDULE (Derek, Nov 2026) ===================== */
+// Every lead a rep is working gets a check-in on a schedule set by how hot it
+// is — no emails, it shows in Follow Ups:
+//   Hot       the next day, then every week
+//   Warm      once a month
+//   Cold      every 3 months
+//   Prospect  every 6 months
+//   Wanted    none (we don't have it; the list is for reference)
+// Each can be switched off in Settings → Notifications → Follow Ups
+// (config.notifications.followUpCadence = { hot, warm, cold, prospect }; absent = on).
+// The clock restarts whenever someone touches the lead: Done on a follow-up,
+// a note, a status or temperature change. A follow-up date set by hand on
+// the lead takes over until it's done.
+export const CADENCE = [
+  { id: 'hot',      label: 'Hot',      first: 1, every: 7,   hint: 'The next day, then every week' },
+  { id: 'warm',     label: 'Warm',     every: 30,            hint: 'Once a month' },
+  { id: 'cold',     label: 'Cold',     every: 91,            hint: 'Every 3 months' },
+  { id: 'prospect', label: 'Prospect', every: 182,           hint: 'Every 6 months' }
+];
+export function cadenceSettings(config) {
+  const c = (config && config.notifications && config.notifications.followUpCadence) || {};
+  return Object.fromEntries(CADENCE.map(k => [k.id, c[k.id] !== false]));
+}
+
+// Which schedule a lead is on: Working / Pending Deals by temperature (none set
+// = Warm), Prospect status = prospect; everything else (New, Wanted, done,
+// dead…) none.
+export function cadenceKind(lead) {
+  if (!lead) return null;
+  if (lead.status === WORKING_STATUS || lead.status === PENDING_STATUS) {
+    const t = leadTemperature(lead);
+    return t ? t.toLowerCase() : 'warm';
+  }
+  if (lead.status === PROSPECT_STATUS) return 'prospect';
+  return null;
+}
+
+const ms = (v) => { const n = Date.parse(v || ''); return Number.isFinite(n) ? n : 0; };
+// The last time a person did something on the lead.
+function noteTimes(lead) {
+  return (Array.isArray(lead.internalComments) ? lead.internalComments : [])
+    .filter(c => c && !c.isSystem && c.author !== 'system').map(c => ms(c.timestamp));
+}
+export function lastTouchAt(lead) {
+  return Math.max(0, ms(lead.followUpDoneAt), ms(lead.statusChangedAt), ms(lead.temperatureSetAt),
+    ms(lead.processedAt), ms(lead.createdDate), ...noteTimes(lead));
+}
+
+// → { kind, dueAt (ms) } or null.
+export function cadenceDue(lead, config) {
+  const kind = cadenceKind(lead);
+  if (!kind || !cadenceSettings(config)[kind]) return null;
+  if (lead.followUp && lead.followUp.date) return null;      // a date set by hand wins
+  const k = CADENCE.find(c => c.id === kind);
+  const last = lastTouchAt(lead);
+  if (!last) return null;
+  if (k.first) {
+    // Hot: the day after it became hot, unless someone has followed up since.
+    const since = Math.max(ms(lead.temperatureSetAt), ms(lead.processedAt), ms(lead.statusChangedAt), ms(lead.createdDate));
+    const touched = Math.max(ms(lead.followUpDoneAt), ...noteTimes(lead), 0) > since;
+    if (!touched) return { kind, dueAt: since + k.first * DAY };
+  }
+  return { kind, dueAt: last + k.every * DAY };
+}
+
 /* ===================== THE LIST ===================== */
 const leadName = (l) => l.customerName || l.companyName || 'Unnamed lead';
 const isAssignedTo = (l, repId) => repId === '*' ? (l.assignedTo && l.assignedTo !== 'u_1') : l.assignedTo === repId;
 
 export const TODO_SECTIONS = [
-  { id: 'followup',  label: 'Follow-ups due' },
-  { id: 'contact',   label: 'Make contact' },
+  { id: 'process',   label: 'New leads to process' },
+  { id: 'followup',  label: 'Follow-up dates you set' },
+  { id: 'cadence',   label: 'Check-ins due' },
   { id: 'paperwork', label: 'Missing paperwork' },
-  { id: 'deadline',  label: 'Working deadline passed' },
   { id: 'postsale',  label: '30-day check-in' },
   { id: 'submittal', label: 'Sales Submittals to complete', backOffice: true },
   { id: 'tradein',   label: 'Trade-ins to approve',         backOffice: true },
-  { id: 'request',   label: 'Sales Requests due',           backOffice: true },
-  { id: 'finance',   label: 'Finance flags',                backOffice: true }
+  { id: 'request',   label: 'Sales Requests due',           backOffice: true }
 ];
+
+// "Sort by Hot → Warm → Cold → Prospect" (Derek): each item's group.
+export const TEMP_GROUPS = [
+  { id: 'Hot', label: 'Hot' }, { id: 'Warm', label: 'Warm' }, { id: 'Cold', label: 'Cold' },
+  { id: 'Prospect', label: 'Prospect' }, { id: 'Other', label: 'Everything else' }
+];
+export function tempGroupOf(lead) {
+  if (!lead) return 'Other';
+  if (lead.status === PROSPECT_STATUS) return 'Prospect';
+  return leadTemperature(lead) || 'Other';
+}
 
 /**
  * @param {object}   o
@@ -96,32 +172,49 @@ export const TODO_SECTIONS = [
  * @param {number}   o.now         ms
  * @returns {object[]} items: { id, section, title, subtitle, due, overdue, leadId, recordKind, recordId, assignedTo, missing }
  */
-export function buildTodos({ leads = [], records = {}, repId, backOffice = false, today, now = Date.now() }) {
+export function buildTodos({ leads = [], records = {}, repId, backOffice = false, today, now = Date.now(), config = null }) {
   const items = [];
   const live = leads.filter(l => l && l.status !== 'Junk');
+  const comeIn = (l) => {
+    const at = ms(l.createdDate || l.dateSubmitted || l.dateAssigned);
+    const days = at ? Math.floor((now - at) / DAY) : null;
+    return days === null ? '' : days < 1 ? 'Came in today' : `Came in ${days} day${days === 1 ? '' : 's'} ago`;
+  };
+
+  // New leads nobody owns yet: admins (back office on) see them to assign.
+  if (backOffice) {
+    for (const l of live) {
+      if (l.status !== NEW_STATUS || (l.assignedTo && l.assignedTo !== 'u_1')) continue;
+      items.push({ id: `process:${l.id}`, section: 'process', leadId: l.id, assignedTo: null, title: leadName(l), temp: tempGroupOf(l),
+        subtitle: ['Unassigned', l.phone, l.contactEmail].filter(Boolean).join(' · '), due: comeIn(l),
+        overdue: now - ms(l.createdDate || l.dateSubmitted) >= DAY, sortKey: String(ms(l.createdDate || l.dateSubmitted)) });
+    }
+  }
 
   for (const l of live) {
     if (!isAssignedTo(l, repId)) continue;
-    const base = { leadId: l.id, assignedTo: l.assignedTo, title: leadName(l) };
+    const base = { leadId: l.id, assignedTo: l.assignedTo, title: leadName(l), temp: tempGroupOf(l) };
+
+    // Every day until it's processed (Derek): open it and pick Prospect /
+    // Hot / Warm / Cold / Wanted.
+    if (l.status === NEW_STATUS) {
+      items.push({ ...base, id: `process:${l.id}`, section: 'process',
+        subtitle: ['Open it and choose Hot, Warm, Cold, Prospect or Wanted', l.phone].filter(Boolean).join(' · '),
+        due: comeIn(l), overdue: now - ms(l.dateAssigned || l.createdDate) >= DAY, sortKey: String(ms(l.dateAssigned || l.createdDate)) });
+    }
+    const cd = cadenceDue(l, config);
+    if (cd && ymd(cd.dueAt) <= today) {
+      const k = CADENCE.find(c => c.id === cd.kind);
+      const d = ymd(cd.dueAt);
+      items.push({ ...base, id: `cadence:${l.id}`, section: 'cadence', cadence: cd.kind,
+        subtitle: [`${k.label} — ${k.hint.toLowerCase()}`, l.phone].filter(Boolean).join(' · '),
+        due: dueLabel(d, today), overdue: d < today, sortKey: d });
+    }
 
     if (followUpDue(l, today)) {
       items.push({ ...base, id: `followup:${l.id}`, section: 'followup',
         subtitle: l.followUp.note || 'Follow-up date reached', due: dueLabel(l.followUp.date, today),
         overdue: l.followUp.date < today, sortKey: l.followUp.date });
-    }
-    if (l.status === NEW_STATUS) {
-      const at = Date.parse(l.dateAssigned || l.createdDate || '');
-      if (Number.isFinite(at) && now - at >= 12 * 3600e3) {
-        const days = Math.floor((now - at) / DAY);
-        items.push({ ...base, id: `contact:${l.id}`, section: 'contact',
-          subtitle: [l.phone, l.contactEmail].filter(Boolean).join(' · ') || 'No contact details',
-          due: days >= 1 ? `Assigned ${days} day${days === 1 ? '' : 's'} ago` : 'Assigned today', overdue: days >= 1, sortKey: String(at) });
-      }
-    }
-    if (l.status === WORKING_STATUS && l.workingUntil && Date.parse(l.workingUntil) < now) {
-      items.push({ ...base, id: `deadline:${l.id}`, section: 'deadline',
-        subtitle: 'Move it on, or extend the working deadline', due: dueLabel(String(l.workingUntil).slice(0, 10), today),
-        overdue: true, sortKey: l.workingUntil });
     }
     if (l.salesRequest && submittalStatus(l) === SUBMITTAL_OPEN) {
       const missing = missingSubmittalDocs(l);
@@ -165,13 +258,6 @@ export function buildTodos({ leads = [], records = {}, repId, backOffice = false
         assignedTo: r.salesPerson, title: (r.requestTypes || []).join(', ') || 'Sales request',
         subtitle: [r.customerName, r.fromLocation && `${r.fromLocation}${r.toLocation ? ' → ' + r.toLocation : ''}`].filter(Boolean).join(' · '),
         due: dueLabel(r.dateNeeded, today), overdue: r.dateNeeded < today, sortKey: r.dateNeeded });
-    }
-    for (const d of records.finance || []) {
-      const issues = financeAudit(d, today);
-      if (!issues.length) continue;
-      items.push({ id: `finance:${d.id}`, section: 'finance', recordKind: 'finance', recordId: d.id, leadId: d.leadId || null,
-        assignedTo: d.salesPerson, title: d.customerName || d.assetToFinance || 'Finance deal',
-        subtitle: issues.join(' · '), due: '', overdue: true, sortKey: d.dealStatusChangedAt || '' });
     }
   }
 

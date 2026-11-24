@@ -60,6 +60,8 @@ export function canOpenView(view, user, adminOnlyViews = []) {
   // Only useful with more than one dashboard to choose from.
   if (view === 'workspace-picker') return workspacesFor(user).length > 1;
   if (TELEMATICS_VIEWS.includes(view)) return hasTelematicsAccess(user);
+  // Finance is hidden everywhere (Derek, Nov 2026); its records are kept.
+  if (HIDDEN_VIEWS.includes(view)) return false;
   // Everything else is Lead Management.
   return hasLeadAccess(user);
 }
@@ -76,19 +78,21 @@ export function defaultViewFor(user, leadDefaultView) {
 // sign-in; everyone else lands straight in theirs. Users / Settings belong to
 // none — they show under every dashboard for admins.
 export const WORKSPACE_PICKER_VIEW = 'workspace-picker';
+// Back Office was folded into Lead Management (Derek, Nov 2026): one menu with
+// the lead tabs, Trade-Ins, Sales Requests, Sales Submittals and Completed Deals.
 export const WORKSPACES = [
-  { id: 'leads',      label: 'Lead Management', hint: 'New leads through completed deals, To Do and reports' },
-  { id: 'backoffice', label: 'Back Office',     hint: 'Sales submittals, sales requests, finance and trade-ins' },
+  { id: 'leads',      label: 'Lead Management', hint: 'Leads, follow ups, submittals, requests, trade-ins and reports' },
   // Shown as "Customer Asset Management" (Erin, Nov 20); the id stays 'telematics'.
   { id: 'telematics', label: 'Customer Asset Management', hint: 'Fault codes, service due, the code list and follow-ups' }
 ];
-export const BACK_OFFICE_VIEWS = ['submittals', 'requests', 'finance', 'trade-ins'];
+export const BACK_OFFICE_VIEWS = ['submittals', 'requests', 'trade-ins'];
+export const HIDDEN_VIEWS = ['finance'];
 const SHARED_VIEWS = ['users', 'settings', NO_ACCESS_VIEW, WORKSPACE_PICKER_VIEW];
 
 // Which dashboard a view belongs to; null for the shared ones.
 export function workspaceOfView(view) {
   if (TELEMATICS_VIEWS.includes(view)) return 'telematics';
-  if (BACK_OFFICE_VIEWS.includes(view)) return 'backoffice';
+  if (BACK_OFFICE_VIEWS.includes(view)) return 'leads';
   if (SHARED_VIEWS.includes(view)) return null;
   return 'leads';
 }
@@ -103,7 +107,6 @@ export function workspacesFor(user) {
 // Where each dashboard opens.
 export function workspaceHomeView(id, leadDefaultView) {
   if (id === 'telematics') return TELEMATICS_BOARD_VIEW;
-  if (id === 'backoffice') return 'submittals';
   return leadDefaultView;
 }
 
