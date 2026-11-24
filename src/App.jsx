@@ -59,6 +59,7 @@ import {
 } from './lib/telematicsStats';
 import { setErrorContext } from './lib/errorReporter';
 import { passwordProblem, newPasswordProblem, changePasswordError } from './lib/password';
+import { caseExportTable, caseExportSheets, exportFileName } from './lib/telematicsExport';
 import { PAGE_SIZE_OPTIONS, DEFAULT_PAGE_SIZE, clampPageSize, pageCount, clampPage, pageOf, pageContaining } from './lib/paging';
 
 import {
@@ -2904,7 +2905,7 @@ export default function BobcatIndyCRM() {
                   cases={telematicsCases === null ? null : telematicsCases.filter(c => caseKind(c) === boardKind)}
                   error={telematicsCasesError} isAdmin={currentUser.role === 'admin'}
                   codesById={telematicsCodesById} codes={telematicsCodes || []}
-                  branches={config.branches || []} currentUser={currentUser}
+                  branches={config.branches || []} currentUser={currentUser} users={users}
                   settings={telematicsSettings} wipReceivedAt={telematicsWipReceivedAt}
                   onOpen={(c) => setSelectedCaseId(c.id)}
                   onAdd={addCase}
@@ -6021,7 +6022,78 @@ function caseOutcomeLine(c) {
 const SERVICE_ROW_STYLE = { bar: 'border-l-amber-500', row: 'bg-white' };
 
 // One board per kind (Nov 19): kind 'fault' = Fault Codes, 'service' = Service Due.
-function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById, codes, branches, currentUser, onOpen, onAdd, settings = null, wipReceivedAt = '' }) {
+// Export (Nov 20, Erin): this view (tab + filters + search, every page) or
+// the whole board (Excel: an "All" sheet plus one per tab), as Excel or CSV.
+function downloadCaseExport({ kind, scope, format, cases, codesById, users }) {
+  const names = Object.fromEntries((users || []).map(u => [u.id, u.name || u.email || '']));
+  const opts = {
+    codesById,
+    userName: (id) => names[id] || '',
+    caseUrl: (id) => { try { const u = new URL(window.location.origin); u.searchParams.set('case', id); return u.toString(); } catch { return ''; } }
+  };
+  const file = exportFileName(kind, scope.label, format);
+  if (format === 'csv') {
+    const t = caseExportTable(cases, kind, opts);
+    const csv = Papa.unparse({ fields: t.headers, data: t.rows });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = file;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    return;
+  }
+  const wb = XLSX.utils.book_new();
+  const sheets = scope.all ? caseExportSheets(cases, kind, opts) : [{ name: scope.label.slice(0, 31) || 'Cases', ...caseExportTable(cases, kind, opts) }];
+  for (const sh of sheets) {
+    const ws = XLSX.utils.aoa_to_sheet([sh.headers, ...sh.rows]);
+    ws['!cols'] = sh.headers.map(h => ({ wch: Math.min(40, Math.max(10, h.length + 2)) }));
+    XLSX.utils.book_append_sheet(wb, ws, sh.name.replace(/[\\/?*[\]:]/g, ' ').slice(0, 31));
+  }
+  XLSX.writeFile(wb, file);
+}
+
+function CaseExportMenu({ kind, viewCases, viewLabel, allCases, codesById, users }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  const board = kind === 'service' ? 'Service Due' : 'Fault Codes';
+  const go = (scope, format) => { setOpen(false); downloadCaseExport({ kind, scope, format, cases: scope.all ? allCases : viewCases, codesById, users }); };
+  const item = (label, sub, scope, format, n) => (
+    <button type="button" role="menuitem" disabled={!n} onClick={() => go(scope, format)}
+      className="w-full text-left px-3 py-2 hover:bg-stone-50 disabled:opacity-40 disabled:hover:bg-white">
+      <div className="text-sm font-medium text-stone-900">{label}</div>
+      <div className="text-[11px] text-stone-500">{sub}</div>
+    </button>
+  );
+  return (
+    <div className="relative" ref={ref}>
+      <button type="button" onClick={() => setOpen(o => !o)} aria-haspopup="menu" aria-expanded={open}
+        className="w-full sm:w-auto px-3 py-2 border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-sm font-semibold rounded-md flex items-center justify-center gap-1.5">
+        <Download size={14}/> Export
+      </button>
+      {open && (
+        <div role="menu" className="absolute right-0 mt-1 w-72 bg-white border border-stone-200 rounded-lg shadow-lg z-30 py-1 divide-y divide-stone-100">
+          <div>
+            {item(`This view — Excel`, `${viewLabel} · ${viewCases.length} case${viewCases.length === 1 ? '' : 's'}, every page`, { label: viewLabel }, 'xlsx', viewCases.length)}
+            {item(`This view — CSV`, `${viewLabel} · ${viewCases.length} case${viewCases.length === 1 ? '' : 's'}`, { label: viewLabel }, 'csv', viewCases.length)}
+          </div>
+          <div>
+            {item(`All of ${board} — Excel`, `${allCases.length} cases · a sheet for each tab (New, Working, Sent On, Completed, Archive)`, { label: 'all', all: true }, 'xlsx', allCases.length)}
+            {item(`All of ${board} — CSV`, `${allCases.length} cases · one file, with a Tab column`, { label: 'all', all: true }, 'csv', allCases.length)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById, codes, branches, currentUser, users = [], onOpen, onAdd, settings = null, wipReceivedAt = '' }) {
   const isService = kind === 'service';
   const [tab, setTab] = useState('new');
   const [archiveFilter, setArchiveFilter] = useState('all');
@@ -6075,6 +6147,10 @@ function TelematicsBoardView({ kind = 'fault', cases, error, isAdmin, codesById,
           <input value={q} onChange={e => setQ(e.target.value)} placeholder={isService ? 'Search customer, serial, model, interval, phone…' : 'Search customer, serial, model, code, phone…'}
             className="w-full pl-8 pr-3 py-2 border border-stone-200 rounded-md text-sm bg-white"/>
         </div>
+        <CaseExportMenu kind={kind} codesById={codesById} users={users} allCases={list}
+          viewCases={rows}
+          viewLabel={[CASE_TABS.find(t => t.id === tab).label, tab === 'archive' && archiveFilter !== 'all' ? archiveFilter : '',
+            !isService && levelFilter !== 'all' ? codeLevelLabel(levelFilter) : '', branchFilter !== 'All' ? branchFilter : '', q ? 'search' : ''].filter(Boolean).join(' · ')}/>
         <button onClick={() => setAdding(true)}
           className="px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md flex items-center justify-center gap-1.5">
           <Plus size={14}/> Add case
