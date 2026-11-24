@@ -1347,6 +1347,9 @@ check('fonts: app-wide scale, bracket selectors escaped for the template string'
   check('emails: daily reminder emails off unless switched on', /if \(notif\.dailyReminderEmails !== true\)/.test(fn));
 }
 
+check('menu: Dashboard section, Lead Management expands to the five tabs, Reports under Admin', /\{ ws: 'leads', title: 'Dashboard', items: \[\s*\{ id: 'lead-management', label: 'Lead Management'/.test(app)
+  && /\{ ws: '\*', title: 'Admin', items: \[[^\]]*id: 'reports'/.test(app) && !/\{ id: HOME_VIEW, label: 'Dashboard'/.test(app));
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

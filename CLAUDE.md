@@ -149,9 +149,14 @@ three separate processes that can be tied together.** Leads live in six tabs
 
 **Derek's first phase (Nov 25 2026)** — he sees the LMT as a quasi-traditional
 CRM: enter leads, follow up to the end, then mine completed customers.
-- **One menu.** Back Office was folded into Lead Management: Follow Ups, then
-  Dashboard, New, Working, Pending Deals, Prospect, Wanted, Trade-Ins, Sales
-  Requests, Sales Submittals, Completed Deals. `WORKSPACES` has no
+- **One menu** (Back Office folded in). Derek's layout (Nov 25): + New ·
+  Follow Ups · *line* · **Dashboard** heading: **Lead Management** (expands to
+  New, Working, Pending Deals, Prospect, Wanted — open by default, remembered
+  in `localStorage['lmt.navLeadsOpen']`, always open while one of those tabs
+  shows), Trade-Ins, Sales Requests, Sales Submittals, Completed Deals · *line*
+  · **Admin**: Reports, Users, Settings. The old Dashboard overview item is
+  gone (the view still answers `?view=home`). Sidebar items may carry
+  `children` (the expander); groups are separated by a rule. `WORKSPACES` has no
   `backoffice`; a rep has no dashboard switcher (one dashboard).
 - **+ New = three big options:** New Lead, New Sales Submittal, New Sales
   Request (`NEW_MENU`; tall on phones). Trade-ins start from a lead; prospects

@@ -3407,16 +3407,18 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
     { ws: 'leads', title: null, items: [
       { id: 'todo', label: 'Follow Ups', icon: CheckCircle2, badge: todoCount, badgeAccent: todoCount > 0 }
     ] },
-    // One menu (Derek, Nov 2026): the lead tabs, then Trade-Ins, Sales Requests,
-    // Sales Submittals, and Completed Deals last.
-    { ws: 'leads', title: 'Lead Management', items: [
-      { id: HOME_VIEW, label: 'Dashboard', icon: LayoutDashboard },
-      ...PIPELINE_STAGES.filter(s => s.id !== STAGE_COMPLETED).map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id], indent: true })),
-      { id: 'trade-ins', label: userRole === 'admin' ? 'Trade-In Approvals' : 'Trade-Ins', icon: RefreshCw, badge: backOfficeCounts.tradeIns, indent: true },
-      { id: 'requests',  label: 'Sales Requests',     icon: Send,          badge: backOfficeCounts.requests, indent: true },
-      { id: 'submittals', label: 'Sales Submittals',  icon: ClipboardList, badge: backOfficeCounts.submittals, indent: true },
-      ...PIPELINE_STAGES.filter(s => s.id === STAGE_COMPLETED).map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id], indent: true })),
-      ...(FINANCE_ENABLED ? [{ id: 'finance', label: 'Finance', icon: Briefcase, badge: backOfficeCounts.finance, indent: true }] : [])
+    // "Dashboard" section (Derek, Nov 2026): Lead Management opens to the five
+    // working tabs, then Trade-Ins, Sales Requests, Sales Submittals and
+    // Completed Deals. (The old Dashboard overview item was removed; the view
+    // still answers ?view=home.)
+    { ws: 'leads', title: 'Dashboard', items: [
+      { id: 'lead-management', label: 'Lead Management', icon: LayoutDashboard,
+        children: PIPELINE_STAGES.filter(s => s.id !== STAGE_COMPLETED).map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id] })) },
+      { id: 'trade-ins', label: userRole === 'admin' ? 'Trade-In Approvals' : 'Trade-Ins', icon: RefreshCw, badge: backOfficeCounts.tradeIns },
+      { id: 'requests',  label: 'Sales Requests',     icon: Send,          badge: backOfficeCounts.requests },
+      { id: 'submittals', label: 'Sales Submittals',  icon: ClipboardList, badge: backOfficeCounts.submittals },
+      ...PIPELINE_STAGES.filter(s => s.id === STAGE_COMPLETED).map(s => ({ id: s.view, label: s.label, icon: STAGE_ICONS[s.id], badge: stageCounts[s.id] })),
+      ...(FINANCE_ENABLED ? [{ id: 'finance', label: 'Finance', icon: Briefcase, badge: backOfficeCounts.finance }] : [])
     ] },
     // A separate module (CLAUDE.md → "Telematics"); only shown to people with
     // telematics access.
@@ -3427,18 +3429,24 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
       { id: TELEMATICS_CODES_VIEW, label: 'Code List', icon: ClipboardList },
       { id: TELEMATICS_SETTINGS_VIEW, label: 'Telematics Settings', icon: SettingsIcon }
     ] },
-    { ws: 'leads', title: null, items: [
-      { id: 'reports',   label: 'Reports',            icon: BarChart3 }
-    ] },
     { ws: '*', title: 'Admin', items: [
+      // Reports moved under Admin (Derek, Nov 2026) — lead reports; shown on the lead dashboard only.
+      ...(workspace === 'leads' ? [{ id: 'reports', label: 'Reports', icon: BarChart3 }] : []),
       { id: 'users',     label: 'Users',              icon: UsersIcon, badge: pendingCount, badgeAccent: pendingCount > 0 },
       { id: 'settings',  label: 'Settings',           icon: SettingsIcon }
     ] }
   ].filter(g => g.ws === '*' || (!picking && g.ws === workspace))
-   .map(g => ({ ...g, items: g.items.filter(i => canAccessView(i.id, user)) }))
+   .map(g => ({ ...g, items: g.items
+      .map(i => (i.children ? { ...i, children: i.children.filter(c => canAccessView(c.id, user)) } : i))
+      .filter(i => (i.children ? i.children.length > 0 : canAccessView(i.id, user))) }))
    .filter(g => g.items.length);
   const current = WORKSPACES.find(w => w.id === workspace) || WORKSPACES[0];
   const WS_ICON = { leads: LayoutDashboard, backoffice: ClipboardList, telematics: Activity };
+
+  // Lead Management opens and closes; open by default, and always open while
+  // one of its tabs is showing. Remembered per browser.
+  const [leadsOpen, setLeadsOpen] = useState(() => { try { return localStorage.getItem('lmt.navLeadsOpen') !== '0'; } catch { return true; } });
+  const toggleLeads = () => setLeadsOpen(o => { try { localStorage.setItem('lmt.navLeadsOpen', o ? '0' : '1'); } catch { /* storage blocked */ } return !o; });
 
   const handleNav = (id) => {
     setView(id);
@@ -3517,13 +3525,47 @@ function Sidebar({ view, setView, stageCounts = {}, backOfficeCounts = {}, user,
 
         <nav className="flex-1 px-3 py-3 overflow-y-auto scrollbar-thin">
           {groups.map((g, gi) => (
-            <div key={g.title || gi} className={gi ? 'mt-4' : ''}>
+            <div key={g.title || gi} className={gi ? 'mt-3 pt-3 border-t border-stone-700' : ''}>
               {g.title && (
                 <div className="px-3 pb-1.5 text-[10px] uppercase tracking-[0.15em] font-semibold text-stone-500">{g.title}</div>
               )}
               <div className="space-y-0.5">
                 {g.items.map(item => {
                   const Icon = item.icon;
+                  if (item.children) {
+                    const inside = item.children.some(c => c.id === view);
+                    const open = leadsOpen || inside;
+                    const total = item.children.reduce((n, c) => n + (c.badge || 0), 0);
+                    return (
+                      <div key={item.id}>
+                        <button type="button" onClick={toggleLeads} aria-expanded={open}
+                          className={`w-full flex items-center gap-3 px-3 py-2.5 md:py-2 rounded-md text-sm font-medium transition-colors ${
+                            inside && !open ? 'bg-stone-800 text-white' : 'text-stone-300 hover:text-white hover:bg-stone-800/50'}`}>
+                          <Icon size={16} className={inside ? 'text-brand-500' : ''}/>
+                          <span className="flex-1 text-left">{item.label}</span>
+                          {!open && total > 0 && <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-stone-800">{total}</span>}
+                          <ChevronDown size={14} className={`text-stone-500 transition-transform ${open ? '' : '-rotate-90'}`}/>
+                        </button>
+                        {open && (
+                          <div className="space-y-0.5 mt-0.5">
+                            {item.children.map(c => {
+                              const CIcon = c.icon;
+                              const cActive = view === c.id;
+                              return (
+                                <button key={c.id} onClick={() => handleNav(c.id)} aria-current={cActive ? 'page' : undefined}
+                                  className={`w-full flex items-center gap-3 pl-8 pr-3 py-2.5 md:py-2 rounded-md text-sm font-medium transition-colors ${
+                                    cActive ? 'bg-stone-800 text-white' : 'text-stone-400 hover:text-white hover:bg-stone-800/50'}`}>
+                                  <CIcon size={15} className={cActive ? 'text-brand-500' : ''}/>
+                                  <span className="flex-1 text-left">{c.label}</span>
+                                  {c.badge > 0 && <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-stone-800">{c.badge}</span>}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
                   const active = view === item.id;
                   return (
                     <button key={item.id} onClick={() => handleNav(item.id)} aria-current={active ? 'page' : undefined}
