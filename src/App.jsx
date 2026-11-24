@@ -2571,6 +2571,28 @@ export default function BobcatIndyCRM() {
       .font-display { font-family: 'Saira Condensed', sans-serif; letter-spacing: 0.02em; }
       .font-mono { font-family: 'JetBrains Mono', monospace; }
       .scrollbar-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+      /* Easy-read forms on phones (Nov 24 — "all white and small font; some of
+         us use readers"). Add a lead uses it: bigger, darker labels and text,
+         filled fields with real borders, 17px inputs (also stops iOS zooming
+         in on focus), roomier spacing and a full-width Save. Desktop unchanged. */
+      @media (max-width: 767px) {
+        .lmt-easyread .lmt-easyread-card { background: #fafaf9; border-color: #d6d3d1; padding: 18px 16px; }
+        .lmt-easyread .grid { row-gap: 22px; }
+        .lmt-easyread label, .lmt-easyread label.text-stone-500 { font-size: 14px; letter-spacing: 0.03em; color: #292524; font-weight: 700; margin-bottom: 8px; }
+        .lmt-easyread input:not([type=checkbox]):not([type=radio]), .lmt-easyread select, .lmt-easyread textarea {
+          font-size: 17px; line-height: 1.4; padding: 12px 14px; min-height: 50px;
+          background: #ffffff; color: #1c1917; border: 1.5px solid #a8a29e; border-radius: 8px;
+        }
+        .lmt-easyread input:focus, .lmt-easyread select:focus, .lmt-easyread textarea:focus {
+          border-color: #d62b00; box-shadow: 0 0 0 3px rgba(214, 43, 0, 0.18); outline: none;
+        }
+        .lmt-easyread ::placeholder { color: #78716c; opacity: 1; }
+        .lmt-easyread .text-xs, .lmt-easyread .text-\[11px\], .lmt-easyread .text-\[10px\] { font-size: 14px; line-height: 1.45; }
+        .lmt-easyread .text-sm { font-size: 16px; }
+        .lmt-easyread .text-stone-400, .lmt-easyread .text-stone-500 { color: #57534e; }
+        .lmt-easyread button { font-size: 16px; }
+        .lmt-easyread .lmt-easyread-save { width: 100%; justify-content: center; padding: 14px; font-size: 18px; }
+      }
       .scrollbar-thin::-webkit-scrollbar-thumb { background: #d6d3d1; border-radius: 4px; }
       .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
       @keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
@@ -5526,8 +5548,8 @@ function AddLeadView({ config, onAdd, currentUser, preset = null }) {
   };
 
   return (
-    <div className="max-w-3xl">
-      <div className="bg-white border border-stone-200 rounded-lg p-4 md:p-6">
+    <div className="max-w-3xl lmt-easyread">
+      <div className="lmt-easyread-card bg-white border border-stone-200 rounded-lg p-4 md:p-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Field label="Customer Name" required error={errors.customerName}>
             <input type="text" value={form.customerName} onChange={e => update('customerName', e.target.value)}
@@ -5661,7 +5683,7 @@ function AddLeadView({ config, onAdd, currentUser, preset = null }) {
 
         <div className="mt-6 flex items-center justify-end gap-2 pt-4 border-t border-stone-100">
           <button onClick={handleSubmit}
-            className="px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md transition-colors flex items-center gap-2">
+            className="lmt-easyread-save px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold rounded-md transition-colors flex items-center gap-2">
             <Plus size={15}/> Save Lead
           </button>
         </div>

@@ -319,6 +319,15 @@ A new list must use `usePaged` — a test counts the pagers. Not paged on
 purpose: Reports / Telematics Report tables (top-N summaries), To Do, Users,
 the CSV import preview, a lead's own record tabs.
 
+## Easy-read forms on phones (Nov 2026)
+
+Add a lead on a phone was "all white and small" (reps use readers). The
+`lmt-easyread` class (CSS in `FontStyles`, `@media (max-width: 767px)` only)
+gives darker 14px labels, 17px inputs with real borders (17px also stops iOS
+zooming in), a tinted card, bigger help text and a full-width Save
+(`lmt-easyread-save`). Desktop is unchanged. Put the class on any other form
+that needs the same treatment.
+
 ## Navigation
 
 **Dashboards (Nov 2026).** The left menu shows one dashboard at a time —
