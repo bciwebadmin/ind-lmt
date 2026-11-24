@@ -299,6 +299,12 @@ not code. Browser stacks are minified — `scripts/map-stack.mjs` maps them to
 Keep `PROBES` in step with the `onCall`/`onRequest` exports — a test fails if
 one is added without a probe or with the wrong region.
 
+**Every function must list the secrets it reads** (`secrets: [...]`),
+including ones read by the helpers it calls — an undeclared secret is empty
+at runtime. `intake` read `RESEND_API_KEY` for the resubmission email without
+listing it, so that email failed with "Missing API key" (incident / issue #3,
+fixed Nov 23). A test walks each export and the top-level functions it calls.
+
 ## Lists show at most 50 rows a page (Nov 2026, Erin)
 
 Every list is paged: Leads (all tabs, Junk), Archived leads, Fault Codes,
@@ -584,6 +590,13 @@ tiers, destinations, hand-off emails (done)** · **3. email intake (done)** ·
     Talked / Voicemail / No answer / Wrong number" + optional note; the last 5
     calls are listed there, and every call also shows in Notes & activity → a note with `call: { result }` (`callEntry`). Moves New
     → Working, counts as first response, shows in the hand-off email.
+  - **Export** (both boards, the Export button by Add case): *This view*
+    (tab + filters + search, every page) or *All of the board*, as Excel or
+    CSV. Excel "All" = an All sheet + one per non-empty tab; CSV = one file
+    with a Tab column. Columns and order in `src/lib/telematicsExport.js`
+    (pure, tested; fault boards add Code / Level / Repeat / Summary, service
+    adds Interval / Kit). Dates in Indy time; a Link column opens the case.
+    Files: `ind-fault-codes-<scope>-<date>` / `ind-service-due-<scope>-<date>`.
   - Code summaries from Tanner's log were HTML-escaped (`&quot;`): fixed in
     the seed, and `cleanCodeDoc` cleans saved ones as they're read.
 - **Colour coding** — red = Critical, blue = Non-critical, grey = Ignore

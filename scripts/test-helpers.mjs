@@ -1231,6 +1231,75 @@ console.log(`  routing grid: ${branches.length} branches x ${depts.length} depar
   check('rename: the dashboard is Customer Asset Management', A.WORKSPACES.find(w => w.id === 'telematics').label === 'Customer Asset Management');
 }
 
+/* ---------- Fault Codes / Service Due export (Nov 20, 2026) ---------- */
+{
+  const E = await import('../src/lib/telematicsExport.js');
+  const codes = { M0117: { code: 'M0117', level: 'noncritical', reviewed: true } };
+  const cases = [
+    { id: 'a', status: 'new', serial: 'B4SB1', model: 'T66', branch: 'Indy', customer: { name: 'A Co', phone: '317' }, fault: { code: 'M0217', summary: 'Filter', startAt: '2026-11-20T15:00:00Z' }, createdAt: '2026-11-20T15:00:00Z', alertCount: 2,
+      notes: [{ id: 'n1', at: '2026-11-20T16:00:00Z', by: 'u1', text: 'vm', call: { result: 'Left a voicemail' } }, { id: 'n2', at: '2026-11-20T17:00:00Z', text: 'x' }] },
+    { id: 'b', status: 'sent', serial: 'B4SB2', fault: { code: 'M0117', startAt: '2026-11-20T18:00:00Z' }, repeatCritical: { seen: 3, days: 3, level: 'noncritical' },
+      outcome: { result: 'won', tier: 'field', destinationName: 'Field Service', sentAt: '2026-11-20T19:00:00Z', sentBy: 'u1' }, followUp: { bumps: 2 } },
+    { id: 'c', status: 'lost', serial: 'B4SB3', fault: { code: 'M0117', startAt: '2026-11-19T18:00:00Z' }, outcome: { result: 'lost', reason: 'Customer declined', note: 'no budget' } },
+    { id: 's', kind: 'service', status: 'completed', serial: 'B4SC1', service: { interval: 1500, dueAt: '2026-11-18T19:12:00Z', kitNumber: '7400001' },
+      outcome: { result: 'won', tier: 'shop', destinationName: 'Indy Service' }, workOrder: { number: 'M1063768', openedOn: '2026-11-19' } }
+  ];
+  const opts = { codesById: codes, userName: (id) => ({ u1: 'Carter' })[id] || '', caseUrl: (id) => `https://lmt/?case=${id}` };
+  const f = E.caseExportTable(cases, 'fault', opts);
+  const col = (t, h) => t.headers.indexOf(h);
+  check('export: fault table only has fault cases, every row as long as the header', f.rows.length === 3 && f.rows.every(r => r.length === f.headers.length) && !f.headers.includes('Interval (hrs)'));
+  check('export: critical first, repeat shown as Critical', f.rows[0][col(f, 'Serial')] === 'B4SB2' && f.rows[0][col(f, 'Level')] === 'Critical' && /3 times in 3 days/.test(f.rows[0][col(f, 'Repeat')])
+    && f.rows[2][col(f, 'Level')] === 'Non-critical');
+  const ra = f.rows.find(r => r[col(f, 'Serial')] === 'B4SB1');
+  check('export: calls, times sent, link, Indy time', ra[col(f, 'Calls')] === 1 && ra[col(f, 'Last call')] === 'Left a voicemail' && ra[col(f, 'Times Bobcat sent it')] === 2
+    && ra[col(f, 'Link')] === 'https://lmt/?case=a' && ra[col(f, 'Fault started')] === '2026-11-20 10:00' && ra[col(f, 'Tab')] === 'New');
+  const rb = f.rows[0];
+  check('export: won to, sent by, reminders', rb[col(f, 'Outcome')] === 'Won' && rb[col(f, 'Won to')] === 'Field Service' && rb[col(f, 'Sent by')] === 'Carter' && rb[col(f, 'Reminders sent')] === 2 && rb[col(f, 'Tab')] === 'Sent On');
+  check('export: lost reason with note', f.rows[2][col(f, 'Lost / closed reason')] === 'Customer declined — no budget');
+  const s = E.caseExportTable(cases, 'service', opts);
+  check('export: service table has interval and kit, no code columns', s.rows.length === 1 && s.headers.includes('Interval (hrs)') && !s.headers.includes('Code')
+    && s.rows[0][col(s, 'Interval (hrs)')] === 1500 && s.rows[0][col(s, 'Kit number')] === '7400001' && s.rows[0][col(s, 'Work order')] === 'M1063768'
+    && s.rows[0][col(s, 'Won to')] === 'Shop (in-house) → Indy Service');
+  const sh = E.caseExportSheets(cases, 'fault', opts);
+  check('export: whole board = All + a sheet per non-empty tab', JSON.stringify(sh.map(x => [x.name, x.rows.length])) === JSON.stringify([['All', 3], ['New', 1], ['Sent On', 1], ['Archive', 1]]));
+  check('export: file names', E.exportFileName('fault', 'New · Critical · Indy', 'xlsx', '2026-11-20T12:00:00Z') === 'ind-fault-codes-new-critical-indy-2026-11-20.xlsx'
+    && E.exportFileName('service', 'all', 'csv', '2026-11-20T12:00:00Z') === 'ind-service-due-all-2026-11-20.csv');
+  check('export: on both boards', (app.match(/<CaseExportMenu /g) || []).length === 1 && /TelematicsBoardView key=\{boardKind\}/.test(app));
+}
+
+/* ---------- Every function declares the secrets it reads (Nov 23, 2026) ---------- */
+// intake read RESEND_API_KEY for the resubmission email without declaring it,
+// so the key was empty in production ("Missing API key"). This walks each
+// export and the top-level helpers it calls.
+{
+  const src = readFileSync(join(root, 'functions/index.js'), 'utf8');
+  const secrets = [...src.matchAll(/^const (\w+)\s*=\s*defineSecret\(/gm)].map(m => m[1]);
+  const chunks = []; let cur = null;
+  src.split('\n').forEach((l, i) => {
+    const m = l.match(/^(?:async\s+)?function\s+(\w+)\s*\(/) || l.match(/^exports\.(\w+)\s*=/);
+    if (m) { cur = { name: m[1], isExport: l.startsWith('exports.'), line: i + 1, text: '' }; chunks.push(cur); }
+    else if (/^\S/.test(l) && !/^[})\]]/.test(l) && cur && !l.startsWith('//')) cur = null;
+    if (cur) cur.text += l + '\n';
+  });
+  const fnNames = new Set(chunks.filter(c => !c.isExport).map(c => c.name));
+  const direct = {}, calls = {};
+  for (const c of chunks) {
+    direct[c.name] = new Set(secrets.filter(s => new RegExp(`\\b${s}\\.value\\(`).test(c.text)));
+    calls[c.name] = new Set([...c.text.matchAll(/\b(\w+)\s*\(/g)].map(m => m[1]).filter(n => fnNames.has(n) && n !== c.name));
+  }
+  const need = (n, seen = new Set()) => {
+    if (seen.has(n)) return new Set(); seen.add(n);
+    const s = new Set(direct[n] || []); for (const k of calls[n] || []) for (const x of need(k, seen)) s.add(x); return s;
+  };
+  const exportsList = chunks.filter(c => c.isExport);
+  const missing = exportsList.map(c => {
+    const listed = new Set(((c.text.match(/secrets:\s*\[([^\]]*)\]/) || [, ''])[1]).split(',').map(x => x.trim()).filter(Boolean));
+    const miss = [...need(c.name)].filter(s => !listed.has(s));
+    return miss.length ? `${c.name} needs ${miss.join(', ')}` : '';
+  }).filter(Boolean);
+  check('secrets: every function lists the secrets it (or its helpers) read', exportsList.length >= 20 && secrets.includes('RESEND_API_KEY') && missing.length === 0, missing.join('; '));
+}
+
 console.log('');
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

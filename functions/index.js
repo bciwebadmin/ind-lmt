@@ -213,8 +213,11 @@ function fmtDateTime(iso) {
 
 /* ===================== INTAKE ENDPOINT ===================== */
 
+// RESEND_API_KEY: the resubmission email to the rep (Nov 23 fix — it was
+// missing, so that email failed with "Missing API key" while the lead itself
+// still linked fine). A test now checks every function's secrets list.
 exports.intake = onRequest(
-  { secrets: [INTAKE_SECRET], cors: true, region: 'us-central1' },
+  { secrets: [INTAKE_SECRET, RESEND_API_KEY], cors: true, region: 'us-central1' },
   async (req, res) => {
     if (req.method !== 'POST') {
       return res.status(405).json({ ok: false, error: 'Method not allowed' });
